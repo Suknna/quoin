@@ -4,7 +4,7 @@
 # Node tooling or an existing frontend dist directory.
 #
 # The component set is the mainline (ADR 0004): frontend, quoin, plinth and
-# stele. Pass QUOIN_IMAGE_COMPONENTS=all to also build otp-test.
+# stele.
 set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
@@ -28,13 +28,12 @@ component_tag() {
 
 IFS=',' read -ra selected <<< "$components"
 for target in "${selected[@]}"; do
-  # otp-test is the test-only OTP delivery receiver used by the disposable
   # e2e-real topology; it is never part of a production component set.
-  case "$target" in frontend|quoin|plinth|stele|otp-test) ;; *) echo "unknown image component: $target" >&2; exit 2;; esac
+  case "$target" in frontend|quoin|plinth|stele) ;; *) echo "unknown image component: $target" >&2; exit 2;; esac
   image="$image_namespace/$target:$(component_tag "$target")"
   dockerfile="deploy/images/$target/Dockerfile"
   arguments=(docker build -f "$dockerfile")
-  if [ "$target" != frontend ] && [ "$target" != otp-test ]; then
+  if [ "$target" != frontend ]; then
     arguments+=(--build-arg "RELEASE_VERSION=$(component_tag "$target")")
   fi
   if [ -n "${QUOIN_IMAGE_GOPROXY:-}" ]; then

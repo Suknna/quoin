@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 
 const adminUsername = process.env.QUOIN_E2E_ADMIN_USERNAME;
-const adminPassword = process.env.QUOIN_E2E_ADMIN_PASSWORD;
+const adminPassword = process.env.QUOIN_E2E_ADMIN_INITIAL_PASSWORD;
 const adminFinalPassword = process.env.QUOIN_E2E_ADMIN_FINAL_PASSWORD;
 
 if (!adminUsername || !adminPassword || !adminFinalPassword) {

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Starts the disposable supported e2e-real topology and prints only non-secret
-# access facts. No administrator is created here: first Quoin startup auto-seeds
-# the pending built-in administrator; the browser initialization runs later
-# through the real web frontend using the public default credentials directly.
-# Test credentials are generated at runtime and written 0600 beneath the
-# ignored artifact tree.
+# access facts. No administrator is created here: first Quoin startup seeds the
+# pending built-in administrator with a randomly generated initial password
+# written to the data volume (ADR-0010); the harness reads that 0600 file and
+# drives the forced password change through the real web frontend. The final
+# test password is generated at runtime and written 0600 beneath the ignored
+# artifact tree.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -13,9 +14,6 @@ port=${QUOIN_E2E_PORT:-8445}
 origin="https://localhost:${port}"
 # Keep #97 separate even when invoked directly rather than through Make.
 if [[ "$runtime_root" == "${repo_root}/.artifacts/e2e-97" ]]; then export QUOIN_E2E_PROJECT=${QUOIN_E2E_PROJECT:-quoin-e2e-97}; fi
-# The OTP receiver runs under the invoking user so its 0600 delivery record
-# stays owned and readable by the browser harness on the host.
-export QUOIN_E2E_OTP_UID=${QUOIN_E2E_OTP_UID:-$(id -u)} QUOIN_E2E_OTP_GID=${QUOIN_E2E_OTP_GID:-$(id -g)}
 compose=(docker compose --project-directory "${repo_root}" --env-file /dev/null -f "${repo_root}/deploy/e2e-real.compose.yaml")
 
 require_command() {
@@ -27,28 +25,6 @@ require_command() {
 require_command docker
 require_command go
 require_command openssl
-
-# ensure_otp_fixture prepares the test OTP receiver's TLS identity and record
-# directory idempotently. The certificate is a dedicated self-signed test
-# certificate whose DNS SAN matches the Compose service name, so Quoin's
-# delivery senders validate TLS normally against the mounted CA copy; no
-# skip-verify exception exists in the product. The receiver runs as the
-# invoking user, so its TLS key and record directory are owned by that user
-# and the 0600 record stays readable by the harness.
-ensure_otp_fixture() {
-	install -d -m 700 "${runtime_root}/fixture/otp-tls" "${runtime_root}/fixture/otp"
-	if [[ ! -s "${runtime_root}/fixture/otp-tls/tls.crt" || ! -s "${runtime_root}/fixture/otp-tls/tls.key" ]] || ! openssl x509 -in "${runtime_root}/fixture/otp-tls/tls.crt" -noout -ext subjectAltName 2>/dev/null | grep -q 'DNS:otpdelivery'; then
-		openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
-			-keyout "${runtime_root}/fixture/otp-tls/tls.key" \
-			-out "${runtime_root}/fixture/otp-tls/tls.crt" \
-			-subj /CN=otpdelivery \
-			-addext 'subjectAltName=DNS:otpdelivery' >/dev/null 2>&1
-	fi
-	sudo chown "$(id -u):$(id -g)" "${runtime_root}/fixture/otp-tls/tls.key" "${runtime_root}/fixture/otp-tls/tls.crt" "${runtime_root}/fixture/otp"
-	chmod 640 "${runtime_root}/fixture/otp-tls/tls.key"
-	chmod 644 "${runtime_root}/fixture/otp-tls/tls.crt"
-	chmod 700 "${runtime_root}/fixture/otp"
-}
 
 if [[ -f "${runtime_root}/credentials.yaml" ]]; then
 	# A running environment is intentionally reused to make browser hand-debugging stable.
@@ -74,9 +50,8 @@ if [[ -f "${runtime_root}/credentials.yaml" ]]; then
 	fi
 	ensure_otp_fixture
 	if "${compose[@]}" ps --status running --services 2>/dev/null | grep -qx gateway; then
-		printf 'QUOIN_E2E_URL=%s\nQUOIN_E2E_RUNTIME=%s\nQUOIN_E2E_CREDENTIALS_FILE=%s\nQUOIN_E2E_OTP_RECORD_FILE=%s\nQUOIN_E2E_OTP_CA_FILE=%s\n' \
-			"$origin" "$runtime_root" "${runtime_root}/credentials.yaml" \
-			"${runtime_root}/fixture/otp/deliveries.jsonl" "${runtime_root}/fixture/otp-tls/tls.crt"
+		printf 'QUOIN_E2E_URL=%s\nQUOIN_E2E_RUNTIME=%s\nQUOIN_E2E_CREDENTIALS_FILE=%s\n' \
+			"$origin" "$runtime_root" "${runtime_root}/credentials.yaml"
 		exit 0
 	fi
 fi
@@ -170,7 +145,7 @@ ensure_otp_fixture
 # Build the real visible services, the unmodified production Plinth adapter and
 # the test-only OTP receiver. Lintel stays out because #102 only proves the
 # Plinth lifecycle.
-QUOIN_IMAGE_COMPONENTS=frontend,quoin,plinth,stele,otp-test bash "${repo_root}/deploy/images/build.sh"
+QUOIN_IMAGE_COMPONENTS=frontend,quoin,plinth,stele bash "${repo_root}/deploy/images/build.sh"
 export QUOIN_E2E_RUNTIME="$runtime_root" QUOIN_E2E_PORT="$port"
 # #97 always uses its own Compose project, so it cannot reuse or disturb an
 # existing #96/#102/manual environment unless a caller explicitly overrides it.
@@ -183,37 +158,25 @@ bash "${repo_root}/scripts/generate-deployment-secrets.sh" "${runtime_root}/secr
 sudo chmod 600 "${runtime_root}/secrets"/*
 sudo chown -R 65532:65532 "${runtime_root}/data" "${runtime_root}/backups" "${runtime_root}/secrets" "${runtime_root}/plinth-state" "${runtime_root}/plinth-workspaces"
 
-# First startup seeds the pending built-in administrator (default credentials
-# admin/admin, unusable beyond initialization). No administrator is created by
-# this script and no install credential exists: the browser drives the unified
-# initialization wizard directly with the default credentials.
+# First startup seeds the pending built-in administrator with a randomly
+# generated initial password (ADR-0010): no public default credential exists.
 "${compose[@]}" up -d --wait --wait-timeout 90
 
-# Materialize the 0600 credentials file for the browser harness. The only
-# generated secret values are the test-only replacement password and the SMTP
-# AUTH value the fixture accepts; the initialization password is the public
-# default. Nothing is echoed to logs or the environment. On a retained run the
-# existing credentials file stays authoritative untouched.
+# Materialize the 0600 credentials file for the browser harness. The initial
+# password comes from the deployment's data volume (kubectl/docker exec read of
+# the same 0600 file the startup log announces); the final test password is
+# generated here. Nothing is echoed to logs or the environment. On a retained
+# run the existing credentials file stays authoritative untouched.
 if [[ ! -s "${runtime_root}/credentials.yaml" ]]; then
 	new_password=$(openssl rand -base64 36 | tr -d '\n' | cut -c1-32)
-	smtp_password=$(openssl rand -base64 24 | tr -d '\n' | cut -c1-24)
+	initial_password=$("${compose[@]}" exec -T quoin cat /var/lib/quoin/data/initial-admin-password | tr -d '\n')
 	cat >"${runtime_root}/credentials.yaml" <<EOF
 url: ${origin}
 username: admin
-defaultPassword: admin
-newPassword: ${new_password}
-contactEmail: admin@quoin.test
-smtpHost: otpdelivery
-smtpPort: "8587"
-smtpUsername: quoin-e2e
-smtpFrom: quoin-e2e@quoin.test
-smtpPassword: ${smtp_password}
-webhookUrl: https://otpdelivery:8445/
-otpCaCertFile: ${runtime_root}/fixture/otp-tls/tls.crt
-otpRecordFile: ${runtime_root}/fixture/otp/deliveries.jsonl
+initialPassword: ${initial_password}
+finalPassword: ${new_password}
 EOF
 	chmod 600 "${runtime_root}/credentials.yaml"
 fi
-printf 'QUOIN_E2E_URL=%s\nQUOIN_E2E_RUNTIME=%s\nQUOIN_E2E_CREDENTIALS_FILE=%s\nQUOIN_E2E_OTP_RECORD_FILE=%s\nQUOIN_E2E_OTP_CA_FILE=%s\nQUOIN_E2E_METRICS_FIXTURE_PROMETHEUS=http://prometheus-fixture:8080\nQUOIN_E2E_METRICS_FIXTURE_THANOS=http://thanos-fixture:8080\n' \
-	"$origin" "$runtime_root" "${runtime_root}/credentials.yaml" \
-	"${runtime_root}/fixture/otp/deliveries.jsonl" "${runtime_root}/fixture/otp-tls/tls.crt"
+printf 'QUOIN_E2E_URL=%s\nQUOIN_E2E_RUNTIME=%s\nQUOIN_E2E_CREDENTIALS_FILE=%s\nQUOIN_E2E_METRICS_FIXTURE_PROMETHEUS=http://prometheus-fixture:8080\nQUOIN_E2E_METRICS_FIXTURE_THANOS=http://thanos-fixture:8080\n' \
+	"$origin" "$runtime_root" "${runtime_root}/credentials.yaml"

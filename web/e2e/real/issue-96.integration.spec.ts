@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 const adminUsername = process.env.QUOIN_E2E_ADMIN_USERNAME;
-const adminPassword = process.env.QUOIN_E2E_ADMIN_PASSWORD;
+const adminPassword = process.env.QUOIN_E2E_ADMIN_INITIAL_PASSWORD;
 const operatorUsername = `operator96${Date.now()}`;
 const operatorPassword = "Operator 96 passphrase 2026!";
 const adminFinalPassword = process.env.QUOIN_E2E_ADMIN_FINAL_PASSWORD;
@@ -24,15 +24,15 @@ async function loginAndSetPassword(
 	await page.getByLabel("密码").fill(temporary);
 	await page.getByRole("button", { name: "登录" }).click();
 	const changePassword = page.getByRole("heading", {
-		name: "先设置你自己的密码",
+		name: "设置你的新密码",
 	});
 	await page.waitForTimeout(300);
 	if (await changePassword.isVisible()) {
-		await page.getByLabel("当前临时密码").fill(temporary);
+		await page.getByRole("textbox", { name: "当前密码" }).fill(temporary);
 		await page
 			.getByRole("textbox", { name: "新密码", exact: true })
 			.fill(final);
-		await page.getByLabel("再次输入新密码").fill(final);
+		await page.getByLabel("确认新密码").fill(final);
 		await page.getByRole("button", { name: "保存并进入工作台" }).click();
 		await expect(changePassword).toHaveCount(0);
 		return;
