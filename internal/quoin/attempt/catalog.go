@@ -80,8 +80,6 @@ type FrozenTool struct {
 var generationAccepts = map[string]map[string]bool{
 	"initial-analysis-v1": {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 	"initial-analysis-v2": {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
-	"investigation-v1":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
-	"investigation-v2":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 	"investigation-v3":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 }
 
@@ -286,7 +284,7 @@ func BuildCatalogs(registry *plugins.Registry, enabledPluginIDs []string) (*Cata
 }
 
 func catalogSchemaVersionFor(agentVersion string) string {
-	if agentVersion == "investigation-v1" || agentVersion == "investigation-v2" || agentVersion == "investigation-v3" {
+	if agentVersion == "investigation-v3" {
 		// The investigation catalog generation keeps its own provenance label
 		// distinct from the initial-analysis one.
 		return "investigation-tools-v3"

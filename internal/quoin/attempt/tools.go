@@ -22,12 +22,6 @@ import (
 // generation while every older identity stays executable.
 const AgentVersion = "initial-analysis-v2"
 
-// PreviousAgentVersion retains the initial-analysis-v1 identity: in-flight
-// analysis attempts still commit under it, it is the legacy inspection alias
-// (the shared generation inspection attempts originally rode), and in-flight
-// knowledge attempts carry it.
-const PreviousAgentVersion = "initial-analysis-v1"
-
 // KnowledgeAgentVersion pins knowledge extraction to its ORIGINAL shared
 // executor identity: the knowledge prompt never evolved with the analysis
 // prompt, so new knowledge attempts keep the original identity and output
@@ -41,14 +35,6 @@ const KnowledgeAgentVersion = "initial-analysis-v1"
 // initial-analysis generation; the dispatch row (inspection_analysis
 // creation) and the worker mode must agree on it exactly.
 const InspectionAgentVersion = "inspection-analysis-v3"
-
-// ReportComplianceInspectionAgentVersion retains the report-compliance
-// inspection prompt generation for already-created attempts.
-const ReportComplianceInspectionAgentVersion = "inspection-analysis-v2"
-
-// PreviousInspectionAgentVersion retains execution compatibility for attempts
-// created with the first dedicated inspection prompt generation.
-const PreviousInspectionAgentVersion = "inspection-analysis-v1"
 
 // ToolSchemaVersion names the fixed callable tool-schema generation of the
 // initial-analysis catalog. Quoin resolves tool names only against a frozen

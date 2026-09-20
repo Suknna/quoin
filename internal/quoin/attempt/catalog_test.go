@@ -44,7 +44,7 @@ func catalogToolNames(t *testing.T, catalogs *Catalogs, agentVersion string) map
 // tools in every agent generation's newly frozen catalog.
 func TestDefaultCatalogsOfferMainlineTools(t *testing.T) {
 	_, catalogs := buildTestCatalogs(t, nil)
-	for _, agentVersion := range []string{AgentVersion, "investigation-v1"} {
+	for _, agentVersion := range []string{AgentVersion, "investigation-v3"} {
 		names := catalogToolNames(t, catalogs, agentVersion)
 		if !names["thanos_query"] || !names["bash"] || !names["artifact_read"] {
 			t.Fatalf("agent %s lost platform or enabled-plugin tools: %v", agentVersion, names)
@@ -58,7 +58,7 @@ func TestEnablementSelectsPluginToolsPerGeneration(t *testing.T) {
 	// PromQL query is a SHARED contract: disabling the thanos plugin does not
 	// remove the query tool while prometheus (same contract) stays enabled.
 	_, catalogs := buildTestCatalogs(t, []string{"prometheus", "alertmanager"})
-	investigation := catalogToolNames(t, catalogs, "investigation-v1")
+	investigation := catalogToolNames(t, catalogs, "investigation-v3")
 	if !investigation["thanos_query"] {
 		t.Fatal("prometheus provider of the shared query tool missing")
 	}
@@ -67,7 +67,7 @@ func TestEnablementSelectsPluginToolsPerGeneration(t *testing.T) {
 	}
 	// Disabling BOTH metrics providers removes the query tool.
 	_, catalogs = buildTestCatalogs(t, []string{"alertmanager"})
-	investigation = catalogToolNames(t, catalogs, "investigation-v1")
+	investigation = catalogToolNames(t, catalogs, "investigation-v3")
 	if investigation["thanos_query"] {
 		t.Fatal("no enabled metrics provider, yet the query tool is offered")
 	}
@@ -77,7 +77,7 @@ func TestEnablementSelectsPluginToolsPerGeneration(t *testing.T) {
 // tools survive; it is distinct from the omitted field's default mainline.
 func TestEmptyWhitelistDisablesPluginToolsOnly(t *testing.T) {
 	_, catalogs := buildTestCatalogs(t, []string{})
-	for _, agentVersion := range []string{AgentVersion, "investigation-v1"} {
+	for _, agentVersion := range []string{AgentVersion, "investigation-v3"} {
 		names := catalogToolNames(t, catalogs, agentVersion)
 		if names["thanos_query"] || names["quoin_browser"] || names["kubernetes_read"] {
 			t.Fatalf("agent %s still offers plugin tools under an empty whitelist: %v", agentVersion, names)
@@ -144,7 +144,7 @@ func TestSharedMetricsToolFollowsEnabledProvider(t *testing.T) {
 // the creation-time catalog renders.
 func TestFrozenCatalogRendersStableBytes(t *testing.T) {
 	_, catalogs := buildTestCatalogs(t, []string{"prometheus", "thanos", "alertmanager"})
-	source, err := catalogs.CatalogFor("investigation-v1")
+	source, err := catalogs.CatalogFor("investigation-v3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestFrozenCatalogRendersStableBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, catalog, err := FrozenCatalogJSONForCreation(catalogs, "investigation-v1")
+	document, catalog, err := FrozenCatalogJSONForCreation(catalogs, "investigation-v3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,12 +179,12 @@ func TestFrozenCatalogRendersStableBytes(t *testing.T) {
 // 冻结文档。
 func TestKeepGenerationCatalogsAssemble(t *testing.T) {
 	_, catalogs := buildTestCatalogs(t, nil)
-	for _, agentVersion := range []string{AgentVersion, PreviousAgentVersion, KnowledgeAgentVersion} {
+	for _, agentVersion := range []string{AgentVersion, KnowledgeAgentVersion} {
 		if _, err := catalogs.CatalogFor(agentVersion); err != nil {
 			t.Fatalf("initial-analysis generation %s has no frozen catalog: %v", agentVersion, err)
 		}
 	}
-	for _, agentVersion := range []string{"investigation-v2", "investigation-v3"} {
+	for _, agentVersion := range []string{"investigation-v3"} {
 		catalog, err := catalogs.CatalogFor(agentVersion)
 		if err != nil {
 			t.Fatalf("investigation generation %s has no frozen catalog: %v", agentVersion, err)

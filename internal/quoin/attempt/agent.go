@@ -943,26 +943,16 @@ func (service *Service) HasSucceededChatCall(ctx context.Context, attemptID int6
 // evolves independently of the initial-analysis prompt, so changing it
 // MUST bump InspectionAgentVersion and this mapping together.
 func promptRendererVersionFor(agentVersion string) string {
-	if agentVersion == "investigation-v3" {
+	switch agentVersion {
+	case "investigation-v3":
 		return "investigation-renderer-v4"
-	}
-	if agentVersion == "investigation-v2" {
-		return "investigation-renderer-v3"
-	}
-	if agentVersion == "investigation-v1" {
-		return "investigation-renderer-v2"
-	}
-	if agentVersion == InspectionAgentVersion {
+	case InspectionAgentVersion:
 		return "inspection-analysis-renderer-v3"
-	}
-	if agentVersion == ReportComplianceInspectionAgentVersion {
-		return "inspection-analysis-renderer-v2"
-	}
-	if agentVersion == PreviousInspectionAgentVersion {
-		return "inspection-analysis-renderer-v1"
-	}
-	if agentVersion == AgentVersion {
+	case AgentVersion:
 		return "initial-analysis-renderer-v5"
+	default:
+		// KnowledgeAgentVersion（initial-analysis-v1，知识提取的固定执行
+		// 身份）沿用原共享 renderer 身份。
+		return "initial-analysis-renderer-v4"
 	}
-	return "initial-analysis-renderer-v4"
 }

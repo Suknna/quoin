@@ -10,7 +10,7 @@ import (
 // catalog. Provider schemas must stay model-facing.
 func TestCatalogExcludesRetiredAndUndeclaredTools(t *testing.T) {
 	catalogs := DefaultCatalogs()
-	for _, agentVersion := range []string{AgentVersion, "investigation-v1"} {
+	for _, agentVersion := range []string{AgentVersion, "investigation-v3"} {
 		catalog, err := catalogs.CatalogFor(agentVersion)
 		if err != nil {
 			t.Fatal(err)
@@ -35,7 +35,7 @@ func TestCatalogExcludesRetiredAndUndeclaredTools(t *testing.T) {
 // assembly, evidence-projecting and grant-routed.
 func TestMetricsObservationRemainsModelCallable(t *testing.T) {
 	catalogs := DefaultCatalogs()
-	catalog, err := catalogs.CatalogFor("investigation-v1")
+	catalog, err := catalogs.CatalogFor("investigation-v3")
 	if err != nil {
 		t.Fatal(err)
 	}

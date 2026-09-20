@@ -41,7 +41,7 @@ func newReconcileFixture(t *testing.T) (*sql.DB, *RuntimeService) {
 	seedQualifiedModelProvider(t, db, now, lease)
 	mustExec(t, db, `INSERT INTO investigations(id,created_at) VALUES(9,?)`, now)
 	mustExec(t, db, `INSERT INTO execution_attempts(id,attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,operation_correlation_id,initiator_type,initiator_id,created_at)
-		VALUES(2,'investigation','investigation',9,'Queued','q','investigation-v1','corr-reconcile-original','user',1,?)`, now)
+		VALUES(2,'investigation','investigation',9,'Queued','q','investigation-v3','corr-reconcile-original','user',1,?)`, now)
 	mustExec(t, db, `INSERT INTO attempt_input_snapshots(id,attempt_id,schema_kind,renderer_version,content_digest,created_at) VALUES(2,2,'investigation_v1','v1',?,?)`, d64, now)
 	mustExec(t, db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,source_material_id) VALUES(2,1,'source',?,1)`, d64)
 	mustExec(t, db, `INSERT INTO attempt_connection_grants(id,attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at) VALUES(3,2,'chat_model',1,1,1,1,?)`, now)
@@ -182,7 +182,7 @@ func TestFreezeRecoveryLossPendingLegacyAttemptUsesFreshIdentity(t *testing.T) {
 	lease := time.Now().UTC().Add(2 * time.Minute).Format(time.RFC3339Nano)
 	mustExec(t, db, `INSERT INTO investigations(id,created_at) VALUES(10,?)`, now)
 	mustExec(t, db, `INSERT INTO execution_attempts(id,attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at)
-		VALUES(3,'investigation','investigation',10,'Queued','q','investigation-v1',?)`, now)
+		VALUES(3,'investigation','investigation',10,'Queued','q','investigation-v3',?)`, now)
 	// The dispatch fence requires the same frozen input and model grant.
 	mustExec(t, db, `INSERT INTO attempt_input_snapshots(id,attempt_id,schema_kind,renderer_version,content_digest,created_at) VALUES(3,3,'investigation_v1','v1',?,?)`, fmt.Sprintf("%064x", 2), now)
 	mustExec(t, db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,source_material_id) VALUES(3,1,'source',?,1)`, fmt.Sprintf("%064x", 2))
