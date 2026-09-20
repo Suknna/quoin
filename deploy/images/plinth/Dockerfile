@@ -21,7 +21,7 @@ ARG TARGETARCH
 ARG RELEASE_VERSION=v0.1.0-dev
 ENV CGO_ENABLED=0
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/Suknna/quoin/internal/buildinfo.Release=${RELEASE_VERSION}" -o /out/plinth ./cmd/plinth && \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/Suknna/quoin/internal/buildinfo.Release=${RELEASE_VERSION}" -o /out/plinth ./cmd/plinth
 FROM ${DEBIAN_REPO}@${DEBIAN_INDEX_DIGEST}
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 ARG TARGETARCH
