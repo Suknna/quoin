@@ -3,8 +3,7 @@ package inspection
 // 插件采集 ResultProposal 收口（ADR-0004）：类型化 proposal 在一个事务中成为
 // Evidence、一个 check result 和 Attempt 的 Succeeded 终态。冻结 SQL 触发器
 // 拥有 Attempt 迁移与运行收口；本文件拥有 envelope 校验、boot/epoch fence、
-// 重放幂等与计划检查目录的身份复核（inspection_run_checks，而非历史
-// config_checks）。
+// 重放幂等与 Run 冻结检查目录（inspection_run_checks）的身份复核。
 
 import (
 	"context"

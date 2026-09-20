@@ -14,9 +14,7 @@ package inspection
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -338,8 +336,7 @@ type CheckResult struct {
 type RunDetail struct {
 	RunID int64  `json:"-"`
 	ID    string `json:"id"`
-	// BusinessSystemKey 仅历史 Run（旧业务声明计划）携带；计划 Run 为空。
-	BusinessSystemKey *string                  `json:"businessSystemKey,omitempty"`
+	// ConnectionName 是 Run 冻结的来源接入显示名（计划 Run 恒有值）。
 	ConnectionName    *string                  `json:"connectionName,omitempty"`
 	PlanKey           string                   `json:"planKey"`
 	State             string                   `json:"state"`
@@ -352,8 +349,8 @@ type RunDetail struct {
 	ReportCount       int                      `json:"reportCount"`
 	AnalysisActive    bool                     `json:"analysisActive"`
 	LatestAnalysis    *InspectionAttemptStatus `json:"latestAnalysis,omitempty"`
-	// FrozenConfig 是 Run 创建时冻结的分析语义投影（名称/检查说明/单位/初始
-	// 报告要求）；仅计划 Run 携带，历史声明 Run 不产生该字段。
+	// FrozenConfig 是 Run 创建时从计划冻结的分析语义投影（名称/检查说明/单位/
+	// 初始报告要求）。
 	FrozenConfig *RunFrozenConfig `json:"frozenConfig,omitempty"`
 }
 
@@ -410,44 +407,17 @@ func mustLocator(id string) int64 {
 	return value
 }
 
-func freezeInput(ctx context.Context, conn execution.Executor, attemptID int64, kind string, body []byte, versionID, contractID int64, now string) error {
-	digest := sha256.Sum256(body)
-	insert, err := conn.ExecContext(ctx, `
-		INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at)
-		VALUES(?,?, 'v1',?,?)`, attemptID, kind, hex.EncodeToString(digest[:]), now)
-	if err != nil {
-		return err
-	}
-	snapshotID, err := insert.LastInsertId()
-	if err != nil {
-		return err
-	}
-	versionDigest := sha256.Sum256([]byte(fmt.Sprintf("business-system-config-version:%d", versionID)))
-	if _, err = conn.ExecContext(ctx, `
-		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id)
-		VALUES(?,1,'config_version',?,?)`, snapshotID, hex.EncodeToString(versionDigest[:]), versionID); err != nil {
-		return err
-	}
-	// New inspection children carry only config-version lineage. contractID stays
-	// in the function signature while historical run rows still reference it.
-	return nil
-}
-
 // convergeOn closes the Run once every configured check has settled:
 // Completed requires all-ok coverage, CompletedWithGaps at least one explicit
-// gap (trg_inspection_runs_result_set_complete re-validates both). Plan runs
-// count their run-frozen catalog; legacy declaration runs keep their
-// config_checks join. It composes inside caller transactions (browser journey
-// closure, technical gaps) and inside runner transactions alike.
+// gap (trg_inspection_runs_result_set_complete re-validates both). The check
+// catalog is the Run's frozen inspection_run_checks set. It composes inside
+// caller transactions (browser journey closure, technical gaps) and inside
+// runner transactions alike.
 func (s *Service) convergeOn(ctx context.Context, tx execution.Executor, runID int64) error {
 	var pending, gaps int
 	err := tx.QueryRowContext(ctx, `
 		SELECT
-		  CASE WHEN r.plan_id IS NOT NULL
-		    THEN (SELECT COUNT(*) FROM inspection_run_checks c WHERE c.run_id=r.id)
-		    ELSE (SELECT COUNT(*) FROM config_checks c JOIN config_plans p ON p.id=c.plan_id
-		          WHERE p.config_version_id=r.config_version_id AND p.plan_key=r.plan_key)
-		  END
+		  (SELECT COUNT(*) FROM inspection_run_checks c WHERE c.run_id=r.id)
 		  - (SELECT COUNT(*) FROM inspection_check_results x WHERE x.run_id=?),
 		  (SELECT COUNT(*) FROM inspection_check_results x WHERE x.run_id=? AND x.status <> 'ok')
 		FROM inspection_runs r WHERE r.id=?`, runID, runID, runID).Scan(&pending, &gaps)
@@ -472,7 +442,6 @@ func (s *Service) convergeOn(ctx context.Context, tx execution.Executor, runID i
 
 type RunSummary struct {
 	ID                string  `json:"id"`
-	BusinessSystemKey *string `json:"businessSystemKey,omitempty"`
 	ConnectionName    *string `json:"connectionName,omitempty"`
 	PlanKey           string  `json:"planKey"`
 	State             string  `json:"state"`

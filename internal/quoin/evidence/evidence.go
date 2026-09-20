@@ -259,15 +259,17 @@ func (service *Service) inspectionProducer(ctx context.Context, attemptID int64)
 	if !errors.Is(pluginErr, sql.ErrNoRows) {
 		return nil, nil, pluginErr
 	}
-	var checkKind string
+	// PromQL 检查的身份来自 Run 冻结的检查行（inspection_run_checks,与
+	// plugin 结果路径同一权威）,声明计划时代的 config_plans 谱系已随首发
+	// 清理删除。
+	var templateID string
 	err := service.reader.QueryRowContext(ctx, `
-		SELECT c.kind
+		SELECT c.template_id
 		FROM execution_attempts a
 		JOIN inspection_runs r ON r.id=a.scope_id
-		JOIN config_plans p ON p.config_version_id=r.config_version_id AND p.plan_key=r.plan_key
-		JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key
-		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check'`, attemptID).Scan(&checkKind)
-	if errors.Is(err, sql.ErrNoRows) || checkKind != "promql" {
+		JOIN inspection_run_checks c ON c.run_id=r.id AND c.check_key=a.check_key
+		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check'`, attemptID).Scan(&templateID)
+	if errors.Is(err, sql.ErrNoRows) || (templateID != "promql_instant" && templateID != "promql_range") {
 		return map[string]any{"kind": "inspection_collection", "attemptId": strconv.FormatInt(attemptID, 10)}, []Conn{}, nil
 	}
 	if err != nil {

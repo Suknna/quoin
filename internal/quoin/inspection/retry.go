@@ -101,9 +101,7 @@ func (s *Service) ReanalyzeRun(ctx context.Context, principalID int64, clientCom
 }
 
 // RerunInspection creates a new manual collection run copying the source
-// run's frozen plan binding (template, params, scope, connection). Legacy
-// declaration runs are history: their producer was removed, so re-collection
-// requires a real plan instead of resurrecting a retired declaration.
+// run's frozen plan binding (template, params, scope, connection).
 func (s *Service) RerunInspection(ctx context.Context, principalID int64, clientCommandID string, sourceRunID int64) (RunDetail, error) {
 	digest := auth.DigestCommand(CommandRerunRun, map[string]any{"runId": sourceRunID})
 	outcome, err := execution.Run(ctx, s.runner, s.rerunRun, execution.Command{
@@ -113,7 +111,7 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 		Digest:          digest,
 	}, func(tx *execution.Tx) (RunDetail, execution.Change, error) {
 		var sourceState string
-		var planID, connectionID sql.NullInt64
+		var planID, connectionID int64
 		var planKey string
 		err := tx.QueryRowContext(ctx, `
 			SELECT r.state, r.plan_id, r.connection_id, r.plan_key
@@ -124,9 +122,6 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 		}
 		if err != nil {
 			return RunDetail{}, execution.Unchanged, err
-		}
-		if !planID.Valid {
-			return RunDetail{}, execution.Unchanged, &execution.Rejection{Code: "legacy_run", Detail: "该 Run 来自历史业务声明计划，不支持重新采证；请创建巡检计划后重试", ObjectID: sourceRunID}
 		}
 		switch sourceState {
 		case "Queued", "Running":
@@ -139,7 +134,7 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 		}
 		var planEnabled, connectionEnabled int
 		err = tx.QueryRowContext(ctx, `
-			SELECT p.enabled, c.enabled FROM inspection_plans p JOIN connections c ON c.id=p.connection_id WHERE p.id=?`, planID.Int64).
+			SELECT p.enabled, c.enabled FROM inspection_plans p JOIN connections c ON c.id=p.connection_id WHERE p.id=?`, planID).
 			Scan(&planEnabled, &connectionEnabled)
 		if err != nil {
 			return RunDetail{}, execution.Unchanged, err
@@ -159,7 +154,7 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 			FROM inspection_runs WHERE id=?`, now, sourceRunID)
 		if err != nil {
 			var active int64
-			_ = tx.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE plan_id=? AND state IN ('Queued','Running')`, planID.Int64).Scan(&active)
+			_ = tx.QueryRowContext(ctx, `SELECT id FROM inspection_runs WHERE plan_id=? AND state IN ('Queued','Running')`, planID).Scan(&active)
 			return RunDetail{}, execution.Unchanged, &execution.Rejection{Code: "active_conflict", Detail: "该巡检计划已有进行中的 Run", ObjectID: active}
 		}
 		runID, err := insert.LastInsertId()

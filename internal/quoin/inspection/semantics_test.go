@@ -442,8 +442,8 @@ func TestRangeWindowFrozenIntoEvidenceAndChecklist(t *testing.T) {
 	}
 }
 
-// oldPlanContext/oldReportInput 逐字段复刻本次变更前的 analysis 输入形状
-// （字段名与顺序一致），用于以真实字节钉住升级边界。
+// oldPlanContext/oldReportInput 逐字段复刻语义冻结之前的 analysis 输入形状
+// （字段名与顺序一致），用于以真实字节钉住旧形状 Attempt 的重建边界。
 type oldPlanContext struct {
 	Key    string         `json:"key"`
 	Params map[string]any `json:"params"`
@@ -455,7 +455,6 @@ type oldReportInput struct {
 	AttemptID          int64   `json:"attemptId"`
 	InspectionRunID    int64   `json:"inspectionRunId"`
 	ReportVersion      int64   `json:"reportVersion"`
-	ConfigVersionID    int64   `json:"configVersionId"`
 	PlanKey            string  `json:"planKey"`
 	EvidenceIDs        []int64 `json:"evidenceIds"`
 	ArtifactIDs        []int64 `json:"artifactIds"`

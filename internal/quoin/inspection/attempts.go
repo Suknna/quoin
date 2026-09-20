@@ -2,7 +2,7 @@ package inspection
 
 // The generic Attempt authority configured to reconstruct the frozen
 // inspection inputs from their immutable projections (RUNTIME-TASK-011):
-// run_check PromQL children rebuild inspection_promql_execution_v1,
+// run_check plugin children rebuild inspection_plugin_execution_v1,
 // report analyses rebuild inspection_analysis_v1.
 
 import (
@@ -33,18 +33,10 @@ func (s *Service) Attempts() *attempt.Service {
 }
 
 // QueuedPromQLAttempts returns supervisor-only run_check collection work:
-// historical declaration PromQL children plus ADR-0004 plan-run plugin
-// collection children (both supervisor-executed, both config_thanos_query
-// granted).
+// the plan-run children frozen in inspection_run_checks (supervisor-executed,
+// config_thanos_query granted).
 func (s *Service) QueuedPromQLAttempts(ctx context.Context) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT a.id FROM execution_attempts a
-		JOIN inspection_runs r ON r.id=a.scope_id
-		JOIN config_plans p ON p.config_version_id=r.config_version_id AND p.plan_key=r.plan_key
-		JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key
-		WHERE a.attempt_type='inspection_collection' AND a.scope_type='run_check'
-		  AND a.state='Queued' AND r.state='Running' AND c.kind='promql'
-		UNION
 		SELECT a.id FROM execution_attempts a
 		JOIN inspection_runs r ON r.id=a.scope_id AND r.plan_id IS NOT NULL
 		JOIN inspection_run_checks c ON c.run_id=r.id AND c.check_key=a.check_key
@@ -101,8 +93,6 @@ func (s *Service) rebuildAttemptInput(ctx context.Context, attemptID int64) ([]b
 	switch schemaKind {
 	case "inspection_plugin_execution_v1":
 		canonical, err = s.rebuildPluginInput(ctx, attemptID)
-	case "inspection_promql_execution_v1":
-		canonical, err = s.rebuildPromQLInput(ctx, attemptID)
 	case "inspection_analysis_v1":
 		canonical, err = s.rebuildAnalysisInput(ctx, attemptID)
 	default:
@@ -120,41 +110,6 @@ func (s *Service) rebuildAttemptInput(ctx context.Context, attemptID int64) ([]b
 		return nil, fmt.Errorf("inspection input digest no longer matches frozen snapshot")
 	}
 	return canonical, nil
-}
-
-func (s *Service) rebuildPromQLInput(ctx context.Context, attemptID int64) ([]byte, error) {
-	var runID int64
-	var checkKey, mode, expression string
-	var rangeSeconds, stepSeconds, grant sql.NullInt64
-	var evidenceAt string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT a.scope_id, a.check_key, c.query_mode, c.expression, c.range_seconds, c.step_seconds,
-		       (SELECT id FROM attempt_connection_grants WHERE attempt_id=a.id AND purpose='config_thanos_query'), r.evidence_at
-		FROM execution_attempts a
-		JOIN inspection_runs r ON r.id=a.scope_id
-		JOIN config_plans p ON p.config_version_id=r.config_version_id AND p.plan_key=r.plan_key
-		JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key
-		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check' AND c.kind='promql'`, attemptID).
-		Scan(&runID, &checkKey, &mode, &expression, &rangeSeconds, &stepSeconds, &grant, &evidenceAt)
-	if err != nil {
-		return nil, err
-	}
-	if !grant.Valid {
-		return nil, fmt.Errorf("attempt %d has no frozen config_thanos_query grant", attemptID)
-	}
-	var rangePointer, stepPointer *int64
-	if rangeSeconds.Valid {
-		rangePointer = &rangeSeconds.Int64
-	}
-	if stepSeconds.Valid {
-		stepPointer = &stepSeconds.Int64
-	}
-	return json.Marshal(map[string]any{
-		"schemaKind": "inspection_promql_execution_v1", "attemptId": attemptID, "inspectionRunId": runID,
-		"checkKey": checkKey, "evidenceAt": evidenceAt,
-		"query":   map[string]any{"mode": mode, "expression": expression, "rangeSeconds": rangePointer, "stepSeconds": stepPointer},
-		"grantId": grant.Int64,
-	})
 }
 
 // rebuildPluginInput deterministically reconstructs a plan-run plugin
@@ -205,23 +160,22 @@ func (s *Service) rebuildPluginInput(ctx context.Context, attemptID int64) ([]by
 }
 
 func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]byte, error) {
-	// 历史 Run 携带声明版本谱系；独立计划 Run（ADR-0004）的 config_version_id
-	// 为 NULL，其模型上下文改由 Run 冻结的计划绑定重建。两条路径必须与各自
+	// 独立计划 Run（ADR-0004）的模型上下文由 Run 冻结的计划绑定重建，必须与
 	// 冻结时的字节逐一致。分析语义（检查说明/单位/报告要求/逐检查项清单）只在
 	// Attempt 存在 inspection_analysis_requirements 行（新快照）时参与重建：
 	// 旧行为无此行，重建字节保持不变；有此行时重建只读 Run 冻结列与本表，绝不
 	// 回读计划当前定义。
 	var runID sql.NullInt64
-	var configVersionID, planID, connectionID sql.NullInt64
+	var connectionID sql.NullInt64
 	var planKey string
 	var reportVersion int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT a.scope_id, r.config_version_id, r.plan_key, r.plan_id, r.connection_id, s.inspection_report_version
+		SELECT a.scope_id, r.plan_key, r.connection_id, s.inspection_report_version
 		FROM execution_attempts a
 		JOIN inspection_runs r ON r.id=a.scope_id
 		JOIN attempt_input_snapshots s ON s.attempt_id=a.id
 		WHERE a.id=? AND a.attempt_type='inspection_analysis' AND a.scope_type='run'`, attemptID).
-		Scan(&runID, &configVersionID, &planKey, &planID, &connectionID, &reportVersion)
+		Scan(&runID, &planKey, &connectionID, &reportVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -295,53 +249,51 @@ func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]
 	}
 	input := reportInput{
 		SchemaKind: reportInputKind, AttemptID: attemptID, InspectionRunID: runID.Int64,
-		ReportVersion: reportVersion, ConfigVersionID: configVersionID.Int64, PlanKey: planKey,
+		ReportVersion: reportVersion, PlanKey: planKey,
 		EvidenceIDs: evidenceIDs, ArtifactIDs: artifactIDs, KnowledgeVersionID: []int64{},
 		ModelContract: reportModelContract{ModelID: modelID, ContextBudgetTokens: contextBudget, MaxOutputTokens: maxOutput},
 	}
 	if hasRequirements && override.Valid {
 		input.ReportInstructionsOverride = &override.String
 	}
-	if planID.Valid {
-		// 计划 Run：与冻结时同一来源重建计划上下文（frozen_params_json /
-		// frozen_scope_json 经相同 decode→marshal 路径，键序确定性一致）。
-		if connectionID.Valid {
-			var connectionName string
-			if err := s.db.QueryRowContext(ctx, `SELECT name FROM connections WHERE id=?`, connectionID.Int64).Scan(&connectionName); err != nil {
-				return nil, err
-			}
-			input.ConnectionName = connectionName
-		}
-		var paramsRaw, scopeRaw, templateID, templateVersion string
-		var checkDescription, metricUnit, reportInstructions sql.NullString
-		if err := s.db.QueryRowContext(ctx, `
-			SELECT frozen_params_json, frozen_scope_json, template_id, template_version,
-			       frozen_check_description, frozen_metric_unit, frozen_report_instructions
-			FROM inspection_runs WHERE id=?`, runID.Int64).
-			Scan(&paramsRaw, &scopeRaw, &templateID, &templateVersion, &checkDescription, &metricUnit, &reportInstructions); err != nil {
+	// 计划 Run：与冻结时同一来源重建计划上下文（frozen_params_json /
+	// frozen_scope_json 经相同 decode→marshal 路径，键序确定性一致）。
+	if connectionID.Valid {
+		var connectionName string
+		if err := s.db.QueryRowContext(ctx, `SELECT name FROM connections WHERE id=?`, connectionID.Int64).Scan(&connectionName); err != nil {
 			return nil, err
 		}
-		params := map[string]any{}
-		_ = json.Unmarshal([]byte(paramsRaw), &params)
-		scope := map[string]any{}
-		_ = json.Unmarshal([]byte(scopeRaw), &scope)
-		input.TemplateID = templateID
-		input.TemplateVersion = templateVersion
-		input.Plan = &planReportContext{Key: planKey, Params: params, Scope: scope}
-		if hasRequirements {
-			if checkDescription.Valid {
-				input.Plan.CheckDescription = &checkDescription.String
-			}
-			if metricUnit.Valid {
-				input.Plan.MetricUnit = &metricUnit.String
-			}
-			if reportInstructions.Valid {
-				input.Plan.ReportInstructions = &reportInstructions.String
-			}
-			input.Checks, err = reportCheckItemsOn(ctx, s.db, runID.Int64)
-			if err != nil {
-				return nil, err
-			}
+		input.ConnectionName = connectionName
+	}
+	var paramsRaw, scopeRaw, templateID, templateVersion string
+	var checkDescription, metricUnit, reportInstructions sql.NullString
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT frozen_params_json, frozen_scope_json, template_id, template_version,
+		       frozen_check_description, frozen_metric_unit, frozen_report_instructions
+		FROM inspection_runs WHERE id=?`, runID.Int64).
+		Scan(&paramsRaw, &scopeRaw, &templateID, &templateVersion, &checkDescription, &metricUnit, &reportInstructions); err != nil {
+		return nil, err
+	}
+	params := map[string]any{}
+	_ = json.Unmarshal([]byte(paramsRaw), &params)
+	scope := map[string]any{}
+	_ = json.Unmarshal([]byte(scopeRaw), &scope)
+	input.TemplateID = templateID
+	input.TemplateVersion = templateVersion
+	input.Plan = &planReportContext{Key: planKey, Params: params, Scope: scope}
+	if hasRequirements {
+		if checkDescription.Valid {
+			input.Plan.CheckDescription = &checkDescription.String
+		}
+		if metricUnit.Valid {
+			input.Plan.MetricUnit = &metricUnit.String
+		}
+		if reportInstructions.Valid {
+			input.Plan.ReportInstructions = &reportInstructions.String
+		}
+		input.Checks, err = reportCheckItemsOn(ctx, s.db, runID.Int64)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return json.Marshal(input)

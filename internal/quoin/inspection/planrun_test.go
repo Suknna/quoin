@@ -55,9 +55,6 @@ func TestNoBusinessRunReport(t *testing.T) {
 	if detail.ConnectionName == nil || *detail.ConnectionName != "fixture-metrics" {
 		t.Fatalf("plan run connection = %v, want fixture-metrics", detail.ConnectionName)
 	}
-	if detail.BusinessSystemKey != nil {
-		t.Fatalf("plan run must not reference a business system, got %q", *detail.BusinessSystemKey)
-	}
 	attemptID := h.promqlAttemptID(t, detail.RunID)
 	var grantPurpose string
 	var revisionID int64

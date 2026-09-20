@@ -747,16 +747,6 @@ CREATE TABLE config_alert_label_conditions (
 ) STRICT;
 
 -- Compiled resource scopes are the execution authority.
--- Durable audit link from immutable predecessor history to its appended
--- canonical successor. It is intentionally append-only alongside the ledger.
-CREATE TABLE legacy_config_version_mappings (
-  id                       INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  legacy_config_version_id INTEGER NOT NULL UNIQUE REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  canonical_config_version_id INTEGER NOT NULL UNIQUE REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  migration_id             TEXT NOT NULL REFERENCES migration_ledger(migration_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  created_at               TEXT NOT NULL
-) STRICT;
-
 CREATE TABLE config_resource_scopes (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   config_version_id    INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -941,15 +931,11 @@ CREATE TABLE inspection_plans (
       OR (scope_kind = 'objects' AND json_valid(scope_json) AND json_type(json_extract(scope_json, '$.objects')) = 'array'))
 ) STRICT;
 
--- 巡检运行：新 Run 由独立计划产生并冻结模板与接入；business_system_id /
--- config_version_id 仅保留给历史 Run（旧业务声明计划），禁止新写入。
+-- 巡检运行：由独立计划产生并冻结模板与接入。
 CREATE TABLE inspection_runs (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  business_system_id        INTEGER REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 历史 Run 专用
   plan_key                  TEXT NOT NULL,
-  config_version_id         INTEGER REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 历史 Run 专用
-  label_contract_version_id INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 历史 Run 专用
-  plan_id                   INTEGER REFERENCES inspection_plans(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 新 Run 必填
+  plan_id                   INTEGER REFERENCES inspection_plans(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- Run 必填
   connection_id             INTEGER REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,     -- 新 Run 冻结的来源接入
   plugin_id                 TEXT,                   -- 新 Run 冻结：插件身份
   template_id               TEXT,                   -- 新 Run 冻结：模板身份
@@ -970,14 +956,12 @@ CREATE TABLE inspection_runs (
   evidence_at               TEXT,                    -- 真正采证开始时生成
   rerun_of_id               INTEGER REFERENCES inspection_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at                TEXT NOT NULL,
-  -- 计划 Run 与历史声明 Run 互斥：不是双写，也不存在两可状态。
+  -- 每个 Run 都冻结一个计划绑定：来源接入、插件/模板身份与冻结参数在创建时
+  -- 定格，计划后续修改不改写已存在 Run。
   CHECK (
-    (plan_id IS NOT NULL AND business_system_id IS NULL AND config_version_id IS NULL AND label_contract_version_id IS NULL
+    plan_id IS NOT NULL
       AND connection_id IS NOT NULL AND plugin_id IS NOT NULL AND template_id IS NOT NULL AND template_version IS NOT NULL
-      AND frozen_params_json IS NOT NULL AND frozen_scope_json IS NOT NULL)
-    OR (plan_id IS NULL AND business_system_id IS NOT NULL AND config_version_id IS NOT NULL
-      AND connection_id IS NULL AND plugin_id IS NULL AND template_id IS NULL AND template_version IS NULL
-      AND frozen_params_json IS NULL AND frozen_scope_json IS NULL)
+      AND frozen_params_json IS NOT NULL AND frozen_scope_json IS NOT NULL
   ),
   CHECK (
     (state IN ('Queued','SkippedOverlap') AND evidence_at IS NULL)
@@ -989,16 +973,15 @@ CREATE TABLE inspection_runs (
     OR (trigger_kind = 'manual' AND scheduled_for IS NULL)
   )
 ) STRICT;
--- COALESCE 键把历史 (business_system_id, plan_key) 与新 (plan_key) 两个身份空间
--- 并入同一唯一索引；历史行仍满足原语义。
-CREATE UNIQUE INDEX ux_inspection_run_scheduled ON inspection_runs (COALESCE(business_system_id,0), plan_key, scheduled_for) WHERE scheduled_for IS NOT NULL;
-CREATE UNIQUE INDEX ux_inspection_run_active ON inspection_runs (COALESCE(business_system_id,0), plan_key)
+-- Run 身份空间统一为 (plan_key)：计划绑定在 Run 创建时冻结，索引不再区分历史
+-- 声明谱系。
+CREATE UNIQUE INDEX ux_inspection_run_scheduled ON inspection_runs (plan_key, scheduled_for) WHERE scheduled_for IS NOT NULL;
+CREATE UNIQUE INDEX ux_inspection_run_active ON inspection_runs (plan_key)
   WHERE state IN ('Queued','Running');
-CREATE INDEX idx_inspection_runs_plan ON inspection_runs (COALESCE(business_system_id,0), plan_key, created_at DESC);
+CREATE INDEX idx_inspection_runs_plan ON inspection_runs (plan_key, created_at DESC);
 CREATE INDEX idx_inspection_runs_plan_id ON inspection_runs (plan_id, created_at DESC);
 
 -- Run 创建时冻结展开的检查目录：执行中不扩大目标，重新采证必须创建新 Run。
--- 历史 Run（plan_id IS NULL）的检查目录仍由 config_checks/config_plans 承载。
 CREATE TABLE inspection_run_checks (
   id            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   run_id        INTEGER NOT NULL REFERENCES inspection_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -2060,12 +2043,6 @@ WHEN NEW.purpose = 'config_thanos_query' AND NOT EXISTS (
       a.scope_type = 'observation_run'
       OR (a.scope_type = 'run_check' AND EXISTS (
         SELECT 1 FROM inspection_runs r
-        JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
-        JOIN config_checks c ON c.plan_id = p.id AND c.check_key = a.check_key
-        WHERE r.id = a.scope_id AND r.state = 'Running' AND c.kind = 'promql'
-      ))
-      OR (a.scope_type = 'run_check' AND EXISTS (
-        SELECT 1 FROM inspection_runs r
         JOIN inspection_run_checks c ON c.run_id = r.id AND c.check_key = a.check_key
         WHERE r.id = a.scope_id AND r.state = 'Running' AND r.plan_id IS NOT NULL
       ))
@@ -2509,7 +2486,7 @@ CREATE TRIGGER trg_initial_analyses_origin_immutable BEFORE UPDATE OF
   occurrence_id, input_snapshot_digest, created_by, created_at ON initial_analyses
 BEGIN SELECT RAISE(ABORT, 'initial_analysis origin/input snapshot is immutable'); END;
 CREATE TRIGGER trg_inspection_runs_origin_immutable BEFORE UPDATE OF
-  business_system_id, plan_key, config_version_id, label_contract_version_id,
+  plan_key,
   plan_id, connection_id, plugin_id, template_id, template_version,
   frozen_params_json, frozen_scope_json,
   frozen_display_name, frozen_check_description, frozen_metric_unit, frozen_report_instructions,
@@ -2673,10 +2650,6 @@ CREATE TRIGGER trg_business_systems_no_delete BEFORE DELETE ON business_systems
 BEGIN SELECT RAISE(ABORT, 'business_systems are tombstone-only'); END;
 CREATE TRIGGER trg_business_system_config_versions_no_delete BEFORE DELETE ON business_system_config_versions
 BEGIN SELECT RAISE(ABORT, 'business_system_config_versions history is not deletable'); END;
-CREATE TRIGGER trg_legacy_config_version_mappings_no_update BEFORE UPDATE ON legacy_config_version_mappings
-BEGIN SELECT RAISE(ABORT, 'legacy_config_version_mappings is append-only'); END;
-CREATE TRIGGER trg_legacy_config_version_mappings_no_delete BEFORE DELETE ON legacy_config_version_mappings
-BEGIN SELECT RAISE(ABORT, 'legacy_config_version_mappings is append-only'); END;
 CREATE TRIGGER trg_connections_no_delete BEFORE DELETE ON connections
 BEGIN SELECT RAISE(ABORT, 'connections are tombstone-only'); END;
 CREATE TRIGGER trg_artifacts_no_delete BEFORE DELETE ON artifacts
@@ -3009,11 +2982,6 @@ BEGIN SELECT RAISE(ABORT, 'inspection_run cannot become terminal before child at
 CREATE TRIGGER trg_inspection_runs_result_set_complete BEFORE UPDATE OF state ON inspection_runs
 WHEN NEW.state IN ('Completed','CompletedWithGaps') AND NEW.state <> OLD.state AND (
   EXISTS (
-    SELECT 1 FROM config_plans p JOIN config_checks c ON c.plan_id = p.id
-    WHERE p.config_version_id = NEW.config_version_id AND p.plan_key = NEW.plan_key
-      AND NOT EXISTS (SELECT 1 FROM inspection_check_results r WHERE r.run_id = NEW.id AND r.check_key = c.check_key)
-  )
-  OR EXISTS (
     SELECT 1 FROM inspection_run_checks c
     WHERE c.run_id = NEW.id
       AND NOT EXISTS (SELECT 1 FROM inspection_check_results r WHERE r.run_id = NEW.id AND r.check_key = c.check_key)
@@ -3307,12 +3275,6 @@ BEGIN SELECT RAISE(ABORT, 'Attempt Artifact grants are retained as immutable acc
 
 CREATE TRIGGER trg_execution_attempts_run_check_slot_kind BEFORE UPDATE OF runtime_slot ON execution_attempts
 WHEN NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'run_check' AND NOT EXISTS (
-  SELECT 1 FROM inspection_runs r
-  JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
-  JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
-  WHERE r.id = NEW.scope_id AND r.state = 'Running'
-    AND c.kind = 'promql' AND NEW.runtime_slot = 'plinth'
-  UNION ALL
   -- 独立计划 Run：插件采集固定由 Plinth supervisor 执行。
   SELECT 1 FROM inspection_runs r
   JOIN inspection_run_checks c ON c.run_id = r.id AND c.check_key = NEW.check_key
@@ -3425,36 +3387,17 @@ BEGIN
   UPDATE label_contract_activations SET applied_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
   WHERE id = NEW.id;
 END;
--- 12.39 巡检运行闭合：手工 Run 消费启用系统的当前已发布配置（历史声明计划），或一个
--- 启用接入上的启用独立计划（ADR-0004）。重新采证是唯一例外：它必须从一个已终止的
--- 同源 Run 逐字段复制不可变绑定，不能被当前指针重写。
+-- 12.39 巡检运行闭合：每个 Run 冻结一个启用接入上的启用独立计划（ADR-0004）。
+-- 重新采证是唯一例外：它必须从一个已终止的同源 Run 逐字段复制不可变绑定，不
+-- 能被当前指针重写。
 CREATE TRIGGER trg_inspection_runs_closure BEFORE INSERT ON inspection_runs
 WHEN NOT EXISTS (
-  SELECT 1 FROM business_systems b
-  JOIN business_system_config_versions v ON v.id = b.current_config_version_id AND v.business_system_id = b.id
-  JOIN config_plans p ON p.config_version_id = v.id AND p.plan_key = NEW.plan_key
-  WHERE NEW.rerun_of_id IS NULL
-    AND b.id = NEW.business_system_id AND b.enabled = 1
-    AND v.id = NEW.config_version_id AND v.state = 'published' AND v.published_at IS NOT NULL
-  UNION ALL
   -- 独立计划 Run：绑定启用接入上的启用计划并冻结其模板与授权来源。
   SELECT 1 FROM inspection_plans p
   JOIN connections c ON c.id = p.connection_id
   WHERE NEW.rerun_of_id IS NULL
     AND p.id = NEW.plan_id AND p.plan_key = NEW.plan_key AND p.enabled = 1
     AND c.id = NEW.connection_id AND c.enabled = 1
-    AND NEW.business_system_id IS NULL AND NEW.config_version_id IS NULL AND NEW.label_contract_version_id IS NULL
-  UNION ALL
-  SELECT 1 FROM inspection_runs source
-  JOIN business_systems b ON b.id = source.business_system_id
-  JOIN config_plans p ON p.config_version_id = source.config_version_id AND p.plan_key = source.plan_key
-  WHERE NEW.rerun_of_id IS NOT NULL AND NEW.trigger_kind = 'manual'
-    AND NEW.scheduled_for IS NULL AND source.id = NEW.rerun_of_id
-    AND b.enabled = 1
-    AND source.state IN ('Completed','CompletedWithGaps','Failed','Cancelled','Interrupted')
-    AND source.business_system_id = NEW.business_system_id
-    AND source.config_version_id = NEW.config_version_id
-    AND source.plan_key = NEW.plan_key
   UNION ALL
   SELECT 1 FROM inspection_runs source
   JOIN inspection_plans p ON p.id = source.plan_id
@@ -3465,7 +3408,7 @@ WHEN NOT EXISTS (
     AND source.plan_id = NEW.plan_id
     AND source.plan_key = NEW.plan_key
 )
-BEGIN SELECT RAISE(ABORT, 'inspection_run must bind an enabled source: the enabled business system current published config, or an enabled plan on an enabled connection, or exactly copy a terminal source Run'); END;
+BEGIN SELECT RAISE(ABORT, 'inspection_run must bind an enabled plan on an enabled connection, or exactly copy a terminal source Run'); END;
 
 -- 12.40 execution_attempts 统一从 Queued 创建；输入快照/grant 依赖 Attempt ID，禁止绕过派发事务直接出生为 active/terminal。
 CREATE TRIGGER trg_execution_attempts_insert_queued BEFORE INSERT ON execution_attempts
@@ -3473,8 +3416,8 @@ WHEN NEW.state <> 'Queued'
 BEGIN SELECT RAISE(ABORT, 'execution_attempt must be created Queued before input freeze and dispatch'); END;
 
 -- execution_attempts 作用域闭合（DATA-ATTEMPT-002）：每种固定工作模式只引用其权威 scope；
--- 发布前 PromQL 与资源刷新都是 supervisor-only inspection_collection Attempt，
--- 因而必须绑定运行中的 Config Verification / Resource Refresh 和该配置中的精确声明。
+-- run_check 采集子绑定运行中的计划 Run 与其冻结检查目录（inspection_run_checks）
+-- 中的精确 check。
 CREATE TRIGGER trg_execution_attempts_scope_exists BEFORE INSERT ON execution_attempts
 WHEN (NEW.scope_type = 'analysis' AND NOT EXISTS (
         SELECT 1 FROM initial_analyses a WHERE a.id = NEW.scope_id AND a.state IN ('Queued','Running')))
@@ -3494,11 +3437,6 @@ WHEN (NEW.scope_type = 'analysis' AND NOT EXISTS (
         WHERE o.id = NEW.scope_id AND o.state IN ('Queued','Running')
           AND x.object_type = NEW.discovery_key AND x.attempt_id IS NULL))
    OR (NEW.scope_type = 'run_check' AND NOT EXISTS (
-        SELECT 1 FROM inspection_runs r JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
-        JOIN config_checks c ON c.plan_id = p.id
-        WHERE r.id = NEW.scope_id AND r.state = 'Running'
-          AND c.check_key = NEW.check_key AND c.kind = 'promql' AND NEW.check_key IS NOT NULL
-        UNION ALL
         SELECT 1 FROM inspection_runs r JOIN inspection_run_checks c ON c.run_id = r.id
         WHERE r.id = NEW.scope_id AND r.state = 'Running' AND r.plan_id IS NOT NULL
           AND c.check_key = NEW.check_key AND NEW.check_key IS NOT NULL))
@@ -3518,12 +3456,6 @@ WHEN NOT EXISTS (
       WHEN 'inspection_collection' THEN CASE a.scope_type
         WHEN 'observation_run' THEN 'source_observation_execution_v1'
         WHEN 'run_check' THEN CASE WHEN EXISTS (
-          SELECT 1 FROM inspection_runs r
-          JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
-          JOIN config_checks c ON c.plan_id = p.id AND c.check_key = a.check_key
-          WHERE r.id = a.scope_id AND c.kind = 'promql')
-          THEN 'inspection_promql_execution_v1'
-          WHEN EXISTS (
           SELECT 1 FROM inspection_runs r
           WHERE r.id = a.scope_id AND r.plan_id IS NOT NULL)
           THEN 'inspection_plugin_execution_v1'
@@ -3588,28 +3520,6 @@ WHEN OLD.state = 'Queued' AND NEW.state = 'Assigned' AND (
             AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = 'thanos_probe'))
         )
       )))
-  OR (NEW.attempt_type = 'inspection_collection' AND NEW.scope_type = 'run_check'
-      AND EXISTS (
-        SELECT 1 FROM inspection_runs r
-        JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
-        JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
-        WHERE r.id = NEW.scope_id AND c.kind = 'promql'
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM attempt_connection_grants g
-        JOIN connections connection ON connection.id = g.connection_id
-        JOIN connection_revisions revision ON revision.id = g.connection_revision_id
-          AND revision.connection_id = connection.id
-        JOIN credential_generations credential ON credential.id = g.credential_generation_id
-          AND credential.connection_id = connection.id
-        JOIN root_key_state root_key ON root_key.id = 1
-        WHERE g.attempt_id = NEW.id AND g.purpose = 'config_thanos_query'
-          AND connection.type IN ('prometheus','thanos') AND connection.enabled = 1 AND connection.revalidation_required = 0
-          AND connection.current_revision_id = revision.id
-          AND connection.current_credential_generation_id = credential.id
-          AND credential.key_binding_revision = root_key.binding_revision
-      ))
 )
 BEGIN SELECT RAISE(ABORT, 'attempt cannot dispatch without frozen input, release binding, and required model grant'); END;
 
@@ -3776,12 +3686,6 @@ WHEN NOT EXISTS (
         OR (NEW.purpose = 'config_thanos_query' AND c.type IN ('prometheus','thanos') AND NEW.qualified_probe_result_id IS NULL
             AND a.attempt_type = 'inspection_collection' AND (
               a.scope_type = 'observation_run'
-              OR (a.scope_type = 'run_check' AND EXISTS (
-                SELECT 1 FROM inspection_runs r
-                JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
-                JOIN config_checks check_definition ON check_definition.plan_id = p.id AND check_definition.check_key = a.check_key
-                WHERE r.id = a.scope_id AND r.state = 'Running' AND check_definition.kind = 'promql'
-              ))
               OR (a.scope_type = 'run_check' AND EXISTS (
                 SELECT 1 FROM inspection_runs r
                 JOIN inspection_run_checks check_definition ON check_definition.run_id = r.id AND check_definition.check_key = a.check_key
@@ -3957,40 +3861,12 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
   ))
 )
 BEGIN SELECT RAISE(ABORT, 'Succeeded Attempt must atomically commit the valid domain result for its fixed work mode'); END;
--- 普通巡检结果只在 Running 阶段追加并闭合到精确 check/Evidence 来源。PromQL
--- 绑定精确 collection Attempt；PromQL ok 引用唯一完整 Evidence，业务 gap
+-- 普通巡检结果只在 Running 阶段追加并闭合到精确 check/Evidence 来源。采集
+-- 结果绑定精确 collection Attempt；ok 引用唯一完整 Evidence，业务 gap
 -- 和技术 gap 不制造空 Evidence。
 CREATE TRIGGER trg_inspection_check_results_closure BEFORE INSERT ON inspection_check_results
 WHEN NOT EXISTS (
-  -- 任一有效形状即放行；三种来源互相独立（UNION ALL 隔离各自 JOIN 作用域）。
-  SELECT 1 FROM inspection_runs r
-  JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
-  JOIN config_checks c ON c.plan_id = p.id AND c.check_key = NEW.check_key
-  WHERE r.id = NEW.run_id AND r.state = 'Running' AND (
-    (c.kind = 'promql' AND NEW.attempt_id IS NOT NULL AND NEW.result_digest IS NOT NULL AND EXISTS (
-      SELECT 1 FROM execution_attempts a
-      WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
-        AND a.scope_type = 'run_check' AND a.scope_id = NEW.run_id AND a.check_key = NEW.check_key
-        AND a.runtime_slot = 'plinth' AND a.state = 'Running' AND a.accepted_at IS NOT NULL
-    ) AND (
-      (NEW.status = 'ok' AND EXISTS (
-        SELECT 1 FROM evidence e WHERE e.id = NEW.evidence_id AND e.attempt_id = NEW.attempt_id
-          AND e.tool_call_id IS NULL AND e.target_type = 'inspection_run' AND e.target_id = NEW.run_id
-          AND e.integrity = 'complete' AND e.result_json IS NOT NULL AND e.artifact_id IS NULL
-          AND json_extract(e.params_json, '$.check_key') = NEW.check_key))
-      OR (NEW.status IN ('error','gap') AND NEW.evidence_id IS NULL
-          AND NEW.gap_reason IN ('query_failed','partial_response','no_data','cancelled','interrupted'))))
-    OR (c.kind = 'promql' AND NEW.attempt_id IS NOT NULL
-      AND NEW.status IN ('error','gap') AND NEW.evidence_id IS NULL
-      AND NEW.result_digest IS NULL AND NEW.gap_reason = 'runtime_unavailable'
-      AND EXISTS (
-        SELECT 1 FROM execution_attempts a
-        WHERE a.id = NEW.attempt_id AND a.attempt_type = 'inspection_collection'
-          AND a.scope_type = 'run_check' AND a.scope_id = NEW.run_id AND a.check_key = NEW.check_key
-          AND a.state = 'Failed' AND a.runtime_slot IS NULL AND a.accepted_at IS NULL
-      ))
-  )
-  UNION ALL
+  -- 任一有效形状即放行；两种来源互相独立（UNION ALL 隔离各自 JOIN 作用域）。
   -- 独立计划 Run（ADR-0004）：插件采集子 Attempt 的运行中结果，正文必须是该
   -- Attempt 的完整 Evidence；缺口/错误不制造 Evidence。
   SELECT 1 FROM inspection_runs pr
@@ -4034,10 +3910,8 @@ BEGIN SELECT RAISE(ABORT, 'inspection result must be one exact PromQL result, a 
 CREATE TRIGGER trg_inspection_promql_result_commit AFTER INSERT ON inspection_check_results
 WHEN NEW.result_digest IS NOT NULL AND EXISTS (
   SELECT 1 FROM execution_attempts a
-  JOIN inspection_runs r ON r.id = a.scope_id
-  JOIN config_plans p ON p.config_version_id = r.config_version_id AND p.plan_key = r.plan_key
-  JOIN config_checks c ON c.plan_id = p.id AND c.check_key = a.check_key
-  WHERE a.id = NEW.attempt_id AND a.scope_type = 'run_check' AND c.kind = 'promql'
+  JOIN inspection_run_checks c ON c.run_id = a.scope_id AND c.check_key = a.check_key
+  WHERE a.id = NEW.attempt_id AND a.scope_type = 'run_check'
 )
 BEGIN
   UPDATE execution_attempts
@@ -4045,7 +3919,7 @@ BEGIN
   WHERE id = NEW.attempt_id AND state = 'Running';
 END;
 -- 插件采集 ResultProposal 的 Attempt 收口：只闭合运行中且绑定精确 run_check 的
--- 独立计划子 Attempt；历史声明 PromQL 由其原有触发器收口。
+-- 独立计划子 Attempt。
 CREATE TRIGGER trg_inspection_plugin_result_commit AFTER INSERT ON inspection_check_results
 WHEN NEW.result_digest IS NOT NULL AND EXISTS (
   SELECT 1 FROM execution_attempts a
@@ -4061,16 +3935,14 @@ CREATE TRIGGER trg_config_plans_parent_frozen BEFORE INSERT ON config_plans
 WHEN NOT EXISTS (
   SELECT 1 FROM business_system_config_versions v
   WHERE v.id = NEW.config_version_id AND v.state = 'draft' AND v.published_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM inspection_runs r WHERE r.config_version_id = NEW.config_version_id)
 )
-BEGIN SELECT RAISE(ABORT, 'config_plans can only be inserted while parent config is draft with no publications, and no inspection runs'); END;
+BEGIN SELECT RAISE(ABORT, 'config_plans can only be inserted while parent config is draft with no publications'); END;
 CREATE TRIGGER trg_config_checks_parent_frozen BEFORE INSERT ON config_checks
 WHEN NOT EXISTS (
   SELECT 1 FROM config_plans p JOIN business_system_config_versions v ON v.id = p.config_version_id
   WHERE p.id = NEW.plan_id AND v.state = 'draft' AND v.published_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM inspection_runs r WHERE r.config_version_id = v.id)
 )
-BEGIN SELECT RAISE(ABORT, 'config_checks can only be inserted while parent config is draft with no publications, and no inspection runs'); END;
+BEGIN SELECT RAISE(ABORT, 'config_checks can only be inserted while parent config is draft with no publications'); END;
 -- check_key 只在其 plan 父作用域内唯一，因而不同 plan 可合法复用同一 check_key（DATA-CONFIG-004）。
 -- Immutable Inspection Report closure (T24b). Runtime inserts only the typed
 -- ledger; direct Report writes and a successful analysis without that ledger

@@ -3,7 +3,8 @@
 // check result, and the Attempt's Succeeded terminal state in one transaction.
 // The frozen SQL commit trigger owns the Attempt transition; this file owns
 // envelope validation, boot/epoch fencing, replay idempotence, and Run
-// convergence.
+// convergence. Identity is re-checked against the Run's frozen check catalog
+// (inspection_run_checks), like the plugin result path.
 package inspection
 
 import (
@@ -98,19 +99,18 @@ func (s *Service) CommitPromQLProposal(ctx context.Context, attemptID int64, boo
 	}
 	_, err = execution.Execute(commandCtx, s.runner, s.promqlResult, func(tx *execution.Tx) (struct{}, error) {
 		var runID int64
-		var checkKey, mode string
+		var checkKey string
 		err := tx.QueryRowContext(commandCtx, `
-			SELECT a.scope_id, a.check_key, c.query_mode
+			SELECT a.scope_id, a.check_key
 			FROM execution_attempts a
-			JOIN inspection_runs r ON r.id=a.scope_id
-			JOIN config_plans p ON p.config_version_id=r.config_version_id AND p.plan_key=r.plan_key
-			JOIN config_checks c ON c.plan_id=p.id AND c.check_key=a.check_key
-			WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check' AND c.kind='promql'`, attemptID).
-			Scan(&runID, &checkKey, &mode)
+			JOIN inspection_runs r ON r.id=a.scope_id AND r.plan_id IS NOT NULL
+			JOIN inspection_run_checks c ON c.run_id=r.id AND c.check_key=a.check_key
+			WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check'`, attemptID).
+			Scan(&runID, &checkKey)
 		if err != nil {
-			return struct{}{}, err
+			return struct{}{}, fmt.Errorf("inspection PromQL result does not match a frozen plan check: %w", err)
 		}
-		if proposal.InspectionRunID != runID || proposal.CheckKey != checkKey || proposal.QueryMode != mode {
+		if proposal.InspectionRunID != runID || proposal.CheckKey != checkKey {
 			return struct{}{}, fmt.Errorf("inspection PromQL result identity does not match frozen attempt")
 		}
 		digest := sha256.Sum256(raw)

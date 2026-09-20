@@ -190,44 +190,6 @@ func TestRerunCreatesIndependentRunWithImmutableLineage(t *testing.T) {
 	}
 }
 
-// A legacy declaration run is history: its producer was removed, so
-// re-collection must demand a real plan instead of resurrecting a declaration.
-func TestRerunRejectsLegacyDeclarationRun(t *testing.T) {
-	h := newTestHarness(t)
-	ctx := commandContext(t)
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := h.db.Exec(`INSERT INTO business_systems(key,display_name,enabled,row_version,created_at) VALUES('legacy-bs','历史系统',0,1,?)`, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone)
-		VALUES(1,1,'draft','legacy','legacy','legacy','0000000000000000000000000000000000000000000000000000000000000000',?,'legacy-bs','历史系统',1,1,'UTC')`, now); err != nil {
-		t.Fatal(err)
-	}
-	// 历史行构造：临时卸载活动写闭合触发器，只为写入一条不再能产生的声明 Run
-	// 历史事实；测试数据库独立，不影响其他用例。
-	for _, trigger := range []string{
-		"trg_inspection_runs_closure", "trg_inspection_runs_insert_state",
-		"trg_business_systems_insert_disabled", "trg_inspection_runs_row_version_increment",
-	} {
-		h.db.Exec(`DROP TRIGGER IF EXISTS ` + trigger)
-	}
-	t.Cleanup(func() { _ = h.db.Close() })
-	result, err := h.db.Exec(`INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,trigger_kind,state,created_at)
-		VALUES(1,'legacy-plan',1,'manual','Cancelled',?)`, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sourceID, _ := result.LastInsertId()
-	if _, err := h.service.RerunInspection(ctx, h.principal, "rerun-legacy-0001", sourceID); err == nil {
-		t.Fatal("legacy declaration run must not rerun")
-	} else {
-		var rejection *RejectionError
-		if !errors.As(err, &rejection) || rejection.Code != "legacy_run" {
-			t.Fatalf("legacy rerun error = %v, want legacy_run", err)
-		}
-	}
-}
-
 func TestCancelRunFencesRunningAnalysisWithoutRewritingTheRun(t *testing.T) {
 	h := newTestHarness(t)
 	run, _, _ := completeRunWithFirstReport(t, h)

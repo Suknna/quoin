@@ -179,20 +179,18 @@ type reportInput struct {
 	AttemptID          int64               `json:"attemptId"`
 	InspectionRunID    int64               `json:"inspectionRunId"`
 	ReportVersion      int64               `json:"reportVersion"`
-	ConfigVersionID    int64               `json:"configVersionId"`
 	PlanKey            string              `json:"planKey"`
 	EvidenceIDs        []int64             `json:"evidenceIds"`
 	ArtifactIDs        []int64             `json:"artifactIds"`
 	KnowledgeVersionID []int64             `json:"knowledgeVersionIds"`
 	ModelContract      reportModelContract `json:"modelContract"`
-	// 独立计划 Run（ADR-0004）的冻结绑定上下文；历史声明 Run 不携带这些字段
-	//（omitempty 保持其重建摘要逐字节不变）。
+	// Run 冻结的计划绑定上下文（ADR-0004 独立计划 Run）。
 	Plan            *planReportContext `json:"plan,omitempty"`
 	ConnectionName  string             `json:"connectionName,omitempty"`
 	TemplateID      string             `json:"templateId,omitempty"`
 	TemplateVersion string             `json:"templateVersion,omitempty"`
-	// 计划 Run 的逐检查项结构化清单（冻结语义 + 真实执行事实 + 缺口）；历史
-	// 声明 Run 与旧 Attempt 保持缺失。
+	// Run 的逐检查项结构化清单（冻结语义 + 真实执行事实 + 缺口）；旧形状
+	// Attempt（无 requirements 行）保持缺失以维持重建字节。
 	Checks []reportCheckItem `json:"checks,omitempty"`
 	// 仅本次重分析的报告要求覆盖；缺省表示沿用 Run 冻结的初始报告要求。覆盖
 	// 只改本次报告的指令文本，绝不改写旧证据、冻结语义或检查项含义。
@@ -302,11 +300,11 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Execu
 	if err != nil {
 		return 0, err
 	}
-	var configVersionID, planID, connectionID sql.NullInt64
+	var connectionID sql.NullInt64
 	var planKey string
 	if err = tx.QueryRowContext(ctx, `
-		SELECT config_version_id, plan_key, plan_id, connection_id FROM inspection_runs WHERE id=?`, runID).
-		Scan(&configVersionID, &planKey, &planID, &connectionID); err != nil {
+		SELECT plan_key, connection_id FROM inspection_runs WHERE id=?`, runID).
+		Scan(&planKey, &connectionID); err != nil {
 		return 0, err
 	}
 	// 计划 Run：模型上下文携带 Run 冻结的计划绑定（连接与模板）与冻结的分析
@@ -314,35 +312,33 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Execu
 	// 持 append-only。
 	var planContext *planReportContext
 	var planConnectionName, planTemplateID, planTemplateVersion string
-	if planID.Valid {
-		if connectionID.Valid {
-			if err = tx.QueryRowContext(ctx, `SELECT name FROM connections WHERE id=?`, connectionID.Int64).Scan(&planConnectionName); err != nil {
-				return 0, err
-			}
-		}
-		var paramsRaw, scopeRaw string
-		var checkDescription, metricUnit, reportInstructions sql.NullString
-		if err = tx.QueryRowContext(ctx, `
-			SELECT frozen_params_json, frozen_scope_json, template_id, template_version,
-			       frozen_check_description, frozen_metric_unit, frozen_report_instructions
-			FROM inspection_runs WHERE id=?`, runID).
-			Scan(&paramsRaw, &scopeRaw, &planTemplateID, &planTemplateVersion, &checkDescription, &metricUnit, &reportInstructions); err != nil {
+	if connectionID.Valid {
+		if err = tx.QueryRowContext(ctx, `SELECT name FROM connections WHERE id=?`, connectionID.Int64).Scan(&planConnectionName); err != nil {
 			return 0, err
 		}
-		params := map[string]any{}
-		_ = json.Unmarshal([]byte(paramsRaw), &params)
-		scope := map[string]any{}
-		_ = json.Unmarshal([]byte(scopeRaw), &scope)
-		planContext = &planReportContext{Key: planKey, Params: params, Scope: scope}
-		if checkDescription.Valid {
-			planContext.CheckDescription = &checkDescription.String
-		}
-		if metricUnit.Valid {
-			planContext.MetricUnit = &metricUnit.String
-		}
-		if reportInstructions.Valid {
-			planContext.ReportInstructions = &reportInstructions.String
-		}
+	}
+	var paramsRaw, scopeRaw string
+	var checkDescription, metricUnit, reportInstructions sql.NullString
+	if err = tx.QueryRowContext(ctx, `
+		SELECT frozen_params_json, frozen_scope_json, template_id, template_version,
+		       frozen_check_description, frozen_metric_unit, frozen_report_instructions
+		FROM inspection_runs WHERE id=?`, runID).
+		Scan(&paramsRaw, &scopeRaw, &planTemplateID, &planTemplateVersion, &checkDescription, &metricUnit, &reportInstructions); err != nil {
+		return 0, err
+	}
+	params := map[string]any{}
+	_ = json.Unmarshal([]byte(paramsRaw), &params)
+	scope := map[string]any{}
+	_ = json.Unmarshal([]byte(scopeRaw), &scope)
+	planContext = &planReportContext{Key: planKey, Params: params, Scope: scope}
+	if checkDescription.Valid {
+		planContext.CheckDescription = &checkDescription.String
+	}
+	if metricUnit.Valid {
+		planContext.MetricUnit = &metricUnit.String
+	}
+	if reportInstructions.Valid {
+		planContext.ReportInstructions = &reportInstructions.String
 	}
 	var reportVersion int
 	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_reports WHERE run_id=?`, runID).Scan(&reportVersion); err != nil {
@@ -418,16 +414,13 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Execu
 		return 0, err
 	}
 	// 计划 Run 冻结的逐检查项结构化清单：与重建路径同一推导（只读不可变行）。
-	var checkItems []reportCheckItem
-	if planID.Valid {
-		checkItems, err = reportCheckItemsOn(ctx, tx, runID)
-		if err != nil {
-			return 0, err
-		}
+	checkItems, err := reportCheckItemsOn(ctx, tx, runID)
+	if err != nil {
+		return 0, err
 	}
 	input := reportInput{
 		SchemaKind: reportInputKind, AttemptID: analysisID, InspectionRunID: runID,
-		ReportVersion: int64(reportVersion + 1), ConfigVersionID: configVersionID.Int64, PlanKey: planKey,
+		ReportVersion: int64(reportVersion + 1), PlanKey: planKey,
 		EvidenceIDs: evidenceIDs, ArtifactIDs: artifactIDs, KnowledgeVersionID: []int64{},
 		ModelContract: reportModelContract{ModelID: provider.ChatModelID, ContextBudgetTokens: provider.ContextBudget, MaxOutputTokens: provider.MaxOutput},
 		Plan:          planContext, ConnectionName: planConnectionName, TemplateID: planTemplateID, TemplateVersion: planTemplateVersion,
@@ -483,17 +476,6 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Execu
 			return 0, err
 		}
 	}
-	if !planID.Valid {
-		versionDigest := sha256.Sum256([]byte(fmt.Sprintf("business-system-config-version:%d", configVersionID.Int64)))
-		itemSeq++
-		if _, err = tx.ExecContext(ctx, `
-			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id)
-			VALUES(?,?,'config_version',?,?)`, snapshotID, itemSeq, hex.EncodeToString(versionDigest[:]), configVersionID.Int64); err != nil {
-			return 0, err
-		}
-	}
-	// New report analyses retain only config-version lineage. The nullable run
-	// Label Contract locator is historical read metadata, never new authority.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at)
 		VALUES(?, 'chat_model', ?,?,?,?,?)`,

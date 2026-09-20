@@ -19,8 +19,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
-// GetRun returns one run detail located by its immutable run id. Legacy
-// declaration runs and plan runs share the same projection.
+// GetRun returns one run detail located by its immutable run id.
 func (s *Service) GetRun(ctx context.Context, runID int64) (RunDetail, error) {
 	return s.detailOn(ctx, s.reader, runID)
 }
@@ -31,9 +30,8 @@ func (s *Service) ListRuns(ctx context.Context, planKey, cursor string, limit in
 	if limit < 1 || limit > 200 {
 		limit = 50
 	}
-	query := `SELECT r.id, r.plan_key, bs.key, c.name, r.state, r.row_version, r.trigger_kind, r.scheduled_for, r.evidence_at, r.created_at
+	query := `SELECT r.id, r.plan_key, c.name, r.state, r.row_version, r.trigger_kind, r.scheduled_for, r.evidence_at, r.created_at
 		FROM inspection_runs r
-		LEFT JOIN business_systems bs ON bs.id = r.business_system_id
 		LEFT JOIN connections c ON c.id = r.connection_id
 		WHERE 1=1`
 	args := []any{}
@@ -59,15 +57,12 @@ func (s *Service) ListRuns(ctx context.Context, planKey, cursor string, limit in
 	for rows.Next() {
 		var item RunSummary
 		var id int64
-		var systemKey, connectionName sql.NullString
+		var connectionName sql.NullString
 		var scheduledFor, evidenceAt sql.NullString
-		if err = rows.Scan(&id, &item.PlanKey, &systemKey, &connectionName, &item.State, &item.RowVersion, &item.TriggerKind, &scheduledFor, &evidenceAt, &item.CreatedAt); err != nil {
+		if err = rows.Scan(&id, &item.PlanKey, &connectionName, &item.State, &item.RowVersion, &item.TriggerKind, &scheduledFor, &evidenceAt, &item.CreatedAt); err != nil {
 			return nil, false, err
 		}
 		item.ID = locatorID(id)
-		if systemKey.Valid {
-			item.BusinessSystemKey = &systemKey.String
-		}
 		if connectionName.Valid {
 			item.ConnectionName = &connectionName.String
 		}
@@ -309,20 +304,13 @@ func translateCancelError(err error) error {
 	return translateCommandError(err)
 }
 
-// rowQuerier abstracts the one-connection pool so legacy/plan locator reads
-// work identically on *sql.DB and the caller's exclusive *sql.Conn.
+// rowQuerier abstracts the one-connection pool so run locator reads work
+// identically on *sql.DB and the caller's exclusive *sql.Conn.
 type rowQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// businessSystemKeyByID and connectionNameByID resolve display locators for
-// the mixed legacy/plan run projection.
-func businessSystemKeyByID(ctx context.Context, db rowQuerier, id int64) (string, error) {
-	var key string
-	err := db.QueryRowContext(ctx, `SELECT key FROM business_systems WHERE id=?`, id).Scan(&key)
-	return key, err
-}
-
+// connectionNameByID resolves the run's display locator for the projection.
 func connectionNameByID(ctx context.Context, db rowQuerier, id int64) (string, error) {
 	var name string
 	err := db.QueryRowContext(ctx, `SELECT name FROM connections WHERE id=?`, id).Scan(&name)
@@ -332,11 +320,11 @@ func connectionNameByID(ctx context.Context, db rowQuerier, id int64) (string, e
 func (s *Service) detailOn(ctx context.Context, q audit.Reader, runID int64) (RunDetail, error) {
 	var detail RunDetail
 	var evidenceAt, scheduledFor sql.NullString
-	var systemID, connectionID sql.NullInt64
+	var connectionID sql.NullInt64
 	err := q.QueryRowContext(ctx, `
-		SELECT r.id, r.plan_key, r.business_system_id, r.connection_id, r.state, r.row_version, r.trigger_kind, r.scheduled_for, r.evidence_at, r.created_at
+		SELECT r.id, r.plan_key, r.connection_id, r.state, r.row_version, r.trigger_kind, r.scheduled_for, r.evidence_at, r.created_at
 		FROM inspection_runs r WHERE r.id=?`, runID).
-		Scan(&detail.RunID, &detail.PlanKey, &systemID, &connectionID, &detail.State, &detail.RowVersion, &detail.TriggerKind, &scheduledFor, &evidenceAt, &detail.CreatedAt)
+		Scan(&detail.RunID, &detail.PlanKey, &connectionID, &detail.State, &detail.RowVersion, &detail.TriggerKind, &scheduledFor, &evidenceAt, &detail.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RunDetail{}, ErrNotFound
 	}
@@ -344,13 +332,6 @@ func (s *Service) detailOn(ctx context.Context, q audit.Reader, runID int64) (Ru
 		return RunDetail{}, err
 	}
 	detail.ID = locatorID(detail.RunID)
-	if systemID.Valid {
-		key, err := businessSystemKeyByID(ctx, q, systemID.Int64)
-		if err != nil {
-			return RunDetail{}, err
-		}
-		detail.BusinessSystemKey = &key
-	}
 	if connectionID.Valid {
 		name, err := connectionNameByID(ctx, q, connectionID.Int64)
 		if err != nil {
