@@ -290,6 +290,12 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	if err != nil {
 		return err
 	}
+	// The bootstrap path reads through the fail-closed read seam (HasUsers/
+	// HasPendingBootstrapAdmin), so the read-only pool must be installed
+	// before seeding — same contract as serving, just earlier.
+	if err := authService.SetReader(database.Reader); err != nil {
+		return err
+	}
 	retentionMonths := 6
 	if config.Audit != nil {
 		retentionMonths = config.Audit.RetentionMonths
