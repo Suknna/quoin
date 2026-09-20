@@ -154,48 +154,28 @@ func seedAttemptWithCheck(t *testing.T, db *sql.DB, attemptType, scopeType strin
 	return id
 }
 
-// seedInspectionRun builds the minimal published inspection chain so a
-// run_check child can exist under the frozen scope trigger. The archived
-// Label Contract record is inserted directly because new runtime paths never
-// activate or consult that historical provenance.
+// seedInspectionRun builds the minimal plan-run inspection chain so a
+// run_check child can exist under the frozen scope trigger: an enabled plan on
+// an enabled metrics connection, its Run freezing the plan binding, and the
+// expanded check catalog in inspection_run_checks.
 func seedInspectionRun(t *testing.T, db *sql.DB, _ int64) int64 {
 	t.Helper()
 	now := testNow()
-	digest64 := hex.EncodeToString(make([]byte, 32))
-	contract, err := db.Exec(`INSERT INTO label_contracts(version,yaml_body,contract_json,digest,parser_version,schema_version,state,created_at) VALUES(1, 'label_contract: {}', '{}', ?, 'archived', 'v1', 'draft', ?)`, digest64, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	contractID, err := contract.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	system, err := db.Exec(`INSERT INTO business_systems(key,display_name,enabled,created_at) VALUES('t36-system','T36 System',0,?)`, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	systemID, _ := system.LastInsertId()
 	metricsConnectionID := seedConnection(t, db, "t36-metrics")
-	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,system_key,display_name,metrics_connection_id,enabled,timezone,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,digest,created_at) VALUES(?, 't36-system','T36 System',?,1,'UTC',1,'draft','body','p','v1',?, '{}',?,?)`, systemID, metricsConnectionID, contractID, digest64, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	versionID, _ := version.LastInsertId()
-	plan, err := db.Exec(`INSERT INTO config_plans(config_version_id,plan_key,display_name) VALUES(?, 'nightly','Nightly')`, versionID)
+	plan, err := db.Exec(`INSERT INTO inspection_plans(plan_key,display_name,enabled,connection_id,plugin_id,template_id,template_version,params_json,scope_kind,scope_json,created_at,updated_at)
+		VALUES('nightly','Nightly',1,?, 'builtin','promql_instant','1','{}','integration','{"kind":"integration"}',?,?)`, metricsConnectionID, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	planID, _ := plan.LastInsertId()
-	mustExec(t, db, `INSERT INTO config_checks(plan_id,check_key,display_name,analysis_question,kind,query_mode,expression) VALUES(?, 'probe-check','Probe','?','promql','instant','up')`, planID)
-	// Moving the current pointer onto the same-system unpublished draft
-	// publishes it through the frozen owner trigger; the root projection
-	// columns must travel in the same UPDATE.
-	mustExec(t, db, `UPDATE business_systems SET enabled=1,current_config_version_id=?,display_name='T36 System',timezone='UTC',row_version=row_version+1 WHERE id=?`, versionID, systemID)
-	run, err := db.Exec(`INSERT INTO inspection_runs(business_system_id,plan_key,config_version_id,label_contract_version_id,trigger_kind,state,created_at) VALUES(?, 'nightly',?,?, 'manual','Queued',?)`, systemID, versionID, contractID, now)
+	run, err := db.Exec(`INSERT INTO inspection_runs(plan_id,plan_key,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,trigger_kind,state,created_at)
+		VALUES(?, 'nightly',?, 'builtin','promql_instant','1','{}','{"kind":"integration"}','manual','Queued',?)`, planID, metricsConnectionID, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	runID, _ := run.LastInsertId()
+	mustExec(t, db, `INSERT INTO inspection_run_checks(run_id,check_key,display_name,plugin_id,template_id,template_version,params_json,created_at)
+		VALUES(?, 'probe-check','Probe','builtin','promql_instant','1','{}',?)`, runID, now)
 	// A run_check child requires the Running parent with evidence started.
 	mustExec(t, db, `UPDATE inspection_runs SET state='Running',evidence_at=?,row_version=row_version+1 WHERE id=?`, now, runID)
 	return runID

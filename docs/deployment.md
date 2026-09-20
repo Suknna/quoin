@@ -117,20 +117,9 @@ make image COMPONENT=quoin VERSION=v1.0.2
 
 `quoin restore` 在隔离事务中撤销全部会话、连接与告警源凭据，保留唯一管理员并置其入待初始化状态（强制改密标记），生成临时密码。临时密码仅在 attached TTY 输出一次；数据库仅保存密码哈希，不提供 Web 恢复令牌或独立恢复页面。完成停机后校验和 `quoin restore finalize`，再启动长期服务，使用 `admin` 与临时密码从登录页进入受限会话、设置正式密码后直接进入工作台。临时密码若遗失，在服务停止时执行 `quoin admin recover` 替换；不要删除数据库或恢复默认密码。组件身份来自部署 Secret，恢复后 Plinth 自动重连，在「平台状态」页确认即可。
 
-## 存量部署升级到统一 mTLS
-
-注册制时代的存量部署按以下顺序一次性升级（本版契约指纹变化，五镜像须同批替换）：
-
-1. 停止全部 Quoin 服务（保留数据卷与 Secret）。
-2. 用运维脚本从既有 CA 补签 Stele/Plinth 客户端证书：
-   `bash scripts/generate-deployment-secrets.sh <secrets-dir> --issue-client-certs`
-   （Kubernetes 随后用 kubectl 重建 `quoin-secrets`。）
-3. 更新三份组件配置：quoin 增加 `runtimeClientCaFile`、删除 `steleServiceTokenFile`；
-   stele/plinth 改用 `quoinRuntimeClientCertificateFile`/`quoinRuntimeClientPrivateKeyFile`。
-4. 同批替换五个镜像为统一 mTLS 版本，先以新镜像执行
-   `quoin migrate --config /etc/quoin/component.yaml`（DROP 注册制数据表），再正常启动。
-5. 确认「平台状态」页 Plinth 已连接、告警接收（/stele）正常；旧 `stele-service-token`
-   文件可删除。
+`quoin migrate`（含 `preflight` 子命令）是版本切换时的 schema 门：它只承认与当前镜像完全一致的
+canonical schema（维护窗口已验证时退出 Upgrade 维护态）；摘要不符的数据库来自未发布构建，
+没有迁移路径，需重建数据目录后重试。
 
 ## 静态检查
 

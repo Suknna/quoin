@@ -18,19 +18,12 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/upgrade"
 )
 
-// runMigrate implements `quoin migrate [preflight] --config <path>
-// [--retain-admin-id <id>]`: the coordinated-upgrade schema gate. preflight is
-// the same-Release read-only verification the deployment helper runs on the
-// OLD image after stopping the stack; the plain form is the exclusive forward
-// step run by the NEW image. Both recognize every released declaration
-// predecessor including the pre-audit predecessor; the authenticated gate
-// still verifies each predecessor's authentic migration ledger.
-//
-// --retain-admin-id is a non-secret stable user id: it names the single
-// administrator kept when the predecessor database holds several. Multiple
-// enabled administrators without the flag, a selection that is not an enabled
-// administrator, and a conflict on the unified `admin` login are all stable,
-// machine-readable rejections; no account is ever renamed to make room.
+// runMigrate implements `quoin migrate [preflight] --config <path>`: the
+// coordinated-upgrade schema gate. The first release has no predecessor
+// conversions: preflight verifies the database is exactly the current
+// canonical schema, and the plain form only re-verifies that fact and exits
+// an active Upgrade maintenance window. Any divergent digest belongs to an
+// unreleased build and is rejected with no migration path.
 func runMigrate(arguments []string) {
 	preflight := len(arguments) > 0 && arguments[0] == "preflight"
 	if preflight {
@@ -40,7 +33,7 @@ func runMigrate(arguments []string) {
 	ctx := context.Background()
 	if preflight {
 		if version, digest, ok := bootstrap.PeekSchemaState(config.DataDirectory); ok {
-			if reason, mismatch := schemaMismatchReason(version, digest); mismatch && !upgrade.IsSupportedMigrationSource(version, digest) {
+			if reason, mismatch := schemaMismatchReason(version, digest); mismatch {
 				failStable(errors.New(reason), reason)
 			}
 		}
@@ -75,7 +68,6 @@ func parseMigrateArguments(arguments []string, command string) (contract.QuoinCo
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	path := flags.String("config", "/etc/quoin/component.yaml", "strict generated component configuration")
-	retainedAdminID := flags.Int64("retain-admin-id", 0, "stable id of the single administrator kept when the predecessor holds several")
 	if err := flags.Parse(arguments); err != nil {
 		os.Exit(2)
 	}
@@ -89,7 +81,7 @@ func parseMigrateArguments(arguments []string, command string) (contract.QuoinCo
 	if config.Component != "quoin" {
 		fail("configuration component must be quoin")
 	}
-	return config, upgrade.Options{RetainedAdminID: *retainedAdminID}
+	return config, upgrade.Options{}
 }
 
 func schemaMismatchReason(version, digest string) (string, bool) {
@@ -111,24 +103,12 @@ func stableCode(err error) string {
 		return "schema_digest_mismatch"
 	case errors.Is(err, upgrade.ErrSchemaHistoryPresent):
 		return "schema_history_present"
-	case errors.Is(err, upgrade.ErrLegacyMigrationBlocked):
-		return "legacy_migration_blocked"
-	case errors.Is(err, upgrade.ErrLegacyMigrationRequired):
-		return "legacy_migration_required"
 	case errors.Is(err, upgrade.ErrNotUpgradeMaintenance):
 		return "upgrade_maintenance_not_active"
 	case errors.Is(err, upgrade.ErrChecklistBlocking):
 		return "upgrade_checklist_blocking"
 	case errors.Is(err, upgrade.ErrNoUpgradeBackup):
 		return "upgrade_backup_missing"
-	case errors.Is(err, upgrade.ErrAdminMissing):
-		return "admin_missing"
-	case errors.Is(err, upgrade.ErrRetainedAdminSelectionRequired):
-		return "retained_admin_selection_required"
-	case errors.Is(err, upgrade.ErrRetainedAdminUnknown):
-		return "retained_admin_unknown"
-	case errors.Is(err, upgrade.ErrAdminUsernameConflict):
-		return "admin_username_conflict"
 	default:
 		return "schema_open_failed"
 	}
@@ -136,13 +116,6 @@ func stableCode(err error) string {
 
 func emitMigrateSummary(stage string, result upgrade.PreflightResult) {
 	body := map[string]any{"stage": stage, "release": buildinfo.Release, "maintenanceRevision": result.Revision, "backupId": result.BackupID, "manifestSha256": result.ManifestSHA256, "schemaVersion": result.SchemaVersion, "migrationHistory": result.MigrationHistory}
-	// Administrator-consolidation observations travel only on conversions that
-	// performed one; the deployment helper archives them with the report.
-	if result.RetainedAdminID != 0 {
-		body["retainedAdminId"] = result.RetainedAdminID
-		body["demotedAdminIds"] = result.DemotedAdminIDs
-		body["revokedSessionCount"] = result.RevokedSessionCount
-	}
 	serialized, err := json.Marshal(body)
 	if err != nil {
 		failStable(err, "schema_open_failed")

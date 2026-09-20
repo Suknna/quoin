@@ -740,9 +740,7 @@ func baselineClassForEntry(entry executionBaselineEntry) string {
 		"internal/quoin/maintenance/rebind.go:maintenance.openOfflineDatabase",
 		"internal/quoin/maintenance/rebind.go:maintenance.openReadOnlyDatabase",
 		"internal/quoin/recovery/recovery.go:recovery.normalizeStagedSQLite",
-		"internal/quoin/upgrade/legacy.go:upgrade.migrateReleasedSchemaTransaction",
-		"internal/quoin/upgrade/schemagate.go:upgrade.MigrateWithOptions",
-		"internal/quoin/upgrade/schemagate.go:upgrade.finishReleasedMigrationOn":
+		"internal/quoin/upgrade/schemagate.go:upgrade.MigrateWithOptions":
 		return classLowLevel
 	default:
 		return classBusiness
@@ -807,32 +805,8 @@ var executionBaseline = []executionBaselineEntry{
 	{Path: "internal/quoin/maintenance/rebind.go", Symbol: "maintenance.openOfflineDatabase", Rule: "sql_open", Class: "lowlevel", Planned: "stage5"},
 	{Path: "internal/quoin/maintenance/rebind.go", Symbol: "maintenance.openReadOnlyDatabase", Rule: "sql_open", Class: "lowlevel", Planned: "stage5"},
 	{Path: "internal/quoin/recovery/recovery.go", Symbol: "recovery.normalizeStagedSQLite", Rule: "sql_open", Class: "lowlevel", Planned: "stage5"},
-	{Path: "internal/quoin/upgrade/alertviewattribution.go", Symbol: "upgrade.migrateAlertViewAttributionOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/authaudit.go", Symbol: "upgrade.migrateAuthAuditOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/authaudit.go", Symbol: "upgrade.normalizeAdminTopologyOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/authaudit.go", Symbol: "upgrade.renameRetainedAdminLogin", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/authaudit.go", Symbol: "upgrade.seedAuditRetentionSingletons", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/authsimplification.go", Symbol: "upgrade.migrateAuthSimplificationOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/inspectionfreeze.go", Symbol: "upgrade.migrateInspectionFreezeOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.cutoverCurrentLegacyConfiguration", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.insertLegacySuccessorProjections", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.migrateDeclarationCutoverOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.migrateDirectInvestigationMetricsOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.migrateLegacyMetricsBusinessOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.migratePluginRegistryOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.migrateReleasedSchemaTransaction", Rule: "tx_control_sql", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.preserveSQLiteSequence", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.rebuildCanonicalSchema", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/legacy.go", Symbol: "upgrade.retireLegacyRefreshAttempts", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
 	{Path: "internal/quoin/upgrade/schemagate.go", Symbol: "upgrade.MigrateWithOptions", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
 	{Path: "internal/quoin/upgrade/schemagate.go", Symbol: "upgrade.MigrateWithOptions", Rule: "tx_control_sql", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/schemagate.go", Symbol: "upgrade.finishReleasedMigrationOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/verifyretire.go", Symbol: "upgrade.migrateVerifyRetireOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/taskchangelogretire.go", Symbol: "upgrade.migrateTaskChangeLogRetireOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/declareddiscoveryretire.go", Symbol: "upgrade.migrateDeclaredDiscoveryRetireOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/oidcauthretire.go", Symbol: "upgrade.migrateOIDCAuthRetireOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/pluginv2.go", Symbol: "upgrade.migratePluginV2On", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
-	{Path: "internal/quoin/upgrade/unifiedmtls.go", Symbol: "upgrade.migrateUnifiedMTLSOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
 }
 
 // TestExecutionArchitectureBaseline compares the exact current violation set
