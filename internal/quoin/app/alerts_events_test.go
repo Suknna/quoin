@@ -90,14 +90,14 @@ func newSSEStack(t *testing.T) *sseStack {
 
 // deliver pushes one webhook through the real alert transaction so triggers
 // derive change events in the same commit.
-func (stack *sseStack) deliver(t *testing.T, relayID, alertname, status string) {
+func (stack *sseStack) deliver(t *testing.T, eventID, alertname, status string) {
 	t.Helper()
 	labels := map[string]string{"alertname": alertname}
 	sum := alerts.FingerprintOf(labels)
 	fingerprint := fmt.Sprintf("%016x", uint64(sum[0])<<56|uint64(sum[1])<<48|uint64(sum[2])<<40|uint64(sum[3])<<32|uint64(sum[4])<<24|uint64(sum[5])<<16|uint64(sum[6])<<8|uint64(sum[7]))
 	body := []byte(fmt.Sprintf(`{"status":"firing","alerts":[{"status":%q,"labels":{"alertname":%q},"startsAt":"2026-08-18T14:00:00Z","fingerprint":"%s"}],"truncatedAlerts":0}`, status, alertname, fingerprint))
-	if _, err := stack.alerts.Deliver(context.Background(), relayID, stack.source, stack.creds, 1, body, time.Now().UTC()); err != nil {
-		t.Fatalf("deliver %s: %v", relayID, err)
+	if _, err := stack.alerts.Deliver(context.Background(), eventID, stack.source, stack.creds, 1, body, time.Now().UTC()); err != nil {
+		t.Fatalf("deliver %s: %v", eventID, err)
 	}
 }
 

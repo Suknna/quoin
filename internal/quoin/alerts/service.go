@@ -22,7 +22,7 @@ import (
 // shared command runner: one runner-owned IMMEDIATE transaction carrying the
 // authorization re-check, the domain writes and the automatic audit event.
 // No business code audits by hand, commits or opens its own transactions;
-// the relay deduplicates through the natural alert_deliveries.relay_id key
+// the relay deduplicates through the natural alert_deliveries.event_id key
 // instead of a client-command ledger row. Every pure read routes through
 // runner.Reader() — the trusted opaque execution.Reader installed through
 // runner.SetReader (only an execution.OpenReadOnly pool passes) — so an

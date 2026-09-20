@@ -10,12 +10,12 @@ import (
 
 // deliverStatus delivers one alertmanager item with the given labels,
 // startsAt and status (firing|resolved) through the real Deliver path.
-func deliverStatus(t *testing.T, service *Service, ctx context.Context, sourceID, credentialID int64, relayID string, labels map[string]string, startsAt, status string) DeliveryResult {
+func deliverStatus(t *testing.T, service *Service, ctx context.Context, sourceID, credentialID int64, eventID string, labels map[string]string, startsAt, status string) DeliveryResult {
 	t.Helper()
 	body := webhookBody(status, labels, startsAt, "")
-	result, err := service.Deliver(ctx, relayID, sourceID, credentialID, 1, body, time.Now().UTC())
+	result, err := service.Deliver(ctx, eventID, sourceID, credentialID, 1, body, time.Now().UTC())
 	if err != nil {
-		t.Fatalf("deliver %s: %v", relayID, err)
+		t.Fatalf("deliver %s: %v", eventID, err)
 	}
 	return result
 }

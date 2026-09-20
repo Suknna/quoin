@@ -434,7 +434,7 @@ func seedObservationAnnotations(t *testing.T, db *sql.DB, occurrenceID int64, st
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, err := db.Exec(`INSERT INTO alert_deliveries(relay_id,source_id,credential_id,credential_snapshot_version,protocol,body,body_size_bytes,integrity,status,received_at,committed_at) VALUES(?,?,?,?, 'alertmanager',?,?, 'complete','processed',?,?)`, fmt.Sprintf("annotation-relay-%d-%s", occurrenceID, state), sourceID, credentialID, 1, body, len(body), now, now)
+	delivery, err := db.Exec(`INSERT INTO alert_deliveries(event_id,source_id,credential_id,credential_snapshot_version,protocol,body,body_size_bytes,integrity,status,received_at,committed_at) VALUES(?,?,?,?, 'alertmanager',?,?, 'complete','processed',?,?)`, fmt.Sprintf("annotation-relay-%d-%s", occurrenceID, state), sourceID, credentialID, 1, body, len(body), now, now)
 	if err != nil {
 		t.Fatal(err)
 	}

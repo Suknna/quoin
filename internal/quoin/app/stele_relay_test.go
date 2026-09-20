@@ -240,11 +240,11 @@ func TestSteleRelayMTLSIdentityAndDelivery(t *testing.T) {
 	}
 
 	body := []byte(`{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"CPU","instance":"db-1"},"startsAt":"2026-08-17T10:00:00Z","fingerprint":"` + relayFingerprintHex(map[string]string{"alertname": "CPU", "instance": "db-1"}) + `"}],"truncatedAlerts":0}`)
-	deliver := func(relayID string) []runtimev1.EventDeliveryStatus {
+	deliver := func(eventID string) []runtimev1.EventDeliveryStatus {
 		response, err := steleClient.DeliverEvents(ctx, &runtimev1.DeliverEventsRequest{
 			ContractFingerprint: contract.ProtoAuthorityFingerprint,
 			Events: []*runtimev1.RelayEvent{{
-				EventId: relayID, SourceKind: "alertmanager", SourceId: result.SourceID,
+				EventId: eventID, SourceKind: "alertmanager", SourceId: result.SourceID,
 				CredentialId: result.CredentialID, CredentialSnapshotVersion: snapshot.GetSnapshotVersion(),
 				EventType: "alerts.batch", Payload: body,
 			}},

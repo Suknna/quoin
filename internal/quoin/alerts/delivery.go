@@ -70,7 +70,7 @@ type prepared struct {
 // intake issues and the automatic audit event all commit or none
 // (DATA-ALERT-001/002, RUNTIME-STELE-003/004/005, ADR-0006).
 //
-// Idempotency is the natural relay key: alert_deliveries.relay_id UNIQUE
+// Idempotency is the natural relay key: alert_deliveries.event_id UNIQUE
 // adjudicates a redelivery inside the transaction, so no client-command
 // ledger row exists — the delivery is a non-replayable ingestion whose
 // dedup happens against the delivery table itself. The Stele service
@@ -131,12 +131,12 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 	if webhook.TruncatedAlerts > 0 {
 		integrity = "truncated"
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO alert_deliveries(relay_id, source_id, credential_id, credential_snapshot_version, protocol, body, body_size_bytes, integrity, status, group_key, received_at, committed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+	result, err := tx.ExecContext(ctx, `INSERT INTO alert_deliveries(event_id, source_id, credential_id, credential_snapshot_version, protocol, body, body_size_bytes, integrity, status, group_key, received_at, committed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		relayID, sourceID, credentialID, snapshotVersion, "alertmanager", body, len(body), integrity, "processed", webhook.GroupKey, receivedAt.UTC().Format(time.RFC3339Nano), committedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			var existingID int64
-			if lookupErr := tx.QueryRowContext(ctx, `SELECT id FROM alert_deliveries WHERE relay_id = ?`, relayID).Scan(&existingID); lookupErr == nil {
+			if lookupErr := tx.QueryRowContext(ctx, `SELECT id FROM alert_deliveries WHERE event_id = ?`, relayID).Scan(&existingID); lookupErr == nil {
 				return DeliveryResult{Accepted: true, Status: "accepted", Detail: "duplicate relay; already committed", DeliveryID: existingID}, nil
 			}
 		}
@@ -233,7 +233,7 @@ func (service *Service) recordRejected(ctx context.Context, relayID string, sour
 	}
 	_, err = execution.Execute(ctx, service.runner, service.ops.delivery,
 		func(tx *execution.Tx) (bool, error) {
-			result, insertErr := tx.ExecContext(ctx, `INSERT INTO alert_deliveries(relay_id, source_id, credential_id, credential_snapshot_version, protocol, body, body_size_bytes, integrity, status, received_at, committed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			result, insertErr := tx.ExecContext(ctx, `INSERT INTO alert_deliveries(event_id, source_id, credential_id, credential_snapshot_version, protocol, body, body_size_bytes, integrity, status, received_at, committed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 				relayID, sourceID, credentialID, snapshotVersion, "alertmanager", body, len(body), "rejected", "rejected", receivedAt.UTC().Format(time.RFC3339Nano), service.clockText())
 			if insertErr != nil {
 				if isUniqueViolation(insertErr) {

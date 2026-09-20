@@ -28,7 +28,7 @@ func mustJSON(value any) string {
 // The relay path audits automatically (ADR-0006): the runner-owned
 // transaction writes the success event with the receiver-local machine
 // actor and a fresh correlation, and no client-command ledger row exists —
-// the natural relay_id key is the dedup authority.
+// the natural event_id key is the dedup authority.
 func TestDeliverRecordsAutomaticAuditWithoutLedger(t *testing.T) {
 	service, database, teardown := newTestService(t)
 	defer teardown()

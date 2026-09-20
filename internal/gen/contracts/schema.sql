@@ -304,7 +304,7 @@ CREATE INDEX idx_alert_source_credentials_source ON alert_source_credentials (so
 
 CREATE TABLE alert_deliveries (
   id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  relay_id                   TEXT NOT NULL UNIQUE,   -- Stele relay id，重试幂等键
+  event_id                   TEXT NOT NULL UNIQUE,   -- Stele 事件 id（网关生成），重试幂等键
   source_id                  INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   credential_id              INTEGER NOT NULL REFERENCES alert_source_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 每次 Delivery 必带认证元数据（DATA-ALERT-008）
   credential_snapshot_version INTEGER NOT NULL CHECK (credential_snapshot_version >= 1), -- Stele 提交的只读快照版本

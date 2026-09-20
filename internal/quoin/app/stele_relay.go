@@ -96,7 +96,7 @@ func (server *steleRelayServer) GetCredentialSnapshot(ctx context.Context, reque
 }
 
 // DeliverEvents 逐事件独立裁决（ADR-0011：Stele 本地队列的批量转发）。
-// source_kind 路由：alertmanager -> alerts.Deliver（relay_id=event_id、
+// source_kind 路由：alertmanager -> alerts.Deliver（event_id 透传、
 // body=归一化 payload JSON，语义与旧 Deliver 完全一致）；未知 source_kind
 // 确定性 REJECTED。alerts 服务自身错误 -> UNAVAILABLE（Stele 稍后重试）。
 // 返回与请求等长的 results，顺序一一对应。

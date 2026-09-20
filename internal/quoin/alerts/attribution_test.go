@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-func deliverWebhookFrom(t *testing.T, service *Service, relayID string, sourceID, credentialID int64, labels map[string]string, startsAt string) DeliveryResult {
+func deliverWebhookFrom(t *testing.T, service *Service, eventID string, sourceID, credentialID int64, labels map[string]string, startsAt string) DeliveryResult {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
 		"status": "firing",
@@ -29,12 +29,12 @@ func deliverWebhookFrom(t *testing.T, service *Service, relayID string, sourceID
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.Deliver(context.Background(), relayID, sourceID, credentialID, 1, body, time.Now().UTC())
+	result, err := service.Deliver(context.Background(), eventID, sourceID, credentialID, 1, body, time.Now().UTC())
 	if err != nil {
-		t.Fatalf("deliver %s: %v", relayID, err)
+		t.Fatalf("deliver %s: %v", eventID, err)
 	}
 	if !result.Accepted {
-		t.Fatalf("deliver %s rejected: %+v", relayID, result)
+		t.Fatalf("deliver %s rejected: %+v", eventID, result)
 	}
 	return result
 }
@@ -359,11 +359,11 @@ func TestSnapshotViewFilterAndDetailKey(t *testing.T) {
 	seedAttributionView(t, service, "payments-prod", "支付生产", []string{"am-prod"}, map[string]string{"service": "payments"})
 	seedAttributionView(t, service, "billing-prod", "计费生产", []string{"am-prod"}, map[string]string{"service": "billing"})
 
-	deliver := func(relayID, service_ string) int64 {
+	deliver := func(eventID, service_ string) int64 {
 		t.Helper()
-		result := deliverWebhookFrom(t, service, relayID, sourceID, credentialID, map[string]string{
-			"alertname": relayID, "service": service_,
-		}, fmt.Sprintf("2026-09-01T12:%02d:00Z", len(relayID)))
+		result := deliverWebhookFrom(t, service, eventID, sourceID, credentialID, map[string]string{
+			"alertname": eventID, "service": service_,
+		}, fmt.Sprintf("2026-09-01T12:%02d:00Z", len(eventID)))
 		return result.Occurrences[0].ID
 	}
 	deliver("pay-1", "payments")
