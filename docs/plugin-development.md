@@ -126,6 +126,40 @@ func (myTools) Tools() []plugins.ToolEntry {
 - **共享契约**：多个插件可贡献同名同 manifest 的工具（如 prometheus 与 thanos 共享
   `thanos_query`）；目录单条目，溯源列全部启用的贡献者，manifest 分歧是装配错误。
 
+## 告警归一化(ADR-0012,入向插件的第三能力)
+
+提供告警入向的插件 SHOULD 同时实现 `AlertNormalizer`——把本来源的 EventSource payload 映射到
+统一告警语义(纯函数、零业务依赖,业务解释归 Quoin):
+
+```go
+type myNormalizer struct{}
+
+func (myNormalizer) NormalizeAlert(payload []byte) ([]plugins.NormalizedAlert, error) {
+    // payload 是你的 EventSource 产出的归一化事件文档
+    return []plugins.NormalizedAlert{{
+        Severity:    plugins.SeverityCritical, // 四级词表:Critical/High/Warning/Info(带序数)
+        SeverityRaw: raw,                      // 来源原始值,审计用
+        Title:       name,
+        Annotations: annotations,              // 全量冻结
+        Resource:    instance,
+    }}, nil
+}
+
+func init() {
+    plugins.Register(plugins.Plugin{
+        // ...
+        EventSource:    mySource{},
+        AlertNormalizer: myNormalizer{}, // 必须与 EventSource 同插件(kind 一致)
+    })
+}
+```
+
+- severity 映射表放插件里(参考 builtin/alertmanager.go);词表外的值降级 `Info`,Quoin 侧不会丢事件。
+- Quoin 的 intake 流水线(归一化→富化→去重→关联)在首观测事务内执行你的 normalizer,语义列
+  (severity/title/annotations_canonical/resource)冻结后不可变;缺 normalizer 的来源记
+  `normalizer_missing` intake issue 并用缺省语义。
+- 业务语义(occurrence 状态机、富化规则、视图关联)绝不在插件里。
+
 ## 实例设置与校验
 
 `ConfigSchema` 是实例设置文档（连接 revision 的非秘密部分）的封闭 JSON Schema：
