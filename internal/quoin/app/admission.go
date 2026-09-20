@@ -83,6 +83,7 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("getMaintenanceState", http.MethodGet, "/api/v1/maintenance", operations.LevelSession, operations.KindQuery, "maintenance"),
 		declaration("exitMaintenance", http.MethodPost, "/api/v1/maintenance/exit", operations.LevelAdmin, operations.KindCommand, "maintenance"),
 		declaration("getAdminAbout", http.MethodGet, "/api/v1/admin/about", operations.LevelAdmin, operations.KindQuery, "platform"),
+		declaration("getAdminAuthConfig", http.MethodGet, "/api/v1/admin/auth-config", operations.LevelAdmin, operations.KindQuery, "deployment"),
 		declaration("prepareUpgrade", http.MethodPost, "/api/v1/maintenance/upgrade/prepare", operations.LevelAdmin, operations.KindCommand, "maintenance"),
 	)
 

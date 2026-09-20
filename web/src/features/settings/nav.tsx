@@ -49,6 +49,12 @@ export const platformGroup: SettingsNavGroup = {
 			adminOnly: true,
 		},
 		{
+			key: "auth-config",
+			label: "认证配置",
+			route: "/settings/platform/auth-config",
+			adminOnly: true,
+		},
+		{
 			key: "backups",
 			label: "备份与保留",
 			route: "/settings/platform/backups",

@@ -189,6 +189,7 @@ export function Users({ suspended }: { suspended: boolean }) {
 					{ label: "显示名" },
 					{ label: "用户名" },
 					{ label: "角色" },
+					{ label: "来源" },
 					{ label: "状态" },
 					{ label: "初始化" },
 					{ label: "操作" },
@@ -206,6 +207,7 @@ export function Users({ suspended }: { suspended: boolean }) {
 								{roleLabels[user.role]}
 							</Badge>
 						</TableCell>
+						<TableCell>{user.authSource === "oidc" ? "统一身份" : "本地"}</TableCell>
 						<TableCell
 							className={user.enabled ? undefined : "text-muted-foreground"}
 						>
@@ -243,36 +245,43 @@ export function Users({ suspended }: { suspended: boolean }) {
 										{user.enabled ? "停用" : "启用"}
 									</ConfirmAction>
 								)}
-								{user.role === "operator" ? (
-									<Button
-										size="sm"
-										variant="outline"
-										disabled={suspended}
-										onClick={() => {
-											setConfiguring(user);
-											setContactDraft(emptyContactDraft);
-										}}
-									>
-										配置渠道
-									</Button>
-								) : (
+								{user.role === "operator" &&
+									user.authSource !== "oidc" && (
+										<Button
+											size="sm"
+											variant="outline"
+											disabled={suspended}
+											onClick={() => {
+												setConfiguring(user);
+												setContactDraft(emptyContactDraft);
+											}}
+										>
+											配置渠道
+										</Button>
+									)}
+								{user.role === "admin" && (
 									<small className="inline-block max-w-60 whitespace-normal align-middle text-muted-foreground">
-										管理员收码渠道请在「设置 →
-										个人资料」中通过密码与验证码流程更换，此处不提供编辑。
+										管理员联系方式仅作展示，可在「设置 → 个人资料」查看。
 									</small>
 								)}
-								{user.role === "operator" && (
-									// Only operators: the backend deliberately rejects admin
-									// password reset here (account self-service or CLI only),
-									// so the button must never offer an inevitable error.
-									<Button
-										size="sm"
-										variant="outline"
-										disabled={suspended}
-										onClick={() => setResetting(user)}
-									>
-										重置密码
-									</Button>
+								{user.authSource === "oidc" ? (
+									// External accounts have no local password by construction.
+									<small className="inline-block max-w-60 whitespace-normal align-middle text-muted-foreground">
+										密码由统一身份平台管理
+									</small>
+								) : (
+									user.role === "operator" && (
+										// Only local operators: the backend deliberately rejects
+										// admin password reset here for the admin itself.
+										<Button
+											size="sm"
+											variant="outline"
+											disabled={suspended}
+											onClick={() => setResetting(user)}
+										>
+											重置密码
+										</Button>
+									)
 								)}
 								<ConfirmAction
 									title="撤销该用户的所有会话？"

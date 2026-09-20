@@ -17,6 +17,7 @@ import { About } from "../platform/about/About";
 import { Backups } from "../platform/backups/Backups";
 import { ModelProviderPage } from "../platform/model-providers/ModelProviderModule";
 import { Users } from "../platform/users/Users";
+import { AuthConfigPage } from "../platform/auth-config/AuthConfig";
 import { Profile } from "../profile/Profile";
 import { Security } from "../security/Security";
 
@@ -52,6 +53,9 @@ export function useSettingsModule(
 	}
 	if (pathname.startsWith("/settings/platform/users")) {
 		return platform(<Users suspended={props.suspended} />, "用户");
+	}
+	if (pathname.startsWith("/settings/platform/auth-config")) {
+		return platform(<AuthConfigPage />, "认证配置");
 	}
 	if (pathname.startsWith("/settings/platform/backups")) {
 		return platform(<Backups suspended={props.suspended} />, "备份与保留");

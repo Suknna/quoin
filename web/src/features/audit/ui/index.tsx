@@ -317,14 +317,31 @@ export function AuditPage({ suspended }: { suspended: boolean }) {
 						emptyDescription="当前筛选没有可显示的记录；请调整时间范围或其他条件。"
 					>
 						{items.map((event) => (
-							<TableRow key={event.id}>
+							// Local emergency logins carry the amber accent: the audit
+							// question "who entered through the IdP-outage channel"
+							// must be answerable at a glance (ADR-0010).
+							<TableRow
+								key={event.id}
+								className={
+									event.action.includes("login.local")
+										? "bg-amber-500/10"
+										: undefined
+								}
+							>
 								<TableCell className="text-xs tabular-nums text-muted-foreground">
 									{formatTimestamp(event.createdAt)}
 								</TableCell>
 								<TableCell>
 									{actorLabels[event.actorType]} · {event.actorId}
 								</TableCell>
-								<TableCell className="font-medium">{event.action}</TableCell>
+								<TableCell className="font-medium">
+									{event.action}
+									{event.action.includes("login.local") && (
+										<span className="ml-2 rounded bg-amber-500/20 px-1.5 py-0.5 text-xs text-amber-700 dark:text-amber-400">
+											应急通道
+										</span>
+									)}
+								</TableCell>
 								<TableCell>{phaseLabel(event.phase)}</TableCell>
 								<TableCell>
 									{event.domainRefType

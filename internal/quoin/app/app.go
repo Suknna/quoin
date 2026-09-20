@@ -63,8 +63,9 @@ type apiServer struct {
 	auth        *auth.Service
 	// providers is the login-channel registry (ADR-0010); /api/v1/auth/config
 	// projects it and the login page renders from that projection.
-	providers                    *auth.Registry
-	dataDirectory                string
+	providers     *auth.Registry
+	authnConfig   *contract.QuoinAuthenticationConfig
+	dataDirectory string
 	db                           *sql.DB
 	alerts                       *alerts.Service
 	platformFaults               *alerts.PlatformFaultReporter
@@ -624,6 +625,7 @@ func (application *apiServer) register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/maintenance", OperationID: "getMaintenanceState"}, application.getMaintenanceState)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/maintenance/upgrade/prepare", OperationID: "prepareUpgrade"}, application.prepareUpgrade)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/admin/about", OperationID: "getAdminAbout"}, application.aboutPlatform)
+	application.registerAdminAuthConfigRoute(api)
 	application.registerBusinessContextRoute(api)
 	application.registerAlertRoutes(api)
 	application.registerAdminUserRoutes(api)

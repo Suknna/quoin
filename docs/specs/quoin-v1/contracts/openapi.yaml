@@ -1067,6 +1067,44 @@ paths:
           $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
+  /api/v1/admin/auth-config:
+    get:
+      tags: [admin]
+      operationId: getAdminAuthConfig
+      x-quoin-cache-control: no-store
+      summary: 只读认证配置视图（Admin）
+      description: |
+        部署声明的登录通道投影（ADR-0010）：本地/OIDC 启用状态、issuer、
+        client_id、回调地址与 SSO 显示名；client secret 只呈现"已配置"事实，
+        永不回显值。修改方式为部署配置文件+重启，本端点不提供在线编辑。
+      responses:
+        '200':
+          description: 认证配置条目。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStoreCacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries]
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      type: object
+                      required: [key, value]
+                      properties:
+                        key:
+                          type: string
+                        value:
+                          type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/admin/about:
     get:
       tags: [adminops]

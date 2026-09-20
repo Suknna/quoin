@@ -542,6 +542,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/auth-config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 只读认证配置视图（Admin）
+         * @description 部署声明的登录通道投影（ADR-0010）：本地/OIDC 启用状态、issuer、
+         *     client_id、回调地址与 SSO 显示名；client secret 只呈现"已配置"事实，
+         *     永不回显值。修改方式为部署配置文件+重启，本端点不提供在线编辑。
+         */
+        get: operations["getAdminAuthConfig"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/about": {
         parameters: {
             query?: never;
@@ -4734,6 +4756,35 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             409: components["responses"]["Conflict"];
             429: components["responses"]["RateLimited"];
+        };
+    };
+    getAdminAuthConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 认证配置条目。 */
+            200: {
+                headers: {
+                    "Cache-Control": components["headers"]["NoStoreCacheControl"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        entries: {
+                            key: string;
+                            value: string;
+                        }[];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     getAdminAbout: {

@@ -93,6 +93,7 @@ func removeInitialPasswordFile(dataDirectory string) {
 // error and fails fast; the local channel always registers (even hidden) so
 // /api/v1/auth/config projects a stable shape.
 func (application *apiServer) configureLoginProviders(config *contract.QuoinAuthenticationConfig) error {
+	application.authnConfig = config
 	localEnabled := config.LocalEnabled()
 	oidcEnabled := config.OIDCEnabled()
 	if !localEnabled && !oidcEnabled {

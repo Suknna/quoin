@@ -205,7 +205,7 @@ func (service *Service) ListUsers(ctx context.Context, afterID int64, limit int)
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := service.read().QueryContext(ctx, `SELECT id,username,display_name,role,enabled,auth_revision,initialized,row_version,password_change_required,password_phc,(SELECT MAX(created_at) FROM sessions WHERE user_id=users.id) FROM users WHERE id>? ORDER BY id LIMIT ?`, afterID, limit+1)
+	rows, err := service.read().QueryContext(ctx, `SELECT id,username,display_name,role,enabled,auth_revision,initialized,row_version,password_change_required,password_phc,(SELECT CASE WHEN EXISTS(SELECT 1 FROM identities i WHERE i.user_id=users.id) THEN 'oidc' ELSE 'local' END),(SELECT MAX(created_at) FROM sessions WHERE user_id=users.id) FROM users WHERE id>? ORDER BY id LIMIT ?`, afterID, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -233,10 +233,12 @@ func (service *Service) ListUsers(ctx context.Context, afterID int64, limit int)
 func scanUserRow(rows *sql.Rows) (User, error) {
 	var user User
 	var enabled, initialized, required int
+	var passwordPHC sql.NullString
 	var lastLogin sql.NullString
-	if err := rows.Scan(&user.ID, &user.Username, &user.DisplayName, &user.Role, &enabled, &user.AuthRevision, &initialized, &user.RowVersion, &required, &user.passwordPHC, &lastLogin); err != nil {
+	if err := rows.Scan(&user.ID, &user.Username, &user.DisplayName, &user.Role, &enabled, &user.AuthRevision, &initialized, &user.RowVersion, &required, &passwordPHC, &user.AuthSource, &lastLogin); err != nil {
 		return User{}, err
 	}
+	user.passwordPHC = passwordPHC.String
 	user.Locator = strconv.FormatInt(user.ID, 10)
 	user.Enabled = enabled == 1
 	user.Initialized = initialized == 1

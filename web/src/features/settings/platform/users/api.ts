@@ -20,8 +20,9 @@ export interface AdminUser {
   displayName: string
   role: 'admin' | 'operator'
   enabled: boolean
-  /** Optional until the shared generated types gain the field; absent only from stale projections. */
   initialized?: boolean
+  /** "local" (emergency channel) or "oidc" (identities row, ADR-0010). */
+  authSource: 'local' | 'oidc' 
   authRevision: number
   rowVersion: number
   passwordChangeRequired: boolean
