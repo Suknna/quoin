@@ -480,7 +480,7 @@ function baseState(scenario: MockScenario): MockState {
 						? null
 						: adminUser,
 		adminInitialized: scenario !== "empty",
-		users: [adminUser, operatorUser].map((user) => ({ ...user })),
+		users: [adminUser, operatorUser].map((user) => ({ ...user, authSource: "local" as const })),
 		contacts: {
 			[adminUser.id]: [
 				{

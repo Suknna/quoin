@@ -8,6 +8,7 @@ import {
 	getMockState,
 	nextId,
 } from "./store";
+import type { AdminUser } from "../../features/settings/platform/users/api";
 
 const json = <T extends JsonBodyType>(body: T, init?: ResponseInit) =>
 	HttpResponse.json(body, init);
@@ -309,7 +310,8 @@ export const domainHandlers = [
 			matched.passwordChangeRequired === true;
 		state.currentUser = {
 			...matched,
-			authSource: "local",
+			initialized: matched.initialized !== false,
+			authSource: "local" as const,
 			passwordChangeRequired: restricted,
 		};
 		return json({ completed: true, user: state.currentUser });
@@ -1494,7 +1496,7 @@ export const domainHandlers = [
 			displayName: string;
 			role: "admin" | "operator";
 		}>(request);
-		const user = {
+		const user: AdminUser = {
 			id: nextId("user"),
 			username: input.username,
 			displayName: input.displayName,
@@ -1503,6 +1505,7 @@ export const domainHandlers = [
 			authRevision: 1,
 			rowVersion: 1,
 			passwordChangeRequired: true,
+			authSource: "local" as const,
 			lastLoginAt: null,
 		};
 		getMockState().users.push(user);
