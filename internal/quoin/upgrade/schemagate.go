@@ -231,6 +231,14 @@ func verifySchemaGate(ctx context.Context, conn *sql.Conn, result *PreflightResu
 		}
 		return verifyUnifiedAuthHistory(ctx, conn, true)
 	}
+	// The plugin-v2 predecessor is the last pre-ADR-0011 release; every
+	// history its own schema gate admitted stays authentic here.
+	if stored == pluginV2PredecessorSchemaDigest {
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger`).Scan(&result.MigrationHistory); err != nil {
+			return err
+		}
+		return verifyUnifiedAuthHistory(ctx, conn, true)
+	}
 	if stored != hex.EncodeToString(digest[:]) {
 		return ErrSchemaDigestMismatch
 	}
@@ -348,6 +356,9 @@ func MigrateWithOptions(ctx context.Context, db *sql.DB, options Options) (Prefl
 	}
 	if digest == oidcAuthRetirePredecessorSchemaDigest {
 		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateOIDCAuthRetireOn)
+	}
+	if digest == pluginV2PredecessorSchemaDigest {
+		return migrateReleasedSchemaAndFinish(ctx, db, options, migratePluginV2On)
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {

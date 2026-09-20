@@ -1,9 +1,12 @@
 package app
 
-// Dispatch correlation propagation tests: the DispatchAttempt frame echoes
-// the stored execution_attempts association verbatim, a legacy row without
-// correlation dispatches with an empty id, and a missing attempt row fails
-// the dispatch instead of fabricating an identity (ADR-0006).
+// Dispatch correlation propagation tests: the stored execution_attempts
+// association is the single correlation authority every dispatch path echoes
+// verbatim; a legacy row without correlation dispatches with an empty id, and
+// a missing attempt row fails the dispatch instead of fabricating an identity
+// (ADR-0006). The probe DispatchAttempt frame is retired with local
+// execution (ADR-0011); the helper under test is the same one the remaining
+// agent dispatches use.
 
 import (
 	"context"
@@ -97,33 +100,30 @@ func newDispatchTestService(t *testing.T) (*RuntimeService, *[]*runtimev1.Contro
 	return service, &captured, db
 }
 
-func TestDispatchAttemptEchoesStoredOperationCorrelation(t *testing.T) {
-	service, captured, db := newDispatchTestService(t)
+func TestDispatchCorrelationEchoesStoredAssociation(t *testing.T) {
+	service, _, db := newDispatchTestService(t)
 	correlated := seedProbeAttemptWithCorrelation(t, db, true)
 	legacy := seedProbeAttemptWithCorrelation(t, db, false)
 
-	for _, attemptID := range []int64{correlated, legacy} {
-		if err := service.dispatchAttempt(context.Background(), attemptID, connections.Summary{ID: attemptID, Type: connections.TypePrometheus}, 3, "boot-1", 0, []byte("{}")); err != nil {
-			t.Fatal(err)
-		}
+	echoed, err := dispatchOperationCorrelation(context.Background(), service.Connections.Reader(), correlated)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(*captured) != 2 {
-		t.Fatalf("captured %d dispatch frames, want 2", len(*captured))
+	if echoed != testCorrelationID {
+		t.Fatalf("correlated dispatch operation_correlation_id = %q, want the stored association", echoed)
 	}
-	if got := (*captured)[0].GetDispatchAttempt().GetOperationCorrelationId(); got != testCorrelationID {
-		t.Fatalf("correlated dispatch operation_correlation_id = %q, want the stored association", got)
+	echoed, err = dispatchOperationCorrelation(context.Background(), service.Connections.Reader(), legacy)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := (*captured)[1].GetDispatchAttempt().GetOperationCorrelationId(); got != "" {
-		t.Fatalf("legacy dispatch operation_correlation_id = %q, want empty", got)
+	if echoed != "" {
+		t.Fatalf("legacy dispatch operation_correlation_id = %q, want empty", echoed)
 	}
 }
 
-func TestDispatchAttemptFailsWhenAttemptRowMissing(t *testing.T) {
-	service, captured, _ := newDispatchTestService(t)
-	if err := service.dispatchAttempt(context.Background(), 424242, connections.Summary{ID: 1, Type: connections.TypePrometheus}, 3, "boot-1", 0, []byte("{}")); err == nil {
-		t.Fatal("dispatch of an unknown attempt must fail instead of dispatching without its identity")
-	}
-	if len(*captured) != 0 {
-		t.Fatalf("failed dispatch captured %d frames, want none", len(*captured))
+func TestDispatchCorrelationFailsWhenAttemptRowMissing(t *testing.T) {
+	service, _, _ := newDispatchTestService(t)
+	if _, err := dispatchOperationCorrelation(context.Background(), service.Connections.Reader(), 424242); err == nil {
+		t.Fatal("correlation lookup of an unknown attempt must fail instead of dispatching without its identity")
 	}
 }

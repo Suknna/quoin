@@ -6505,7 +6505,7 @@ export interface operations {
                             description: string;
                             enabled: boolean;
                             version: string;
-                            capabilities: ("probe" | "discover" | "tools" | "execute_tool" | "inspection_templates" | "collect")[];
+                            capabilities: ("event_source" | "tools" | "discover" | "inspection_templates")[];
                         }[];
                     };
                 };

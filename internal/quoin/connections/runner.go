@@ -41,6 +41,7 @@ const (
 	opProbeBind      = "connection.probe.bind"
 	opGrantFulfill   = "connection.grant.fulfill"
 	opModelDiscovery = "connection.model_discovery"
+	opMetricsAcquire = "connection.metrics.acquire"
 
 	objectConnection = "connection"
 	// objectProbeAttempt locates attempt-scoped probe operations in audits.
@@ -50,6 +51,10 @@ const (
 	// (DATA-CONN-002: the sensitive read is recorded before any secret
 	// leaves storage; the payload itself never enters the audit).
 	objectGrantFulfill = "connection_credential_grant"
+	// objectMetricsAcquire locates the audited Stele 网关连接材料投递
+	// （ADR-0011）：与 grant reveal 同级的敏感读，解密仅为了按需投递给
+	// Stele，Quoin 自身不使用、不缓存。
+	objectMetricsAcquire = "connection_metrics_acquire"
 )
 
 // adminRole is the only role allowed to execute interactive connection
@@ -89,6 +94,7 @@ type commandRunner struct {
 	probeBind      *execution.Operation
 	grantFulfill   *execution.Operation
 	modelDiscovery *execution.Operation
+	metricsAcquire *execution.Operation
 }
 
 // newCommandRunner registers the connection operations and builds the runner
@@ -118,6 +124,7 @@ func newCommandRunner(db *sql.DB, now func() time.Time) *commandRunner {
 		{&commands.probeBind, opProbeBind, objectProbeAttempt, requireProbeSystem},
 		{&commands.grantFulfill, opGrantFulfill, objectGrantFulfill, requireProbeSystem},
 		{&commands.modelDiscovery, opModelDiscovery, objectModelProvider, authorizeAdmin},
+		{&commands.metricsAcquire, opMetricsAcquire, objectMetricsAcquire, requireProbeSystem},
 	} {
 		operation, err := registry.Register(execution.Operation{
 			Name: declaration.name, Class: execution.ClassWrite,

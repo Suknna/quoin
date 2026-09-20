@@ -66,7 +66,7 @@ func seedThanosIntegration(t *testing.T, db *sql.DB, name string) (connectionID,
 		t.Fatal(err)
 	}
 	probeEpoch := uint64(time.Now().UnixNano())
-	probeAttemptID, err := service.StartProbe(investigationAdminContext(t), summary.Name, nil, nil)
+	probeAttemptID, err := service.StartProbe(investigationAdminContext(t), summary.Name)
 	if err != nil {
 		t.Fatal(err)
 	}

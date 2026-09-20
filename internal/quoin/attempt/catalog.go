@@ -77,27 +77,12 @@ type FrozenTool struct {
 // Keep 提示词迁入 generations (initial-analysis-v2 / investigation-v3) accept
 // exactly the locations of their predecessors — a prompt generation never
 // changes the tool surface.
-var generationAccepts = map[string]map[plugins.ExecutionLocation]bool{
-	"initial-analysis-v1": {
-		plugins.LocationWorkerLocal:      true,
-		plugins.LocationPlinthSupervisor: true,
-	},
-	"initial-analysis-v2": {
-		plugins.LocationWorkerLocal:      true,
-		plugins.LocationPlinthSupervisor: true,
-	},
-	"investigation-v1": {
-		plugins.LocationWorkerLocal:      true,
-		plugins.LocationPlinthSupervisor: true,
-	},
-	"investigation-v2": {
-		plugins.LocationWorkerLocal:      true,
-		plugins.LocationPlinthSupervisor: true,
-	},
-	"investigation-v3": {
-		plugins.LocationWorkerLocal:      true,
-		plugins.LocationPlinthSupervisor: true,
-	},
+var generationAccepts = map[string]map[string]bool{
+	"initial-analysis-v1": {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"initial-analysis-v2": {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"investigation-v1":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"investigation-v2":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"investigation-v3":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 }
 
 // platformToolNames are the compiled tools no plugin owns (workspace and
@@ -202,6 +187,11 @@ type Catalogs struct {
 	// consumer of this assembly (frozen-catalog compatibility, ingress
 	// validation, execution dispatch).
 	Implementations *ImplementationTable
+	// Handlers is the plugin tool dispatch table (name -> type-erased
+	// invocation, ADR-0011): every quoin_routed plugin tool executes in
+	// Quoin through its entry; platform quoin_routed tools (artifact tools)
+	// execute through the attempt core's own executors.
+	Handlers map[string]plugins.ToolEntry
 }
 
 // CatalogFor returns the frozen catalog of one agent generation.
@@ -228,76 +218,66 @@ func (catalogs *Catalogs) InstalledDefinition(frozen FrozenTool) (ToolDef, error
 	return catalogs.Implementations.InstalledDefinition(frozen)
 }
 
-// BuildCatalogs assembles the per-generation frozen catalogs and the shared
-// implementation table from ONE registry. Platform tools come first (stable
-// compiled order); enabled plugins contribute their declared tools in
-// stable descriptor order, each verified against the compiled
-// implementation so a declaration can never advertise a tool nobody
-// executes. Every registered descriptor is verified against the
-// implementation table, and every non-platform implementation must be owned
-// by a registered descriptor.
-func BuildCatalogs(registry *plugins.Registry, implementations []ToolDef, enabledPluginIDs []string) (*Catalogs, error) {
+// BuildCatalogs assembles the per-generation frozen catalogs, the shared
+// implementation table and the plugin handler table from ONE registry
+// (ADR-0011). Platform tools come first (stable compiled order); enabled
+// plugins contribute their model-visible tools in stable plugin order —
+// the manifest is derived from the typed implementation at registration,
+// so declaration/implementation agreement holds by construction and the
+// registry's shared-contract dedup already resolved duplicate names.
+func BuildCatalogs(registry *plugins.Registry, enabledPluginIDs []string) (*Catalogs, error) {
 	if registry == nil {
 		return nil, fmt.Errorf("plugin registry is not wired")
 	}
-	table, err := NewImplementationTable(implementations)
+	entries := registry.ToolEntries()
+	definitions := make([]ToolDef, 0, len(entries))
+	definitions = append(definitions, PlatformImplementations()...)
+	for _, entry := range entries {
+		definitions = append(definitions, entry.Definition)
+	}
+	table, err := NewImplementationTable(definitions)
 	if err != nil {
 		return nil, err
 	}
-	// Every registered descriptor owns its declared tool names; ownership is
-	// a declaration fact, not an enablement fact, and
-	// declaration/implementation agreement is verified here for ALL of them
-	// (声明不能伪装不存在的实现).
-	pluginOwned := map[string]bool{}
-	for _, descriptor := range registry.Descriptors() {
-		for _, declared := range descriptor.Tools {
-			if err := verifyDeclaredTool(table, descriptor, declared); err != nil {
-				return nil, err
-			}
-			pluginOwned[declared.Name] = true
-		}
+	handlers := map[string]plugins.ToolEntry{}
+	for _, entry := range entries {
+		handlers[entry.Definition.Name] = entry
 	}
-	// The reverse direction: an implementation nobody declares is a wiring
-	// bug and must fail the assembly instead of leaking an unclaimed tool.
-	for _, def := range implementations {
-		if !platformToolNames[def.Name] && !pluginOwned[def.Name] {
-			return nil, fmt.Errorf("compiled tool %s has no registered plugin declaration", def.Name)
-		}
-	}
-	catalogs := &Catalogs{generations: map[string]*FrozenCatalog{}, Implementations: table}
+	catalogs := &Catalogs{generations: map[string]*FrozenCatalog{}, Implementations: table, Handlers: handlers}
 	for agentVersion, accepts := range generationAccepts {
 		catalog := &FrozenCatalog{
 			SchemaVersion: catalogSchemaVersionFor(agentVersion),
 			AgentVersion:  agentVersion,
 		}
-		for _, def := range implementations {
-			if platformToolNames[def.Name] {
-				catalog.Tools = append(catalog.Tools, frozenToolFromDefinition(def))
-			}
+		for _, def := range PlatformImplementations() {
+			catalog.Tools = append(catalog.Tools, frozenToolFromDefinition(def))
 		}
 		addedTools := map[string]bool{}
-		for _, descriptor := range registry.Descriptors() {
-			if !plugins.IsEnabled(enabledPluginIDs, descriptor.ID) {
+		for _, plugin := range registry.Plugins() {
+			if !plugins.IsEnabled(enabledPluginIDs, plugin.ID) {
+				continue
+			}
+			if plugin.Tools == nil {
 				continue
 			}
 			contributed := false
-			for _, declared := range descriptor.Tools {
-				if accepts[declared.ExecutionLocation] {
-					implementation, _ := table.Lookup(declared.Name)
-					// The same contract tool may be declared by several
-					// provider plugins (e.g. PromQL query over prometheus or
-					// thanos connections): the catalog keeps ONE entry and
-					// provenance lists every enabled contributing provider;
-					// authorization resolves the actual source connection.
-					if !addedTools[declared.Name] {
-						catalog.Tools = append(catalog.Tools, frozenToolFromDefinition(implementation))
-						addedTools[declared.Name] = true
-					}
-					contributed = true
+			for _, entry := range plugin.Tools.Tools() {
+				if entry.Internal || !accepts[entry.Definition.ExecutionMode] {
+					continue
 				}
+				// The same contract tool may be contributed by several
+				// provider plugins (e.g. PromQL query over prometheus or
+				// thanos connections): the catalog keeps ONE entry and
+				// provenance lists every enabled contributing provider;
+				// authorization resolves the actual source connection.
+				if !addedTools[entry.Definition.Name] {
+					catalog.Tools = append(catalog.Tools, frozenToolFromDefinition(entry.Definition))
+					addedTools[entry.Definition.Name] = true
+				}
+				contributed = true
 			}
 			if contributed {
-				catalog.Plugins = append(catalog.Plugins, FrozenPlugin{ID: descriptor.ID, Version: descriptor.Version})
+				catalog.Plugins = append(catalog.Plugins, FrozenPlugin{ID: plugin.ID, Version: plugin.Version})
 			}
 		}
 		catalogs.generations[agentVersion] = catalog
@@ -312,29 +292,6 @@ func catalogSchemaVersionFor(agentVersion string) string {
 		return "investigation-tools-v3"
 	}
 	return ToolSchemaVersion
-}
-
-// verifyDeclaredTool pins one declared tool against the compiled
-// implementation table at assembly time.
-func verifyDeclaredTool(table *ImplementationTable, descriptor plugins.Descriptor, declared plugins.Tool) error {
-	implementation, exists := table.Lookup(declared.Name)
-	if !exists {
-		return fmt.Errorf("plugin %s declares tool %s without a compiled implementation", descriptor.ID, declared.Name)
-	}
-	mode := plugins.LocationExecutionModes(declared.ExecutionLocation)
-	if mode == "" || implementation.ExecutionMode != mode {
-		return fmt.Errorf("plugin %s tool %s declares execution location %q, implementation runs as %q", descriptor.ID, declared.Name, declared.ExecutionLocation, implementation.ExecutionMode)
-	}
-	if implementation.Version != declared.Version {
-		return fmt.Errorf("plugin %s tool %s declares version %s, implementation is %s", descriptor.ID, declared.Name, declared.Version, implementation.Version)
-	}
-	if implementation.FailureMode != declared.FailureMode {
-		return fmt.Errorf("plugin %s tool %s declares failure mode %q, implementation uses %q", descriptor.ID, declared.Name, declared.FailureMode, implementation.FailureMode)
-	}
-	if implementation.Description != declared.Description {
-		return fmt.Errorf("plugin %s tool %s description drifts from the compiled implementation", descriptor.ID, declared.Name)
-	}
-	return nil
 }
 
 // FrozenCatalogJSONForCreation marshals the catalog document an agent

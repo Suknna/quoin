@@ -60,6 +60,10 @@ type RuntimeService struct {
 	InvestigationRuntime *appinvestigation.RuntimeSlice
 	// Artifacts is the Artifact store the ArtifactService adapts (T10).
 	Artifacts *artifact.Store
+	// SteleGateway 承载出向平台执行流（ADR-0011）：quoin_routed 工具的
+	// 平台调用经它下发 Stele。nil 时网关未装配，编排以 unreachable 失败
+	// 封存（测试可注入 stub）。
+	SteleGateway *steleGateway
 	// MaintenanceBlocking gates scheduling admission while any maintenance
 	// revision is active: due boundaries then record their durable
 	// runtime_unavailable outcome instead of creating dispatchable work
@@ -75,6 +79,9 @@ type RuntimeService struct {
 	// reconcile carries the pending same-boot ReconcileReport waiter
 	// (T12, RUNTIME-TASK-005).
 	reconcile reconcileState
+	// localExecutionPass serializes the local execution scan rounds (periodic
+	// tick and scheduler kicks share one entry; ADR-0011).
+	localExecutionPass sync.Mutex
 	// sendEnvelopeForTest captures outbound control replies in package tests.
 	// Production leaves it nil and always routes through the live slot.
 	sendEnvelopeForTest func(slot string, envelope *runtimev1.ControlEnvelope) error
@@ -213,13 +220,13 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 	sharedops.LogEvent("quoin", "info", "runtime.connected", "slot="+slot)
 	if slot == qruntime.SlotPlinth {
 		// Reconnect adjudication first (new-boot interrupts, same-boot
-		// reconcile), then queued attempts created while the slot was
+		// reconcile), then queued agent attempts created while the slot was
 		// disconnected bind to this live stream and dispatch immediately.
+		// Probes, source observation and inspection collection no longer ride
+		// this slot (ADR-0011): the local execution loop consumes them.
 		go service.onPlinthAttached(context.Background(), hello.GetBootId(), hello.GetConnectionEpoch())
 		go service.dispatchAllCancellingInspections(context.Background())
 		go service.dispatchAllCancellingKnowledgeExtractions(context.Background())
-		go service.dispatchQueuedProbes(context.Background())
-		go service.dispatchQueuedSourceObservationAttempts(context.Background())
 		go service.dispatchQueuedAnalyses(context.Background())
 		go service.dispatchQueuedKnowledgeExtractions(context.Background())
 		go service.dispatchQueuedEmbeddings(context.Background())

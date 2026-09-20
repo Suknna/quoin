@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	gen "github.com/Suknna/quoin/internal/gen/contracts"
+	_ "github.com/Suknna/quoin/internal/plugins/builtin"
 	_ "github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/inspection"

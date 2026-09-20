@@ -17,6 +17,7 @@ import (
 	"time"
 
 	gen "github.com/Suknna/quoin/internal/gen/contracts"
+	_ "github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	_ "github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/connections"
@@ -205,7 +206,7 @@ func seedAlternateMetricsConnection(t *testing.T, db *sql.DB) {
 func enableQualifiedMetricsConnection(t *testing.T, db *sql.DB, service *connections.Service, summary connections.Summary, bootID string) {
 	t.Helper()
 	ctx := commandContext(t)
-	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, summary.Name)
 	if err != nil {
 		t.Fatalf("start metrics probe: %v", err)
 	}

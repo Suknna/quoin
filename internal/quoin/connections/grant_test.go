@@ -25,7 +25,7 @@ func grantFixture(t *testing.T) (*connections.Service, *sql.DB, int64, int64, st
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, summary.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestQueuedDispatchBindsOnConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No live stream: the attempt stays Queued.
-	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, summary.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestRotateSwitchesPairAndLateResultClosesOldPair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, summary.Name)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,10 +1,10 @@
 package supervisor
 
-// Plinth supervisor task slice (T07): deterministic execution of the closed
-// connection_probe action sets. The supervisor accepts a dispatched attempt,
-// fetches its one attempt-scoped credential grant over the authenticated
-// gRPC channel, runs the typed executor, and proposes the canonical typed
-// result (RUNTIME-AGENT-010: no agent, no model, no ReAct).
+// Plinth supervisor task slice (ADR-0011): Plinth 是纯推理沙箱——只执行
+// 模型推理(四种 agent attempt 经 worker 沙箱 + EMBEDDING 直连模型)。
+// 连接探测、来源观测、巡检采集与插件工具执行已全部移交 Quoin(权限/
+// 审计/派发)+ Stele(凭证/限流/传输),不再派发 Plinth;收到这些类型的
+// DispatchAttempt 一律按 INPUT_UNSUPPORTED 拒绝。
 
 import (
 	"context"
@@ -19,24 +19,19 @@ import (
 	plinthagent "github.com/Suknna/quoin/internal/plinth/agent"
 	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
 	"github.com/Suknna/quoin/internal/plinth/model"
-	"github.com/Suknna/quoin/internal/plinth/modelprovider"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
 	"github.com/Suknna/quoin/internal/plinth/worker"
-	"github.com/Suknna/quoin/internal/plugins"
 )
 
-// Supervisor executes dispatched attempts on the live channel: the
-// deterministic connection_probe action sets (T07/T08) and the initial
-// analysis agent attempts (T10) via a fresh sandboxed worker process.
+// Supervisor executes dispatched inference attempts on the live channel:
+// every agent attempt runs through a fresh sandboxed worker process, and
+// embedding attempts run supervisor-direct through the modelprovider
+// executor.
 type Supervisor struct {
 	Channel *runtime.Channel
 	// WorkspaceRoot is the per-attempt workspace parent directory
 	// (ARCH-WORKER-001: one fresh workspace per attempt).
 	WorkspaceRoot string
-	// Registry is the process plugin registry, assembled once at wiring by
-	// HostRegistry from the shared builtin plugin source. Nil (tests and
-	// minimal hosts) lazily builds the same assembly on first use.
-	Registry *plugins.Registry
 }
 
 // HandleDispatchAttempt runs one dispatched attempt to a typed terminal
@@ -50,30 +45,10 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 	// join attempts by id instead of echoing any runtime-supplied identity.
 	parent = dispatchContext(parent, dispatch)
 
-	// Supervisor scope: connection_probe and plinth agent attempts exist
-	// here (RUNTIME-SCOPE); every agent attempt runs through a fresh
-	// sandboxed worker with its attempt type's frozen input schema.
+	// Supervisor scope (ADR-0011): 推理沙箱只承载 EMBEDDING 与四种 agent
+	// attempt;CONNECTION_PROBE / OBSERVATION_RUN / INSPECTION_COLLECTION 已
+	// 改由 Quoin 直接经 Stele 执行,不应再派发到这里——收到了也显式拒绝。
 	switch dispatch.GetAttemptType() {
-	case runtimev1.AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE:
-		supervisor.runProbe(parent, sink, client, dispatch, binding, stopTask)
-	case runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION:
-		switch dispatch.GetScopeType() {
-		case runtimev1.ScopeType_SCOPE_TYPE_OBSERVATION_RUN:
-			supervisor.runSourceObservation(parent, sink, client, dispatch, binding, stopTask)
-		case runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK:
-			// 独立计划 Run（ADR-0004）的插件采集输入与历史声明 PromQL 输入
-			// 共用 run_check 作用域，按冻结 schemaKind 路由。
-			var routeInput struct {
-				SchemaKind string `json:"schemaKind"`
-			}
-			if dispatch.GetInput() != nil && json.Unmarshal(dispatch.GetInput().GetCanonicalJson(), &routeInput) == nil && routeInput.SchemaKind == "inspection_plugin_execution_v1" {
-				supervisor.runInspectionPluginCollection(parent, sink, client, dispatch, binding, stopTask)
-			} else {
-				supervisor.runInspectionPromQL(parent, sink, client, dispatch, binding, stopTask)
-			}
-		default:
-			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "unsupported inspection collection scope")
-		}
 	case runtimev1.AttemptType_ATTEMPT_TYPE_EMBEDDING:
 		supervisor.runEmbedding(parent, sink, client, dispatch, binding, stopTask)
 	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION, runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION:
@@ -83,9 +58,10 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 	}
 }
 
-// runAgent drives one initial-analysis or investigation attempt through a
-// fresh worker process (ARCH-WORKER-001/002); the attempt type selects the
-// worker's work mode and failure payload schema.
+// runAgent drives one initial-analysis, investigation, inspection-analysis
+// or knowledge-extraction attempt through a fresh worker process
+// (ARCH-WORKER-001/002); the attempt type selects the worker's work mode
+// and failure payload schema.
 func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding runtime.DispatchBinding, stopTask func(int64) bool) {
 	attemptID := dispatch.GetAttemptId()
 	ctx, cancel := context.WithCancel(parent)
@@ -168,6 +144,8 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 		GrantId: grant.GetGrantId(), AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch,
 	})
 	grantCancel()
+	// ADR-0011 之后 FetchCredentialGrant 只剩 model_provider 一个 oneof
+	// 成员:模型推理是 Plinth 保留的唯一凭据消费场景。
 	if err != nil || payload.GetModelProvider() == nil {
 		failPreAccept("获取模型凭据 grant 失败")
 		return
@@ -232,163 +210,16 @@ func (supervisor *Supervisor) primaryGrant(input *runtimev1.AttemptInputSnapshot
 	return nil, false
 }
 
-// runProbe keeps the T07/T08 deterministic probe slice.
-func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding runtime.DispatchBinding, stopTask func(int64) bool) {
-	attemptID := dispatch.GetAttemptId()
-	ctx, cancel := context.WithCancel(parent)
-	defer cancel()
-	supervisor.Channel.RegisterTask(attemptID, cancel)
-	defer stopTask(attemptID)
-	if err := sink.Send(&runtimev1.ControlEnvelope{
-		CorrelationId: uint64(attemptID),
-		Msg:           &runtimev1.ControlEnvelope_AttemptAccept{AttemptAccept: &runtimev1.AttemptAccept{AttemptId: attemptID}},
-	}); err != nil {
-		sharedops.LogEvent("plinth", "error", "probe.accept_send", err.Error())
-		return
-	}
-	// The correlation rides local logs only when the dispatch carried one.
-	acceptedMessage := fmt.Sprintf("attempt=%d", attemptID)
-	if correlation := OperationCorrelation(ctx); correlation != "" {
-		acceptedMessage += " corr=" + correlation
-	}
-	sharedops.LogEvent("plinth", "info", "probe.accepted", acceptedMessage)
-
-	input := dispatch.GetInput()
-	grants := input.GetConnectionGrants()
-	if len(grants) == 0 {
-		supervisor.proposeFailure(sink, attemptID, "connection_probe_v1", "派发缺少凭据 grant")
-		return
-	}
-	// Pick the primary grant: thanos/kubernetes probes carry one; the
-	// model_provider qualification carries chat + embedding and every
-	// action fetches through the chat grant.
-	grant := grants[0]
-	for _, candidate := range grants {
-		if candidate.GetPurpose() == "model_probe_chat" || candidate.GetPurpose() == "prometheus_probe" || candidate.GetPurpose() == "thanos_probe" || candidate.GetPurpose() == "kubernetes_probe" {
-			grant = candidate
-			break
-		}
-	}
-	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
-	grantPayload, err := client.FetchCredentialGrant(grantCtx, &runtimev1.FetchCredentialGrantRequest{
-		GrantId:         grant.GetGrantId(),
-		AttemptId:       attemptID,
-		BootId:          binding.BootID,
-		ConnectionEpoch: binding.Epoch,
-	})
-	grantCancel()
-	if err != nil {
-		supervisor.proposeFailure(sink, attemptID, "connection_probe_v1", "获取凭据 grant 失败: "+err.Error())
-		return
-	}
-
-	startedAt := time.Now().UTC()
-	var (
-		outcome    string
-		detailJSON json.RawMessage
-		schemaKind string
-	)
-	switch grantPayload.GetConnectionType() {
-	case "prometheus", "thanos":
-		var config plinthconnections.MetricsConfig
-		var secret plinthconnections.MetricsSecret
-		configErr := json.Unmarshal(grantPayload.GetRevisionConfigJson(), &config)
-		if grantPayload.GetThanos() != nil {
-			secret = plinthconnections.MetricsSecret{Username: grantPayload.GetThanos().GetUsername(), Password: grantPayload.GetThanos().GetPassword(), BearerToken: grantPayload.GetThanos().GetBearerToken()}
-		}
-		schemaKind = "connection_probe_" + grantPayload.GetConnectionType() + "_v1"
-		if configErr != nil {
-			outcome, detailJSON = "failed", mustJSON(map[string]any{"kind": grantPayload.GetConnectionType(), "query": "vector(1)", "error": "revision 配置无法解析: " + configErr.Error()})
-			break
-		}
-		var detail plinthconnections.ThanosProbeDetail
-		var runErr error
-		if grantPayload.GetConnectionType() == "prometheus" {
-			detail, runErr = plinthconnections.RunPrometheusProbe(ctx, config, secret)
-		} else {
-			detail, runErr = plinthconnections.RunThanosProbe(ctx, config, secret)
-		}
-		outcome = "passed"
-		if runErr != nil {
-			outcome = "failed"
-			sharedops.LogEvent("plinth", "info", "probe.metrics_failed", runErr.Error())
-			detailJSON = mustJSON(withError(mustJSON(detail), runErr))
-		} else {
-			detailJSON = mustJSON(detail)
-		}
-	case "model_provider":
-		sharedops.LogEvent("plinth", "info", "probe.model_provider_start", fmt.Sprintf("attempt=%d type=%s", attemptID, grantPayload.GetConnectionType()))
-		var config plinthconnections.ModelProviderConfig
-		var secret plinthconnections.ModelProviderSecret
-		configErr := json.Unmarshal(grantPayload.GetRevisionConfigJson(), &config)
-		if grantPayload.GetModelProvider() != nil {
-			secret = plinthconnections.ModelProviderSecret{APIKey: grantPayload.GetModelProvider().GetApiKey()}
-		}
-		schemaKind = "connection_probe_model_provider_v1"
-		if configErr != nil {
-			sharedops.LogEvent("plinth", "error", "probe.model_provider_config", configErr.Error()+" raw="+string(grantPayload.GetRevisionConfigJson()))
-			outcome, detailJSON = "failed", mustJSON(map[string]any{"kind": "model_provider", "error": "revision 配置无法解析: " + configErr.Error()})
-			break
-		}
-		// Older/manual revisions can omit budget metadata. Normalize once at the
-		// dispatch boundary so the real BeginModelCall facts and the returned
-		// typed child share the same valid fixed probe bounds.
-		probeConfig := modelprovider.NormalizeProbeConfig(modelprovider.Config{Type: config.Type, BaseURL: config.BaseURL, ChatModelID: config.ChatModelID, EmbeddingModelID: config.EmbeddingModelID, ContextBudgetTokens: config.ContextBudgetTokens, MaxOutputTokens: config.MaxOutputTokens})
-		config.ContextBudgetTokens, config.MaxOutputTokens = probeConfig.ContextBudgetTokens, probeConfig.MaxOutputTokens
-		probeCtx := modelprovider.WithAttempt(ctx, attemptID)
-		ledger := &modelprovider.StreamLedger{Sink: sink, Channel: supervisor.Channel}
-		result := modelprovider.Run(probeCtx, probeConfig, secret.APIKey, config.EmbeddingModelID != "", ledger)
-		outcome = "failed"
-		if result.Passed {
-			outcome = "passed"
-		}
-		detailJSON = mustJSON(modelProviderDetail(result, config))
-	default:
-		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "model_provider capability probes arrive with T08")
-		return
-	}
-
-	finishedAt := time.Now().UTC()
-	payload := map[string]any{
-		"outcome":    outcome,
-		"detail":     detailJSON,
-		"startedAt":  startedAt.Format(time.RFC3339Nano),
-		"finishedAt": finishedAt.Format(time.RFC3339Nano),
-	}
-	canonical, err := json.Marshal(payload)
-	if err != nil {
-		supervisor.proposeFailure(sink, attemptID, schemaKind, "结果序列化失败: "+err.Error())
-		return
-	}
-	digest := sha256.Sum256(canonical)
-	if err := sink.Send(&runtimev1.ControlEnvelope{
-		CorrelationId: uint64(attemptID),
-		Msg: &runtimev1.ControlEnvelope_ResultProposal{ResultProposal: &runtimev1.ResultProposal{
-			AttemptId:       attemptID,
-			BootId:          binding.BootID,
-			ConnectionEpoch: binding.Epoch,
-			Outcome:         outcomeFor(outcome),
-			Payload: &runtimev1.ResultPayload{
-				SchemaKind:    schemaKind,
-				CanonicalJson: canonical,
-				ContentDigest: digest[:],
-			},
-		}},
-	}); err != nil {
-		sharedops.LogEvent("plinth", "error", "probe.result_send", err.Error())
-	}
-}
-
-// HandleCancelAttempt stops one running probe and acknowledges.
+// HandleCancelAttempt stops one running attempt and acknowledges.
 func (supervisor *Supervisor) HandleCancelAttempt(ctx context.Context, sink *runtime.FrameSink, cancel *runtimev1.CancelAttempt, stopTask func(int64) bool) {
 	stopped := stopTask(cancel.GetAttemptId())
 	if err := sink.Send(&runtimev1.ControlEnvelope{
 		CorrelationId: uint64(cancel.GetAttemptId()),
 		Msg:           &runtimev1.ControlEnvelope_CancelAck{CancelAck: &runtimev1.CancelAck{AttemptId: cancel.GetAttemptId()}},
 	}); err != nil {
-		sharedops.LogEvent("plinth", "error", "probe.cancel_ack_send", err.Error())
+		sharedops.LogEvent("plinth", "error", "supervisor.cancel_ack_send", err.Error())
 	}
-	sharedops.LogEvent("plinth", "info", "probe.cancelled", fmt.Sprintf("attempt=%d stopped=%v", cancel.GetAttemptId(), stopped))
+	sharedops.LogEvent("plinth", "info", "supervisor.cancelled", fmt.Sprintf("attempt=%d stopped=%v", cancel.GetAttemptId(), stopped))
 }
 
 func (supervisor *Supervisor) reject(sink *runtime.FrameSink, attemptID int64, reason runtimev1.AttemptRejectReason, detail string) {
@@ -396,10 +227,14 @@ func (supervisor *Supervisor) reject(sink *runtime.FrameSink, attemptID int64, r
 		CorrelationId: uint64(attemptID),
 		Msg:           &runtimev1.ControlEnvelope_AttemptReject{AttemptReject: &runtimev1.AttemptReject{AttemptId: attemptID, Reason: reason}},
 	}); err != nil {
-		sharedops.LogEvent("plinth", "error", "probe.reject_send", err.Error())
+		sharedops.LogEvent("plinth", "error", "supervisor.reject_send", err.Error())
 	}
+	sharedops.LogEvent("plinth", "info", "supervisor.rejected", fmt.Sprintf("attempt=%d reason=%s", attemptID, reason))
 }
 
+// proposeFailure seals a pre-worker technical failure as the attempt's
+// terminal result for reliable delivery (used by the agent grant/config
+// paths after AttemptAccept is still possible).
 func (supervisor *Supervisor) proposeFailure(sink *runtime.FrameSink, attemptID int64, schemaKind, message string) {
 	startedAt := time.Now().UTC()
 	payload := map[string]any{
@@ -425,61 +260,5 @@ func (supervisor *Supervisor) proposeFailure(sink *runtime.FrameSink, attemptID 
 			},
 		}},
 	})
-	sharedops.LogEvent("plinth", "info", "probe.proposed_failure", message)
-}
-
-func outcomeFor(outcome string) runtimev1.AttemptOutcome {
-	if outcome == "passed" {
-		return runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED
-	}
-	return runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED
-}
-
-func mustJSON(value any) json.RawMessage {
-	body, err := json.Marshal(value)
-	if err != nil {
-		return json.RawMessage("{}")
-	}
-	return body
-}
-
-// withError attaches the deterministic failure reason to a typed detail so
-// the stored detail_json explains why the probe failed.
-func withError(detail json.RawMessage, err error) json.RawMessage {
-	merged := map[string]any{}
-	if json.Unmarshal(detail, &merged) == nil {
-		merged["error"] = err.Error()
-	}
-	if body, marshalErr := json.Marshal(merged); marshalErr == nil {
-		return body
-	}
-	return detail
-}
-
-// modelProviderDetail builds the frozen typed detail for the qualification.
-func modelProviderDetail(result modelprovider.Outcome, config plinthconnections.ModelProviderConfig) map[string]any {
-	detail := map[string]any{
-		"kind":                       "model_provider",
-		"chatModelId":                result.ChatModelID,
-		"contextBudgetTokens":        config.ContextBudgetTokens,
-		"maxOutputTokens":            config.MaxOutputTokens,
-		"streamingSupported":         result.Capability.StreamingSupported,
-		"nativeToolCallingSupported": result.Capability.NativeToolCalling,
-		"multiToolCallSupported":     result.Capability.MultiToolCall,
-		"cancellationObserved":       result.Capability.CancellationObserved,
-		"usageObserved":              result.Capability.UsageObserved,
-		"requestIdObserved":          result.Capability.RequestIDObserved,
-		"embeddingSupported":         result.Capability.EmbeddingSupported,
-	}
-	if result.Capability.EmbeddingSupported {
-		detail["embeddingModelId"] = result.EmbeddingModelID
-		detail["embeddingVectorDim"] = result.Capability.EmbeddingVectorDim
-	} else {
-		detail["embeddingModelId"] = nil
-		detail["embeddingVectorDim"] = nil
-	}
-	if !result.Passed {
-		detail["error"] = result.Detail
-	}
-	return detail
+	sharedops.LogEvent("plinth", "info", "supervisor.proposed_failure", message)
 }

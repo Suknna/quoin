@@ -5,6 +5,7 @@ Quoin 帮助内部运维团队基于监控证据调查告警、执行巡检并�
 > **浏览器与 Kubernetes 插件移除（2026-09）：** 受控浏览器业务（Lintel 运行时、Browser Identity/Operation、journey）与 kubernetes 插件已从代码与契约中彻底移除；历史冻结 attempt 与旧库中的浏览器数据不再保证可解析。本文其余涉及浏览器/Kubernetes 插件的条款仅作历史解读。
 
 > **统一 mTLS 组件认证（2026-09，ADR-0009）：** 内部组件认证收敛为单一 PKI：部署 CA（runtime-ca）签发 Stele/Plinth 客户端证书（CN=stele / CN=plinth），quoin:8443 强制 mTLS 并按 CN 授权服务。注册制（一次性注册令牌、长期 Bearer、两阶段轮换、`runtime_slots`/`runtime_credentials` 权威）与 Stele service token 整体退役；组件启动即认证，无注册步骤。本文其余涉及注册/token 轮换的条款仅作历史解读，现行权威见 [ADR-0009](docs/adr/0009-unified-mtls-component-auth.md)。
+> **三组件职责规范与插件体系 v2（2026-09-20，ADR-0011，实施已落地）：** [ADR-0011](docs/adr/0011-component-responsibility-and-plugin-v2.md) 重写了三组件职责——Stele 升级为外部网关（入向队列化立即 ACK、出向凭证注入/限流/执行，own 本地 SQLite 运行态），Plinth 收窄为对插件体系零感知的推理沙箱，Quoin 成为插件注册中心与工具编排中枢（业务库唯一写者、对外部平台凭据只写不读）。下文 Quoin/Plinth/Stele 三个角色条目已按新职责改写；旧「Stele 同步落库后 ACK」条款被显式取代。
 
 ## 契约术语
 
@@ -23,12 +24,12 @@ _Avoid_: 发布版本号、兼容性版本号、单个接口版本
 _Avoid_: Agent Runtime
 
 **Plinth**：
-一个 Quoin 部署所使用的唯一 Agent Runtime，通过主动建立的运行通道领取调查和分析任务，并在每次 Execution Attempt 的全新可丢弃工作区中调用模型与工具。输入只从 Quoin 当前有效历史和 Artifact 重建；只有显式返回并提交到 Quoin 的消息、Evidence 和 Artifact 可以跨 Attempt 存活。
-_Avoid_: Quoin、跨轮持久工作区、第二份调查历史
+一个 Quoin 部署所使用的唯一推理沙箱（Agent Runtime），对插件体系零感知（编译级：不 import 插件与 Quoin 包）。协议只有「任务 + 工具目录 → 文本或 tool_call」：通过主动建立的运行通道领取任务，在每次 Execution Attempt 的全新可丢弃工作区中调用模型与沙箱本地工具（bash/read/write/grep）；quoin_routed 工具（外部平台与 artifact 工具）由 Quoin 编排执行并经 ExternalToolResult 帧推回，supervisor 只转发。输入只从 Quoin 当前有效历史和 Artifact 重建；只有显式返回并提交到 Quoin 的消息、Evidence 和 Artifact 可以跨 Attempt 存活。
+_Avoid_: Quoin、跨轮持久工作区、第二份调查历史、插件执行宿主、外部平台直连（模型供应商除外）
 
 **Stele**：
-独立、无状态的告警协议入口。第一版负责 Alertmanager Webhook 的 HTTP 监听、来源认证、请求体限制以及精确原始请求转交，后续可以增加其他告警接收协议；它不解析告警领域语义，不拥有数据库、持久队列、告警历史或诊断等权威业务状态。每次外部 HTTP 请求生成一个 `relay_id`，同一次 Stele→Quoin 内部转交重试必须复用该 ID，Quoin 对其幂等。Quoin 只有在一个 SQLite 事务中保存 Delivery、处理结果并更新全部正常 Occurrence 后，Stele 才向 Alertmanager 返回 `204`；提交失败或结果不确定时返回非 2xx。Alertmanager 自己发起的重试是新的外部请求和新的 Delivery，不按正文去重。
-_Avoid_: Quoin、告警存储、Agent Runtime、消息队列、先返回 2xx 再异步持久化
+独立的外部网关，所有外部平台交互的唯一出入口（ADR-0011）。入向：`POST /webhook/{source}` 按来源找到 EventSource 插件做协议解析，归一化 Event 在本地 SQLite 事务入队后立即 ACK（202）；可靠性由队列指数退避重试与死信承担，外部重试压力不再传导给 Quoin。出向：经长期网关流接收 Quoin 下发的平台调用，解析连接材料（按需 Acquire 并缓存）、按连接限流、执行传输并回传原始响应。它只做传输与协议转换，永远不碰业务逻辑——不知道消息该派给哪个 Plinth（Quoin 的事），不知道工具该不该调（Quoin 的权限判断）；它的判断只有：签名对不对、配额超没超、平台通没通。Own 本地运行态 SQLite：事件队列、去重键、限流计数、token 缓存、死信与预留的拉取游标；不拥有任何权威业务状态。
+_Avoid_: Quoin、告警存储、Agent Runtime、业务语义判断、直接落业务库
 
 > **认证目标更新（2026-09-20，ADR-0010，实施已落地）：** [ADR-0010](docs/adr/0010-oidc-auth-and-local-emergency.md) 与重写后的[统一认证设计](docs/authentication-design.md) 接管下文认证目标：登录入口为配置驱动的 AuthProvider 注册表——OIDC（授权码+PKCE+state/nonce，token 用后即弃，identities(issuer,subject) 唯一键 + 开放 JIT，角色恒 operator）是日常通道；本地密码登录降级为单步应急通道（IdP 故障维护用），平台内 OTP/两段流程/投递配置整体退役，双因子职责移交 IdP。初始管理员密码首启随机生成写入 dataDirectory 的 0600 文件（24 小时未改密作废，`quoin admin recover` 再武装），公开默认 admin/admin 废除。角色模型冻结为唯一内置本地 admin + 全员 operator；登录页由公开 GET /api/v1/auth/config 投影配置驱动渲染，前端 /login 为规范入口。审计自动记录与操作关联目标仍由 [ADR-0006](docs/adr/0006-automatic-audit-and-operation-correlation.md) 确认，见[审计设计](docs/audit-design.md)。
 
@@ -58,6 +59,8 @@ Plinth 和 Stele 的组件身份是部署 CA（runtime-ca）签发的客户端�
 
 **告警源凭据投影**：
 Quoin 是逻辑告警源及其 Bearer 状态的唯一权威源，只保存高熵凭据 digest。Stele 以自身客户端证书经 mTLS 认证后获取版本化只读 digest 快照并仅在内存缓存；未加载快照时拒绝接收。Stele 提交 Delivery 时携带非秘密 `credential_id` 和快照版本，Quoin 在同一事务中再次检查来源启用状态、凭据有效性和归属；Delivery 与吊销事务按数据库提交顺序裁决，不使用墙钟宽限期。轮换期间一个来源最多同时保留新旧两个有效凭据；新值首次成功使用后进入 Pending Retirement，由 Admin 显式吊销旧值，不设自动 TTL，并持续显示与审计未收口状态。
+
+> **外部平台凭据边界（2026-09-20，ADR-0011）：** 业务平台连接（connections 域）凭据延续 AES-GCM 信封存储，但供给路径改为 Stele 按需获取：Stele 经 `SteleRelay.AcquireConnectionCredential`（CN=stele、mTLS）拉取连接材料并在本地缓存，动态凭证（token 刷新等）生命周期管理归 Stele；Quoin 对外部平台凭据**只写不读**（解密仅为按需投递，自身不使用）。模型供应商凭据不变，仍由 Plinth supervisor 经 FetchCredentialGrant 按 attempt 获取。
 
 **一次性秘密 Reveal**：
 创建或轮换告警 Bearer 等一次性秘密时（Runtime 注册 token 已随 ADR-0009 退役），命令响应只返回绑定发起 Session 的 reveal handle。handle 固定存活 60 秒、仅内存保存、最多成功消费一次；消费时必须是同一仍有效且当前仍为 Admin 的 Session。同一 Session 以同一 `client_command_id` 重放创建命令时，若内存 handle 仍有效且未消费则返回同一个 handle；过期、Session 改变或进程重启后只返回 `revealAvailable=false`，不创建新凭据。reveal 一旦在服务端消费，即使响应丢失也不能再次读取，只能创建替代 generation。登出、Session 撤销、账号禁用或降级以及 Quoin 重启都立即使关联 handle 失效；handle 与原始秘密都不进入数据库、审计、URL、toast、日志、模型上下文或命令持久结果。

@@ -14,7 +14,6 @@ import (
 	"fmt"
 
 	"github.com/Suknna/quoin/internal/plugins"
-	"github.com/Suknna/quoin/internal/plugins/builtin"
 )
 
 // AgentVersion is the frozen executor generation for initial-analysis
@@ -62,6 +61,7 @@ const ToolSchemaVersion = "initial-analysis-tools-v5"
 type (
 	ToolDef      = plugins.ToolDef
 	ArgumentKind = plugins.ArgumentKind
+	ToolEntry    = plugins.ToolEntry
 )
 
 const (
@@ -70,10 +70,11 @@ const (
 )
 
 // platformTools are the compiled tools no plugin owns: the disposable
-// workspace tools run inside the worker sandbox and the artifact tools
-// executing on the supervisor through the Attempt-scoped ArtifactService
-// (ARCH-WORKER-003, ARCH-OUTPUT-004). Read/write/bash and their siblings
-// stay platform-owned; plugins never redefine them.
+// workspace tools run inside the worker sandbox (worker_local) and the
+// artifact tools execute inside Quoin against the Attempt-scoped artifact
+// store (quoin_routed, ADR-0011 — they no longer run in the supervisor).
+// Read/write/bash and their siblings stay platform-owned; plugins never
+// redefine them.
 var platformTools = []ToolDef{
 	{
 		Name: "bash", Version: "1", ExecutionMode: "worker_local", FailureMode: "return_to_model", ResultSchemaKind: "workspace_tool_result_v1",
@@ -100,30 +101,22 @@ var platformTools = []ToolDef{
 		Required:    []string{"pattern", "path"},
 	},
 	{
-		Name: "artifact_read", Version: "1", ExecutionMode: "supervisor_typed", FailureMode: "return_to_model", ResultSchemaKind: "artifact_read_result_v1",
+		Name: "artifact_read", Version: "2", ExecutionMode: "quoin_routed", FailureMode: "return_to_model", ResultSchemaKind: "artifact_read_result_v1",
 		Description: "按范围读取一个 Artifact 的文本片段；返回有界片段与 size/hash/eof/truncated。",
 		Arguments:   map[string]ArgumentKind{"artifactId": KindString, "offset": KindNumber, "limit": KindNumber},
 		Required:    []string{"artifactId"},
 	},
 	{
-		Name: "artifact_grep", Version: "1", ExecutionMode: "supervisor_typed", FailureMode: "return_to_model", ResultSchemaKind: "artifact_grep_result_v1",
+		Name: "artifact_grep", Version: "2", ExecutionMode: "quoin_routed", FailureMode: "return_to_model", ResultSchemaKind: "artifact_grep_result_v1",
 		Description: "在 Artifact 文本内按 RE2 正则搜索；返回有界匹配片段与截断标记。",
 		Arguments:   map[string]ArgumentKind{"artifactId": KindString, "pattern": KindString},
 		Required:    []string{"artifactId", "pattern"},
 	},
 }
 
-// Implementations assembles this binary's complete compiled implementation
-// table: platform tools first (stable order), then every plugin-owned
-// implementation from the shared builtin declarations. It is the single
-// input both catalog assembly and dispatch assembly consume; there is no
-// other tool table.
-func Implementations() []ToolDef {
-	all := make([]ToolDef, 0, len(platformTools)+len(builtin.PluginTools()))
-	all = append(all, platformTools...)
-	all = append(all, builtin.PluginTools()...)
-	return all
-}
+// PlatformImplementations returns the compiled platform tool table (stable
+// order). Plugin tool implementations join through the plugin registry's
+// ToolEntry set inside BuildCatalogs — there is no other tool table.
 
 // ValidateToolArguments checks one proposed tool call's canonical argument
 // object against the frozen tool contract (ARCH-TOOL-001: structure is
@@ -180,4 +173,12 @@ func ValidateToolResultPayload(table *ImplementationTable, schemaKind string, ca
 		}
 	}
 	return nil
+}
+
+// PlatformImplementations returns the compiled platform tool table in
+// stable order; BuildCatalogs joins it with the plugin registry entries.
+func PlatformImplementations() []ToolDef {
+	all := make([]ToolDef, 0, len(platformTools))
+	all = append(all, platformTools...)
+	return all
 }

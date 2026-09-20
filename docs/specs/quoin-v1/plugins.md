@@ -4,6 +4,8 @@ status: accepted
 
 # 插件契约与冻结工具目录（ADR-0004 实施规范）
 
+> **本文大部分条款已被 ADR-0011（2026-09-20）取代：** 插件体系 v2 改为接口 + 注册表 + 空白导入装配与泛型工具（`internal/plugins` 的 `Plugin`/`EventSource`/`ToolProvider`/`Tool[A,R]`），能力六分类、ExecutionBundle 与执行位置词表退役；现行权威见 [ADR-0011](../../../adr/0011-component-responsibility-and-plugin-v2.md) 与[插件开发指南](../../../plugin-development.md)。冻结工具目录、启用解析与"声明派生自实现"的不变式未变。下文仅作历史规范解读。
+
 > **浏览器与 Kubernetes 插件已移除（2026-09）：** `browser` 与 `kubernetes` 插件（含描述符、工具实现与历史兼容层）已从代码与契约中彻底删除；历史冻结目录与旧库中的相关数据不再保证可解析。文中相关条款仅作历史解读。
 
 本规范描述 ADR-0004 的实际类型、接口与接线。以代码为准：`internal/plugins`（契约）、`internal/quoin/attempt`（冻结目录与内建描述符）、`internal/quoin/app/plugins.go`（接线与管理目录）。

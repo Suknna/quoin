@@ -61,7 +61,7 @@ func (s *Service) CreatePlanRun(ctx context.Context, principalID int64, clientCo
 		ClientCommandID: clientCommandID,
 		Digest:          digest,
 	}, func(tx *execution.Tx) (RunDetail, execution.Change, error) {
-		detail, rejection, err := s.createPlanRunOn(ctx, tx, planRunRequest{planKey: planKey, triggerKind: "manual", availability: RuntimeAvailability{Plinth: true}, now: s.nowText()})
+		detail, rejection, err := s.createPlanRunOn(ctx, tx, planRunRequest{planKey: planKey, triggerKind: "manual", availability: RuntimeAvailability{Collection: true}, now: s.nowText()})
 		if err != nil {
 			return RunDetail{}, execution.Changed, err
 		}
@@ -304,7 +304,7 @@ func (s *Service) createPlanRunOn(ctx context.Context, tx execution.Executor, re
 			VALUES(?,?,?,?,?,?,?,?,?)`, runID, checkKey, displayName, pluginID, templateID, frozenVersion, paramsJSON, targetJSON, now); err != nil {
 			return RunDetail{}, nil, err
 		}
-		if !availability.Plinth {
+		if !availability.Collection {
 			if err = s.runtimeUnavailableChild(ctx, tx, runID, checkKey, now); err != nil {
 				return RunDetail{}, nil, err
 			}

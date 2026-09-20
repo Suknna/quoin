@@ -19,23 +19,25 @@ import (
 //
 // 返回值按 ID 稳定排序，供目录、冻结目录与审计共用。
 func (r *Registry) ResolveEnabled(configured []string) ([]string, error) {
-	state := r.impl.rlock()
-	defer state.mu.RUnlock()
+	r.mu.Lock()
+	r.ensureFrozen()
 	enabled := map[string]bool{}
 	if configured == nil {
-		for id, descriptor := range state.descriptors {
-			if descriptor.DefaultEnabled {
+		for id, plugin := range r.plugins {
+			if plugin.DefaultEnabled {
 				enabled[id] = true
 			}
 		}
 	} else {
 		for _, id := range configured {
-			if _, exists := state.descriptors[id]; !exists {
+			if _, exists := r.plugins[id]; !exists {
+				r.mu.Unlock()
 				return nil, fmt.Errorf("%w: %s", ErrUnknownPlugin, id)
 			}
 			enabled[id] = true
 		}
 	}
+	r.mu.Unlock()
 	result := make([]string, 0, len(enabled))
 	for id := range enabled {
 		result = append(result, id)

@@ -7,6 +7,12 @@ import (
 	"os"
 	"strings"
 
+	// Blank-import assembly (ADR-0011): the builtin plugin packages register
+	// themselves from init() into the process default registry; Quoin
+	// aggregates the tool catalog, event sources and declarative catalogs
+	// from that one assembly.
+	_ "github.com/Suknna/quoin/internal/plugins/builtin"
+
 	"github.com/Suknna/quoin/internal/contract"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/app"

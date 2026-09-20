@@ -1447,7 +1447,9 @@ CREATE TABLE tool_calls (
   tool_version          TEXT NOT NULL,
   arguments_json        TEXT NOT NULL CHECK (json_valid(arguments_json) AND json_type(arguments_json) = 'object'),
   arguments_digest      TEXT NOT NULL CHECK (length(arguments_digest) = 64),
-  execution_mode        TEXT NOT NULL CHECK (execution_mode IN ('worker_local','supervisor_typed')),
+  -- ADR-0011: quoin_routed 取代 supervisor_typed 成为新的出向工具执行模式；
+-- supervisor_typed 仅保留给历史行（迁移不回写历史事实）。
+  execution_mode        TEXT NOT NULL CHECK (execution_mode IN ('worker_local','supervisor_typed','quoin_routed')),
   failure_mode          TEXT NOT NULL CHECK (failure_mode IN ('return_to_model','fail_attempt')),
   status                TEXT NOT NULL CHECK (status IN ('pending','running','succeeded','failed','cancelled')),
   row_version           INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),

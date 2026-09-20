@@ -114,7 +114,7 @@ func (service *Service) StartRun(ctx context.Context, principalID int64, clientC
 			// The descriptor is resolved inside the business stage against the
 			// frozen process catalog; holding no descriptor decision outside
 			// the authorization keeps one fence for the whole admission.
-			descriptor, err := service.discoverableDescriptor(connectionType)
+			plugin, err := service.discoverableDescriptor(connectionType)
 			if err != nil {
 				return SourceObservationRun{}, execution.Unchanged, err
 			}
@@ -135,7 +135,7 @@ func (service *Service) StartRun(ctx context.Context, principalID int64, clientC
 			}
 			now := service.nowText()
 			result, err := tx.ExecContext(ctx, `INSERT INTO observation_runs(connection_id,plugin_id,trigger_kind,scheduled_for,state,row_version,created_by,created_at) VALUES(?,?,?,?, 'Queued',1,?,?)`,
-				connectionID, descriptor.ID, triggerKind, scheduledFor, createdBy, now)
+				connectionID, plugin.ID, triggerKind, scheduledFor, createdBy, now)
 			if err != nil {
 				return SourceObservationRun{}, execution.Unchanged, err
 			}
@@ -150,7 +150,7 @@ func (service *Service) StartRun(ctx context.Context, principalID int64, clientC
 			if _, err := tx.ExecContext(ctx, `UPDATE observation_runs SET state='Running',evidence_at=?,row_version=2 WHERE id=?`, now, runID); err != nil {
 				return SourceObservationRun{}, execution.Unchanged, err
 			}
-			if err := createObservationAttempts(ctx, tx, runID, connectionID, descriptor, now); err != nil {
+			if err := createObservationAttempts(ctx, tx, runID, connectionID, plugin, now); err != nil {
 				return SourceObservationRun{}, execution.Unchanged, err
 			}
 			detail, err := service.runDetailOn(ctx, tx, connectionName, runID)
@@ -196,7 +196,7 @@ func (service *Service) activeRunOn(ctx context.Context, conn audit.Reader, conn
 // created through attempt.CreateOn so each inherits the admission's
 // correlation (the administrator's session scope or the scheduler's system
 // scope) — an attempt can never exist without its association.
-func createObservationAttempts(ctx context.Context, conn execution.Executor, runID, connectionID int64, descriptor plugins.Descriptor, now string) error {
+func createObservationAttempts(ctx context.Context, conn execution.Executor, runID, connectionID int64, descriptor plugins.Plugin, now string) error {
 	for _, object := range descriptor.DiscoverObjects {
 		input := executionInput{
 			SchemaKind:       ExecutionSchemaKind,
@@ -354,7 +354,7 @@ func (service *Service) rebuildObservationAttempt(ctx context.Context, attemptID
 	if !grant.Valid {
 		return nil, fmt.Errorf("attempt %d has no frozen source grant", attemptID)
 	}
-	descriptor, exists := service.registry.Descriptor(pluginID)
+	descriptor, exists := service.registry.Plugin(pluginID)
 	if !exists {
 		return nil, fmt.Errorf("attempt %d binds plugin %q which is no longer registered", attemptID, pluginID)
 	}

@@ -20,7 +20,7 @@ import (
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/robfig/cron/v3"
 
-	"github.com/Suknna/quoin/internal/plugins/builtin"
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/execution"
@@ -46,21 +46,21 @@ type Template struct {
 }
 
 // paramValidators 是模板参数形状的静态校验表；模板身份与版本的存在性权威
-// 是共享插件描述目录（builtin.Descriptors → plugins.Registry），执行
-// 绑定在 Plinth supervisor。二者以 (pluginID, templateID, version) 对齐。
+// 是共享插件注册目录（plugins.Default，ADR-0011 空白导入装配），执行
+// 绑定在 Quoin 本地调度、Stele 网关。二者以 (pluginID, templateID, version) 对齐。
 var paramValidators = map[string]func(map[string]any) error{
 	"promql_instant": validateInstantParams,
 	"promql_range":   validateRangeParams,
 }
 
 // TemplateFor 返回 (pluginID, templateID) 的已注册模板；目录来自构建期
-// 描述符（共享 builtin 声明 → plugins.Registry），绝不声明不存在的模板。
+// 注册表（plugins.Default），绝不声明不存在的模板。
 func TemplateFor(pluginID, templateID string) (Template, bool) {
-	for _, descriptor := range builtin.Descriptors() {
-		if descriptor.ID != pluginID {
+	for _, plugin := range plugins.Default().Plugins() {
+		if plugin.ID != pluginID {
 			continue
 		}
-		for _, template := range descriptor.InspectionTemplates {
+		for _, template := range plugin.InspectionTemplates {
 			if template.ID == templateID {
 				validate, known := paramValidators[template.ID]
 				if !known {

@@ -18,7 +18,8 @@ import (
 	"time"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
-	"github.com/Suknna/quoin/internal/plugins/builtin"
+	"github.com/Suknna/quoin/internal/plugins"
+	_ "github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	_ "modernc.org/sqlite"
 )
@@ -425,12 +426,12 @@ var defaultTestCatalogsCache *Catalogs
 func defaultTestCatalogs(t *testing.T) *Catalogs {
 	t.Helper()
 	defaultTestCatalogsOnce.Do(func() {
-		registry := builtin.Registry()
+		registry := plugins.Default()
 		enabled, err := registry.ResolveEnabled(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defaultTestCatalogsCache, err = BuildCatalogs(registry, Implementations(), enabled)
+		defaultTestCatalogsCache, err = BuildCatalogs(registry, enabled)
 		if err != nil {
 			t.Fatal(err)
 		}

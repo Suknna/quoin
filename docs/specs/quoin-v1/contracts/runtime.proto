@@ -39,7 +39,8 @@ service RuntimeControl {
 
   // 任务级连接凭据 grant 获取（supervisor-only，RUNTIME-GRANT-001..003）：返回 Attempt 派发
   // 绑定的 revision/generation 的非秘密配置投影与解密后的类型化秘密；仅 Attempt Running 期间
-  // 可用，终态即清除。worker 进程不得调用本 RPC。
+  // 可用，终态即清除。ADR-0011 后只服务 model_provider grant；外部平台凭据由 Stele 经
+  // SteleRelay.AcquireConnectionCredential 按需获取。worker 进程不得调用本 RPC。
   rpc FetchCredentialGrant(FetchCredentialGrantRequest) returns (FetchCredentialGrantResponse);
 }
 
@@ -54,17 +55,29 @@ service ArtifactService {
   rpc GrepText(ArtifactGrepTextRequest) returns (ArtifactGrepTextResponse);
 }
 
-// Stele 告警接入：非 Runtime 的独立 unary 服务。Stele 以部署 CA 签发的客户端证书
-// （CN=stele）经 mTLS 认证（ADR-0009）。每个请求必须携带完整 Proto 权威契约的
-// SHA-256 指纹；发布版本只用于展示与溯源，绝不作为通信准入条件。
+// Stele 外部网关服务（ADR-0011）：Stele 以部署 CA 签发的客户端证书（CN=stele）经
+// mTLS 认证（ADR-0009），是所有外部平台交互的唯一出入口——入向接收平台推送并归一化
+// 入本地队列（入队即 ACK，可靠性由队列重试 + 死信承担），出向按 Quoin 派发注入凭证、
+// 限流并执行平台调用。每个请求必须携带完整 Proto 权威契约的 SHA-256 指纹；发布版本
+// 只用于展示与溯源，绝不作为通信准入条件。单 Stele 实例假设。
 service SteleRelay {
-  // 版本化只读凭据 digest 快照；Stele 仅内存缓存，未成功加载时拒绝接收请求
-  // （RUNTIME-STELE-002）。
+  // 长期网关双向流（拓扑同 RuntimeControl.Connect）：Quoin 经该流向 Stele 下发
+  // 出向平台执行请求，Stele 回传执行结果；心跳维护活性投影。
+  rpc Connect(stream SteleEnvelope) returns (stream SteleEnvelope);
+
+  // 版本化只读凭据 digest 快照（入向来源认证）；Stele 仅内存缓存，未成功加载时
+  // 拒绝接收入向请求（RUNTIME-STELE-002）。
   rpc GetCredentialSnapshot(GetCredentialSnapshotRequest) returns (GetCredentialSnapshotResponse);
 
-  // 精确原始 Delivery 转交；relay_id 幂等；credential_id + credential_snapshot_version
-  // 必填（RUNTIME-STELE-003/004）。
-  rpc Deliver(DeliveryRelayRequest) returns (DeliveryRelayResponse);
+  // 归一化事件批量转交：Stele 本地队列的消费转发；event_id 幂等，逐事件裁决。
+  rpc DeliverEvents(DeliverEventsRequest) returns (DeliverEventsResponse);
+
+  // 按需连接材料获取（出向执行）：返回非秘密配置投影与解密后的类型化秘密；Stele
+  // 缓存于本地状态，动态凭证生命周期管理归 Stele；Quoin 对外部平台凭据只写不读。
+  rpc AcquireConnectionCredential(AcquireConnectionCredentialRequest) returns (AcquireConnectionCredentialResponse);
+
+  // 已删除的 Deliver（同步转交被本地队列 + DeliverEvents 取代，ADR-0011）。
+  // proto3 的 service 不支持 reserved 声明，方法名以本注释与 runtime-protocol.md 记录为准。
 }
 
 // ============================================================================
@@ -192,15 +205,6 @@ enum GoAwayReason {
   reserved 3, 4, 5; // 已删除的 REVOKED/ROTATED/REPLACED（token/slot 生命周期随 ADR-0009 退役）
 }
 
-// Stele Delivery 结果分类（RUNTIME-STELE-004；对应 HTTP 语义：ACCEPTED=204，
-// REJECTED=4xx 不重试，UNAVAILABLE=5xx 由 Alertmanager 重试）。
-enum DeliveryStatus {
-  DELIVERY_STATUS_UNSPECIFIED = 0;
-  DELIVERY_STATUS_ACCEPTED = 1;
-  DELIVERY_STATUS_REJECTED = 2;
-  DELIVERY_STATUS_UNAVAILABLE = 3;
-}
-
 // ============================================================================
 // 控制流（RuntimeControl.Connect）
 // ============================================================================
@@ -250,6 +254,7 @@ message ControlEnvelope {
     BeginToolCallAck begin_tool_call_ack = 35;        // Quoin -> Plinth；fence 与授权裁决
     CompleteToolCall complete_tool_call = 36;         // Plinth -> Quoin；提交 Tool 结果/Evidence/Artifact 引用
     CompleteToolCallAck complete_tool_call_ack = 37;  // Quoin -> Plinth；提交裁决
+    ExternalToolResult external_tool_result = 56;     // Quoin -> Plinth；QUOIN_ROUTED 工具经 Stele 执行后的封存结果（ADR-0011）
 
   }
   // 已删除的跨 Runtime 浏览器子执行（25/26/27/38）与 Lintel Browser Operation 调和（39..55）
@@ -572,8 +577,9 @@ message ProposedToolCall {
 enum ToolExecutionMode {
   TOOL_EXECUTION_MODE_UNSPECIFIED = 0;
   TOOL_EXECUTION_MODE_WORKER_LOCAL = 1;
-  TOOL_EXECUTION_MODE_SUPERVISOR_TYPED = 2;
+  reserved 2; // 已删除的 SUPERVISOR_TYPED（出向工具执行迁移至 Quoin 编排、Stele 执行，ADR-0011）
   reserved 3; // 已删除的 QUOIN_BROWSER（浏览器运行时移除）
+  TOOL_EXECUTION_MODE_QUOIN_ROUTED = 4; // Quoin 权限/审计后经 Stele 网关执行（ADR-0011）
 }
 
 enum ToolFailureMode {
@@ -649,6 +655,21 @@ message CompleteToolCallAck {
   string detail = 7;
 }
 
+// QUOIN_ROUTED 工具的执行结果下发（ADR-0011）：Quoin 完成 BeginToolCall 授权后自行
+// 编排执行（Handler 构造请求 -> Stele 网关执行 -> 结果封存/Evidence 创建/长正文
+// Artifact 化），随后经本帧把已提交的规范结果推给 Plinth，supervisor 原样转发 worker
+// 作为 ToolResult。Quoin 已是权威封存方，本帧不产生新的提交裁决。
+message ExternalToolResult {
+  int64 attempt_id = 1;
+  int64 tool_call_id = 2;
+  ToolCallOutcome outcome = 3;
+  ResultPayload payload = 4;       // succeeded 时必填（已封存的 committed payload）
+  ArtifactRef artifact_ref = 5;    // 长正文溢出时携带
+  repeated int64 evidence_ids = 6; // Quoin 确定性创建的 Evidence
+  string error_code = 7;           // failed/cancelled 时的稳定机器码
+  string error_detail = 8;         // 非秘密、面向 Agent 的可操作说明
+}
+
 // ============================================================================
 // 连接凭据 grant（RuntimeControl.FetchCredentialGrant）
 // ============================================================================
@@ -664,25 +685,25 @@ message FetchCredentialGrantRequest {
 
 // grant 响应：非秘密 revision 配置投影 + 解密后的类型化秘密。仅经 TLS 返回一次成功
 // 载荷；supervisor 只在 Attempt 内存中使用，完成即清除，不落盘、不进入日志/审计
-// （RUNTIME-GRANT-002/003）。secret oneof 按 connection_type 选择。
+// （RUNTIME-GRANT-002/003）。ADR-0011 后本 RPC 只服务 model_provider grant——
+// metrics 等外部平台凭据改由 Stele 经 SteleRelay.AcquireConnectionCredential 按需获取。
 message FetchCredentialGrantResponse {
   int64 grant_id = 1;
   int64 attempt_id = 2;
   int64 connection_revision_id = 3;     // connections.current_revision_id 绑定
   int64 credential_generation_id = 4;   // credential_generations.id 绑定
-  string connection_type = 5;           // "prometheus" | "thanos" | "model_provider"（connections.type）
-  bytes revision_config_json = 6;       // 非秘密类型化投影（ThanosConnectionNonSecret 等，DATA-CONN-005）
+  string connection_type = 5;           // "model_provider"（connections.type；ADR-0011 后仅此一类）
+  bytes revision_config_json = 6;       // 非秘密类型化投影（ModelConnectionNonSecret 等，DATA-CONN-005）
   oneof secret {
-    ThanosCredentialSecret thanos = 7;
     ModelProviderCredentialSecret model_provider = 9;
   }
+  reserved 7; // 已删除的 thanos（外部平台凭据供给移交 Stele，ADR-0011）
   reserved 8; // 已删除的 kubernetes（插件移除）
 }
 
-// Prometheus-compatible connection credentials (Prometheus or Thanos) are
-// carried in the established `thanos` oneof slot; connection_type is the
-// authoritative product-type discriminator. Values exist only in supervisor
-// memory for the attempt and are never returned through the public API.
+// Prometheus-compatible connection credentials (Prometheus or Thanos). Used by
+// SteleRelay.AcquireConnectionCredential（ADR-0011）：Stele 只在本地缓存与出向执行中
+// 使用，绝不回传公开 API 或进入日志。
 message ThanosCredentialSecret {
   string username = 1;
   string password = 2;
@@ -795,18 +816,115 @@ message ArtifactGrepTextResponse {
 }
 
 // ============================================================================
-// Stele 告警接入（SteleRelay）
+// Stele 外部网关（SteleRelay，ADR-0011）
 // ============================================================================
+
+// ---- 网关流（Connect）----
+
+// 网关双向信封。message_id 当前连接内按方向单调递增且唯一；correlation_id 关联
+// ExecutePlatformCall 请求-响应对（0 = 无）；boot_id 除 SteleHello 外必须等于接收流
+// 上下文。
+message SteleEnvelope {
+  uint64 message_id = 1;
+  uint64 correlation_id = 2;     // 请求-响应对关联；0 = 无
+  string boot_id = 3;            // 除 SteleHello 外必须等于接收流上下文
+  oneof msg {
+    SteleHello hello = 10;                        // Stele -> Quoin；首帧
+    SteleHelloAck hello_ack = 11;                 // Quoin -> Stele；握手裁决
+    SteleHeartbeat heartbeat = 12;                // 双向；只更新瞬时投影
+    ExecutePlatformCall execute = 13;             // Quoin -> Stele；出向平台执行请求
+    ExecutePlatformCallResult execute_result = 14; // Stele -> Quoin；执行结果
+    GoAway go_away = 15;                          // Quoin -> Stele；尽力而为的停机通知
+  }
+}
+
+// 网关握手首帧：客户端证书已在 mTLS 握手中认证（CN=stele）。
+message SteleHello {
+  string boot_id = 1;              // 每次进程启动重新生成
+  uint64 connection_epoch = 2;     // 每次连接递增，>= 1
+  string contract_fingerprint = 3; // 完整权威集合 SHA-256，小写 hex
+  string release_version = 4;      // 展示与溯源
+}
+
+message SteleHelloAck {
+  bool accepted = 1;
+  string detail = 2;               // 拒绝时的非权威说明
+}
+
+message SteleHeartbeat {
+  uint64 seq = 1;                  // 当前连接内单调递增
+}
+
+// ---- 出向平台执行（Quoin -> Stele）----
+
+// 出向平台执行请求：Quoin 的 Tool Handler 构造协议请求（方法 + 相对路径 + 正文），
+// Stele 负责连接材料解析（endpoint + 凭证注入）、限流与传输执行。URL 由已配置连接的
+// endpoint 与相对路径拼装，本消息不承载 scheme/host（SSRF 面由此收敛）。call_id 用于
+// 流内配对；Quoin 在流断开后重发同一 call_id 不保证恰好一次——出向工具以幂等读为主，
+// 副作用语义由具体工具契约自行约束。
+message ExecutePlatformCall {
+  string call_id = 1;         // Quoin 生成的请求标识；correlation_id 配对
+  int64 connection_id = 2;    // connections.id；Stele 据此解析连接材料
+  int64 connection_revision_id = 3; // 冻结 grant 绑定的 revision；与 Stele 缓存不一致时重新 Acquire
+  string method = 4;          // GET | POST（封闭）
+  string path = 5;            // 相对路径（以 / 开始，不含 scheme/host）
+  string query = 6;           // 原样 query string（可空）
+  map<string, string> headers = 7; // 附加非凭证头；认证头由 Stele 注入
+  bytes body = 8;             // GET 必须为空
+  uint32 timeout_ms = 9;      // > 0，部署上限
+}
+
+// 执行结果。SUCCEEDED 表示平台返回了 HTTP 响应（含平台侧 4xx/5xx，语义由 Quoin 侧
+// Handler 解释）；非 SUCCEEDED 是 Stele 网关自身的判定：配额、凭证、连通性。
+message ExecutePlatformCallResult {
+  string call_id = 1;
+  PlatformCallStatus status = 2;
+  int32 http_status = 3;      // SUCCEEDED 时有效
+  bytes body = 4;             // 原始响应体（SUCCEEDED 时）
+  uint64 latency_ms = 5;
+  string error_code = 6;      // 非 SUCCEEDED 时的稳定机器码
+  string error_detail = 7;    // 非秘密说明
+}
+
+enum PlatformCallStatus {
+  PLATFORM_CALL_STATUS_UNSPECIFIED = 0;
+  PLATFORM_CALL_STATUS_SUCCEEDED = 1;              // 平台已响应（HTTP 状态由 Handler 解释）
+  PLATFORM_CALL_STATUS_RATE_LIMITED = 2;           // Stele 侧配额拒绝
+  PLATFORM_CALL_STATUS_CREDENTIAL_UNAVAILABLE = 3; // 连接材料不可用（未配置/吊销/Acquire 失败）
+  PLATFORM_CALL_STATUS_UNREACHABLE = 4;            // 平台不通/超时
+  PLATFORM_CALL_STATUS_INTERNAL = 5;               // 网关内部错误
+}
+
+// ---- 连接材料按需获取 ----
+
+message AcquireConnectionCredentialRequest {
+  int64 connection_id = 1;
+  string contract_fingerprint = 2; // 完整权威集合 SHA-256，小写 hex
+}
+
+// 连接材料响应：非秘密配置投影（含 endpoint）+ 解密秘密。Quoin 只写不读（ADR-0011）：
+// 解密仅为按需投递，Quoin 自身不使用、不缓存。Stele 缓存于本地状态，动态凭证
+// （token 刷新等）生命周期管理归 Stele。
+message AcquireConnectionCredentialResponse {
+  int64 connection_id = 1;
+  int64 connection_revision_id = 2;
+  int64 credential_generation_id = 3;
+  string connection_type = 4;     // "prometheus" | "thanos"（connections.type）
+  bytes revision_config_json = 5; // 非秘密类型化投影（ThanosConnectionNonSecret，DATA-CONN-005）
+  ThanosCredentialSecret thanos = 6; // prometheus/thanos 共用；connection_type 为权威判别
+}
+
+// ---- 入向快照与事件转交 ----
 
 // 快照请求：contract_fingerprint 必须与 Quoin 的完整 Proto 权威契约相同。
 message GetCredentialSnapshotRequest {
   string contract_fingerprint = 1;
 }
 
-// 版本化只读快照：Stele 仅内存缓存；Deliver 必须回传 snapshot_version
+// 版本化只读快照：Stele 仅内存缓存；DeliverEvents 必须回传 snapshot_version
 // （DATA-ALERT-008）。contract_fingerprint 供 Stele 复核通信准入。
 message GetCredentialSnapshotResponse {
-  uint64 snapshot_version = 1;     // 单调递增；Deliver 回传
+  uint64 snapshot_version = 1;     // 单调递增；DeliverEvents 回传
   repeated AlertSourceSnapshot sources = 2;
   string contract_fingerprint = 3; // Quoin 当前完整 Proto 权威契约 SHA-256
 }
@@ -815,33 +933,47 @@ message GetCredentialSnapshotResponse {
 message AlertSourceSnapshot {
   int64 source_id = 1;             // alert_sources.id
   string source_key = 2;
-  string protocol = 3;             // v1: alertmanager
+  string protocol = 3;             // v1: alertmanager（= EventSource.Kind()）
   bool enabled = 4;
   repeated CredentialDigestEntry credentials = 5; // 仅 active 凭据（<=2）
 }
 
-// active 凭据 digest 条目：Stele 提交 Delivery 时回传 credential_id 与快照版本。
+// active 凭据 digest 条目：Stele 提交事件时回传 credential_id 与快照版本。
 message CredentialDigestEntry {
   int64 credential_id = 1;         // alert_source_credentials.id
   bytes digest = 2;                // 32-byte Bearer digest
 }
 
-// Delivery 转交：精确原始 body；relay_id 幂等；contract_fingerprint 必填且必须与
-// Quoin 的完整 Proto 权威契约相同（CONTEXT「Stele」、RUNTIME-STELE-003/005）。
-message DeliveryRelayRequest {
-  string relay_id = 1;             // Stele 每次外部请求生成；内部重试复用
-  int64 source_id = 2;
-  int64 credential_id = 3;         // 必填（DATA-ALERT-008）
-  uint64 credential_snapshot_version = 4; // 必填，>= 1（DATA-ALERT-008）
-  string protocol = 5;             // v1: alertmanager
-  bytes body = 6;                  // 精确原始请求体（可能非 UTF-8）
-  google.protobuf.Timestamp received_at = 7; // Stele 收到外部请求的时间
-  string contract_fingerprint = 8; // 完整权威集合 SHA-256，小写 hex
+// 事件批量转交：Stele 本地队列的转发循环调用。event_id 幂等；结果逐事件裁决，
+// ACCEPTED/REJECTED 后 Stele 删除本地队列条目，UNAVAILABLE 稍后重试、超限入死信。
+message DeliverEventsRequest {
+  string contract_fingerprint = 1; // 完整权威集合 SHA-256，小写 hex
+  repeated RelayEvent events = 2;  // 逐事件独立事务裁决
 }
 
-// Delivery 结果：ACCEPTED=204；REJECTED=4xx 不重试；UNAVAILABLE=5xx 重试
-// （RUNTIME-STELE-004）。
-message DeliveryRelayResponse {
-  DeliveryStatus status = 1;
-  string detail = 2;               // 面向 Stele 日志的非权威说明
+// 归一化事件：EventSource 插件 VerifyAndParse 的产物信封。payload 是该 source_kind
+// 的归一化事件 JSON（协议语义已在边缘解析，Quoin 只解释业务语义）。
+message RelayEvent {
+  string event_id = 1;          // Stele 生成；全局唯一；幂等键
+  string source_kind = 2;       // EventSource.Kind()（= AlertSourceSnapshot.protocol）
+  int64 source_id = 3;          // 匹配的 alert_sources.id
+  int64 credential_id = 4;      // 命中的凭据
+  uint64 credential_snapshot_version = 5;
+  string event_type = 6;        // 归一化事件类型（如 "alerts.batch"）
+  google.protobuf.Timestamp received_at = 7; // Stele 收到外部请求的时间
+  bytes payload = 8;            // 归一化事件 JSON
+}
+
+message DeliverEventsResponse {
+  repeated EventDeliveryStatus results = 1; // 与请求 events 顺序一一对应
+}
+
+// 逐事件转交裁决（ADR-0011：入队即 ACK，业务拒绝发生在 ACK 之后）。ACCEPTED 含
+// 重复到达的幂等接受；REJECTED 为业务性永久拒绝（Stele 死信保留原文）；UNAVAILABLE
+// 为瞬时不可用（Stele 重试）。
+enum EventDeliveryStatus {
+  EVENT_DELIVERY_STATUS_UNSPECIFIED = 0;
+  EVENT_DELIVERY_STATUS_ACCEPTED = 1;
+  EVENT_DELIVERY_STATUS_REJECTED = 2;
+  EVENT_DELIVERY_STATUS_UNAVAILABLE = 3;
 }

@@ -147,6 +147,9 @@ function CatalogCard({
 			</CardHeader>
 			<CardContent className="mt-auto flex flex-col gap-3">
 				<div className="flex flex-wrap gap-2">
+					{item.capabilities.includes("event_source") && (
+						<Badge variant="secondary">事件接入</Badge>
+					)}
 					{item.capabilities.includes("discover") && (
 						<Badge variant="secondary">自动观测</Badge>
 					)}

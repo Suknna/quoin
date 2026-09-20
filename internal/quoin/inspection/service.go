@@ -43,18 +43,19 @@ var errResultReplayed = errors.New("inspection result was already committed")
 // automatic audit actions. Historic ledger rows keep replaying because the
 // names and request digests are unchanged.
 const (
-	CommandCreatePlan   = "inspection_plan.create"
-	CommandUpdatePlan   = "inspection_plan.update"
-	CommandCreateRun    = "inspection_run.create"
-	CommandCancelRun    = "inspection_run.cancel"
-	CommandRerunRun     = "inspection_run.rerun"
-	CommandReanalyzeRun = "inspection_run.reanalyze"
-	CommandScheduleRun  = "inspection_run.schedule"
-	commandPluginResult = "inspection_run.result.plugin"
-	commandPromqlResult = "inspection_run.result.promql"
-	commandReportResult = "inspection_run.result.report"
-	commandDefaultPlan  = "inspection_plan.default.ensure"
-	commandPromqlGap    = "inspection_run.gap.promql"
+	CommandCreatePlan    = "inspection_plan.create"
+	CommandUpdatePlan    = "inspection_plan.update"
+	CommandCreateRun     = "inspection_run.create"
+	CommandCancelRun     = "inspection_run.cancel"
+	CommandRerunRun      = "inspection_run.rerun"
+	CommandReanalyzeRun  = "inspection_run.reanalyze"
+	CommandScheduleRun   = "inspection_run.schedule"
+	commandPluginResult  = "inspection_run.result.plugin"
+	commandPromqlResult  = "inspection_run.result.promql"
+	commandReportResult  = "inspection_run.result.report"
+	commandDefaultPlan   = "inspection_plan.default.ensure"
+	commandPromqlGap     = "inspection_run.gap.promql"
+	commandCollectionGap = "inspection_run.gap.collection"
 )
 
 // Domain object types for the command ledger and the automatic audit.
@@ -102,6 +103,7 @@ type Service struct {
 	pluginResult  *execution.Operation
 	reportResult  *execution.Operation
 	promqlGap     *execution.Operation
+	collectionGap *execution.Operation
 	opDefaultPlan *execution.Operation
 }
 
@@ -159,6 +161,7 @@ func (s *Service) registerOperations() {
 	s.pluginResult = register(execution.Operation{Name: commandPluginResult, Class: execution.ClassWrite, ObjectType: ObjectInspectionRun, Authorize: requireSystemResultWork})
 	s.reportResult = register(execution.Operation{Name: commandReportResult, Class: execution.ClassWrite, ObjectType: ObjectInspectionRun, Authorize: requireSystemResultWork})
 	s.promqlGap = register(execution.Operation{Name: commandPromqlGap, Class: execution.ClassWrite, ObjectType: ObjectInspectionRun, Authorize: requireSystemResultWork})
+	s.collectionGap = register(execution.Operation{Name: commandCollectionGap, Class: execution.ClassWrite, ObjectType: ObjectInspectionRun, Authorize: requireSystemResultWork})
 	s.opDefaultPlan = register(execution.Operation{Name: commandDefaultPlan, Class: execution.ClassWrite, ObjectType: ObjectInspectionPlan, Authorize: authorizeInspectionAdmin})
 }
 
@@ -480,11 +483,14 @@ type RunSummary struct {
 	CreatedAt         string  `json:"createdAt"`
 }
 
-// RuntimeAvailability is sampled by the scheduling runtime at the boundary.
-// A false slot produces a durable runtime_unavailable check gap rather than a
-// queued execution that would silently run later.
+// RuntimeAvailability is sampled by the scheduling runtime at the boundary
+// (ADR-0011: collection executes locally through the Stele gateway). A false
+// value produces a durable runtime_unavailable check gap rather than a queued
+// execution that would silently run later.
 type RuntimeAvailability struct {
-	Plinth bool
+	// Collection reports whether the local collector's platform transport
+	// (the Stele gateway stream) can accept collection work at the boundary.
+	Collection bool
 }
 
 // runtimeUnavailableChild records a boundary-time Runtime outage as a terminal

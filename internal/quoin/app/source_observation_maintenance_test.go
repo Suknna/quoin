@@ -37,10 +37,9 @@ func TestSourceObservationAdmissionReportsUnreadableMaintenanceFence(t *testing.
 	// An isolated minimal catalog keeps this test decoupled from the shared
 	// builtin catalog's tool-schema churn; only discover capability matters.
 	registry := plugins.NewRegistry()
-	if err := registry.RegisterDescriptor(plugins.Descriptor{
+	if err := registry.Register(plugins.Plugin{
 		ID: "prometheus", Version: "1", DisplayName: "Prometheus", Description: "metrics source",
-		Capabilities:   []plugins.Capability{plugins.CapabilityDiscover},
-		ConnectionKind: "prometheus",
+		ConnectionKind: "prometheus", DefaultEnabled: true,
 		DiscoverObjects: []plugins.DiscoverObject{
 			{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
 		},

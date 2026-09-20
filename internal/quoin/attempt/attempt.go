@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Suknna/quoin/internal/plugins/builtin"
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
@@ -125,21 +125,22 @@ func (service *Service) Reader() audit.Reader {
 	return service.runner.Reader()
 }
 
-// DefaultCatalogs is the unwired-wiring fallback: the shared builtin plugin
-// registry under its default enablement, assembled through the ONE
-// BuildCatalogs path (registry descriptors + compiled implementations).
+// DefaultCatalogs is the unwired-wiring fallback: the process default
+// plugin registry (plugins.Default, ADR-0011 blank-import assembly) under
+// its default enablement, assembled through the ONE BuildCatalogs path.
 // The application wiring replaces it with a registry-built set resolved
-// from the deployment configuration; tests and minimal hosts get the
-// deterministic default mainline.
+// from the deployment configuration; tests and minimal hosts get whatever
+// the process registered (hosts wanting the builtin mainline blank-import
+// internal/plugins/builtin).
 func DefaultCatalogs() *Catalogs {
-	registry := builtin.Registry()
+	registry := plugins.Default()
 	enabled, err := registry.ResolveEnabled(nil)
 	if err != nil {
-		panic("builtin descriptors must always resolve: " + err.Error())
+		panic("default plugin enablement must always resolve: " + err.Error())
 	}
-	catalogs, err := BuildCatalogs(registry, Implementations(), enabled)
+	catalogs, err := BuildCatalogs(registry, enabled)
 	if err != nil {
-		panic("builtin descriptors must always build: " + err.Error())
+		panic("default catalogs must always build: " + err.Error())
 	}
 	return catalogs
 }

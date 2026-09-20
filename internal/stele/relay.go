@@ -1,6 +1,11 @@
-// Package stele implements the alert protocol entry: webhook HTTP intake,
-// bearer authentication against the cached credential snapshot, and exact
-// relay to Quoin's SteleRelay gRPC service.
+// Package stele implements the external gateway (ADR-0011): the single front
+// door for every external platform interaction. Inbound webhooks are
+// authenticated against Quoin's credential digest snapshot, parsed by
+// EventSource plugins, and queued in a local SQLite outbox (ack on enqueue;
+// reliability belongs to the queue). Outbound platform calls arrive over the
+// long-lived SteleRelay gateway stream, resolve connection material on demand,
+// and execute under per-connection rate limits. Stele judges only signatures,
+// quotas, and reachability — never business semantics.
 package stele
 
 import (
@@ -9,7 +14,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -20,18 +24,22 @@ import (
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const maxWebhookBody = 16 << 20 // 16 MiB (Alertmanager webhook payload cap)
+const (
+	maxWebhookBody   = 16 << 20 // 16 MiB（入站 webhook 与出站响应体共用的上限）
+	relayCallTimeout = 10 * time.Second
+)
 
-// Relay is the Stele→Quoin relay client with the cached credential snapshot.
+// Relay is the Stele→Quoin client half: the mTLS connection, the cached
+// credential digest snapshot for inbound bearer auth, and the unary RPCs the
+// forwarder and gateway need.
 type Relay struct {
-	conn      *grpc.ClientConn
-	client    runtimev1.SteleRelayClient
+	conn   *grpc.ClientConn
+	client runtimev1.SteleRelayClient
+
 	mu        sync.RWMutex
 	snapshot  *runtimev1.GetCredentialSnapshotResponse
 	ready     bool
@@ -40,7 +48,7 @@ type Relay struct {
 
 // NewRelay dials Quoin Runtime over mTLS: the deployment CA verifies the
 // server and the CA-signed client certificate (CN=stele) authenticates Stele
-// (ADR-0009). No service token exists.
+// (ADR-0009). The gateway stream runs on the same conn.
 func NewRelay(endpoint, caFile, clientCertFile, clientKeyFile string) (*Relay, error) {
 	caPEM, err := os.ReadFile(caFile)
 	if err != nil {
@@ -65,35 +73,41 @@ func NewRelay(endpoint, caFile, clientCertFile, clientKeyFile string) (*Relay, e
 	if err != nil {
 		return nil, err
 	}
-	relay := &Relay{conn: conn, client: runtimev1.NewSteleRelayClient(conn)}
-	go relay.refreshLoop()
-	return relay, nil
+	return &Relay{conn: conn, client: runtimev1.NewSteleRelayClient(conn)}, nil
 }
 
 func (relay *Relay) Close() error {
 	return relay.conn.Close()
 }
 
-func (relay *Relay) context() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 10*time.Second)
-}
-
-// refreshLoop pulls the credential snapshot on boot and then every 5s
-// (RUNTIME-STELE-002: not ready until a snapshot loads successfully).
-func (relay *Relay) refreshLoop() {
-	relay.refresh()
+// Run refreshes the credential snapshot immediately and then every 5s until
+// the context ends (RUNTIME-STELE-002: not ready until a snapshot loads
+// successfully). The snapshot gates inbound bearer auth only; a transient
+// loss keeps the last good snapshot so already-queued events keep flowing.
+func (relay *Relay) Run(ctx context.Context) {
+	relay.refresh(ctx)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		relay.refresh()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			relay.refresh(ctx)
+		}
 	}
 }
 
-func (relay *Relay) refresh() {
-	ctx, cancel := relay.context()
+func (relay *Relay) refresh(ctx context.Context) {
+	callCtx, cancel := context.WithTimeout(ctx, relayCallTimeout)
 	defer cancel()
-	response, err := relay.client.GetCredentialSnapshot(ctx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint})
+	response, err := relay.client.GetCredentialSnapshot(callCtx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint})
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		// Keep the previous snapshot; only the ready flag falls until the
+		// next successful pull.
 		relay.mu.Lock()
 		relay.lastError = err
 		relay.ready = false
@@ -103,7 +117,7 @@ func (relay *Relay) refresh() {
 	}
 	if response.GetContractFingerprint() != contract.ProtoAuthorityFingerprint {
 		relay.mu.Lock()
-		relay.lastError = fmt.Errorf("Proto contract fingerprint mismatch")
+		relay.lastError = fmt.Errorf("proto contract fingerprint mismatch")
 		relay.ready = false
 		relay.mu.Unlock()
 		return
@@ -115,17 +129,19 @@ func (relay *Relay) refresh() {
 	relay.mu.Unlock()
 }
 
-// Ready reports whether the snapshot is loaded (OPS-HEALTH-005).
+// Ready reports whether the credential snapshot is loaded (OPS-HEALTH-005).
 func (relay *Relay) Ready() bool {
 	relay.mu.RLock()
 	defer relay.mu.RUnlock()
 	return relay.ready
 }
 
-// Credential returns the cached digest entry for a bearer, or false.
-// The bearer is base64url text of 32 raw bytes (SEC-REVEAL-001); the database
-// digest is SHA-256 of the RAW bytes, so decode before hashing.
-func (relay *Relay) Credential(bearer string) (sourceID, credentialID int64, snapshotVersion uint64, ok bool) {
+// Credential resolves the digest entry for a bearer on one source kind.
+// protocol == EventSource.Kind() is part of the match: a credential minted for
+// one protocol never authorizes another source's path (SEC-REVEAL-001: the
+// bearer is base64url text of 32 raw bytes, the digest is SHA-256 of the RAW
+// bytes, so decode before hashing).
+func (relay *Relay) Credential(bearer, sourceKind string) (sourceID, credentialID int64, snapshotVersion uint64, ok bool) {
 	raw, err := base64.RawURLEncoding.DecodeString(bearer)
 	if err != nil || len(raw) != 32 {
 		return 0, 0, 0, false
@@ -138,7 +154,7 @@ func (relay *Relay) Credential(bearer string) (sourceID, credentialID int64, sna
 		return 0, 0, 0, false
 	}
 	for _, source := range snapshot.GetSources() {
-		if !source.GetEnabled() {
+		if !source.GetEnabled() || source.GetProtocol() != sourceKind {
 			continue
 		}
 		for _, credential := range source.GetCredentials() {
@@ -161,63 +177,39 @@ func subtleCompare(a, b []byte) bool {
 	return diff == 0
 }
 
-// Deliver relays one exact body with the relay_id; internal retries reuse the
-// same id so Quoin dedupes (CONTEXT「Stele」). Each attempt gets its own
-// deadline short enough that all three fit inside the webhook context.
-func (relay *Relay) Deliver(ctx context.Context, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) (runtimev1.DeliveryStatus, error) {
-	request := &runtimev1.DeliveryRelayRequest{
-		RelayId: relayID, SourceId: sourceID, CredentialId: credentialID,
-		CredentialSnapshotVersion: uint64(snapshotVersion), Protocol: "alertmanager",
-		Body: body, ReceivedAt: timestampProto(receivedAt), ContractFingerprint: contract.ProtoAuthorityFingerprint,
-	}
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		response, err := relay.client.Deliver(callCtx, request)
-		cancel()
-		if err != nil {
-			lastErr = err
-			// UNAVAILABLE / deadline / resource exhausted: retry with backoff;
-			// others permanent.
-			if !isRetryable(err) {
-				return runtimev1.DeliveryStatus_DELIVERY_STATUS_UNAVAILABLE, err
-			}
-			if err := sleepCtx(ctx, time.Duration(attempt+1)*500*time.Millisecond); err != nil {
-				return runtimev1.DeliveryStatus_DELIVERY_STATUS_UNAVAILABLE, err
-			}
-			continue
-		}
-		if response.GetStatus() == runtimev1.DeliveryStatus_DELIVERY_STATUS_UNAVAILABLE {
-			lastErr = errors.New(response.GetDetail())
-			if err := sleepCtx(ctx, time.Duration(attempt+1)*500*time.Millisecond); err != nil {
-				return runtimev1.DeliveryStatus_DELIVERY_STATUS_UNAVAILABLE, err
-			}
-			continue
-		}
-		return response.GetStatus(), nil
-	}
-	return runtimev1.DeliveryStatus_DELIVERY_STATUS_UNAVAILABLE, lastErr
+// DeliverEvents hands one batch to Quoin (single attempt; retry/backoff is
+// the forwarder's job on top of the local queue).
+func (relay *Relay) DeliverEvents(ctx context.Context, events []*runtimev1.RelayEvent) (*runtimev1.DeliverEventsResponse, error) {
+	callCtx, cancel := context.WithTimeout(ctx, relayCallTimeout)
+	defer cancel()
+	return relay.client.DeliverEvents(callCtx, &runtimev1.DeliverEventsRequest{
+		ContractFingerprint: contract.ProtoAuthorityFingerprint,
+		Events:              events,
+	})
 }
 
-func isRetryable(err error) bool {
-	if err == nil {
-		return false
+// AcquireConnectionCredential pulls one connection's material (non-secret
+// revision projection + decrypted secret). miss/revision-mismatch is the only
+// trigger; Stele caches it in memory.
+func (relay *Relay) AcquireConnectionCredential(ctx context.Context, connectionID int64) (*runtimev1.AcquireConnectionCredentialResponse, error) {
+	callCtx, cancel := context.WithTimeout(ctx, relayCallTimeout)
+	defer cancel()
+	response, err := relay.client.AcquireConnectionCredential(callCtx, &runtimev1.AcquireConnectionCredentialRequest{
+		ConnectionId:        connectionID,
+		ContractFingerprint: contract.ProtoAuthorityFingerprint,
+	})
+	if err != nil {
+		return nil, err
 	}
-	// grpc status codes that Alertmanager-safe Stele retries on.
-	code := status.Code(err)
-	return code == codes.Unavailable || code == codes.DeadlineExceeded || code == codes.ResourceExhausted
+	if response.GetConnectionId() != connectionID {
+		return nil, fmt.Errorf("acquire returned connection %d for request %d", response.GetConnectionId(), connectionID)
+	}
+	return response, nil
 }
 
-// sleepCtx sleeps for the duration unless the parent context expires first.
-func sleepCtx(ctx context.Context, duration time.Duration) error {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+// ConnectStream opens the long-lived gateway bidi stream on the shared conn.
+func (relay *Relay) ConnectStream(ctx context.Context) (grpc.BidiStreamingClient[runtimev1.SteleEnvelope, runtimev1.SteleEnvelope], error) {
+	return relay.client.Connect(ctx)
 }
 
 func timestampProto(value time.Time) *timestamppb.Timestamp {

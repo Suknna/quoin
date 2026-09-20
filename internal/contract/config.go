@@ -44,11 +44,10 @@ type QuoinConfig struct {
 	// projections; Deployment Acceptance is then simply unavailable.
 	DeploymentBinding *DeploymentBinding `json:"deploymentBinding,omitempty" yaml:"deploymentBinding,omitempty"`
 	// EnabledPlugins is the deployment's explicit plugin enablement
-	// whitelist (ADR-0004). Absent selects every plugin whose descriptor
-	// defaults to enabled (prometheus/thanos/alertmanager). Unknown IDs,
-	// including the retired browser and kubernetes plugins, fail component
-	// startup. The same field drives Quoin's catalog and the frozen model
-	// tool directory.
+	// whitelist (ADR-0004, ADR-0011 registry). Absent selects every plugin
+	// whose registration defaults to enabled (prometheus/thanos/
+	// alertmanager). Unknown IDs fail component startup. The same field
+	// drives Quoin's catalog and the frozen model tool directory.
 	EnabledPlugins []string `json:"enabledPlugins,omitempty" yaml:"enabledPlugins,omitempty"`
 	// Authentication is the optional deployment-side bootstrap for
 	// verification-code delivery (authentication design section 8). It
@@ -162,6 +161,11 @@ type SteleConfig struct {
 	// the mTLS handshake; they replace the retired service token (ADR-0009).
 	QuoinRuntimeClientCertificateFile string `json:"quoinRuntimeClientCertificateFile" yaml:"quoinRuntimeClientCertificateFile"`
 	QuoinRuntimeClientPrivateKeyFile  string `json:"quoinRuntimeClientPrivateKeyFile" yaml:"quoinRuntimeClientPrivateKeyFile"`
+	// DataDirectory is the local state root for Stele's SQLite queue and
+	// counters (ADR-0011): the outbox/dead-letter reliability substrate behind
+	// enqueue-as-ack webhooks. Required, non-empty; the directory is created
+	// with 0700 and the database restricted to 0600.
+	DataDirectory string `json:"dataDirectory" yaml:"dataDirectory"`
 }
 
 func DecodeFile(path string, target any) error {

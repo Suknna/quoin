@@ -1,16 +1,18 @@
 package connections
 
-// Connection Probe closure (T07): probeConnection creates the canonical
-// connection_probe Execution Attempt with a frozen input snapshot and the
-// dedicated probe grant in one audited runner transaction (HTTP-COMMAND-013),
-// dispatches it to the live Plinth control stream, and CommitProbeResult is
-// the ONLY terminal write path: header + typed child + attempt terminal state
-// in one transaction (RUNTIME-AGENT-010).
+// Connection Probe closure (T07, ADR-0011 本地执行形态): StartProbe creates the
+// canonical connection_probe Execution Attempt with a frozen input snapshot
+// and the dedicated probe grant in one audited runner transaction
+// (HTTP-COMMAND-013); execution itself is Quoin-local (the app-layer local
+// execution loop binds, runs the metrics_probe internal tool over the Stele
+// gateway and calls CommitProbeResult) — the ONLY terminal write path:
+// header + typed child + attempt terminal state in one transaction
+// (RUNTIME-AGENT-010).
 //
 // Attempt creation goes through attempt.CreateOn so the caller's execution
 // metadata (correlation, initiator) is persisted atomically with the attempt
 // row (ADR-0006); a context without execution metadata fails closed. The
-// runtime-driven lifecycle steps (accept, result commit, cancel ack,
+// executor-driven lifecycle steps (accept, result commit, cancel ack,
 // interrupt, queued bind) run under the attempt-scoped system task context
 // (probeLifecycleContext: persisted correlation restored, unrelated
 // inherited metadata rejected) with their automatic audit rows.
@@ -23,12 +25,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 )
 
 // ProbeContractDigest computes the SHA-256 of the frozen
@@ -65,30 +65,18 @@ type ProbeInput struct {
 }
 
 // probeStartResult carries the created attempt out of the audited business
-// stage: the attempt id (the audit domain reference), the first grant id and
-// whether the attempt was assigned to the live stream inside the transaction.
+// stage: the attempt id (the audit domain reference).
 type probeStartResult struct {
 	attemptID int64
-	grantID   int64
-	assigned  bool
 }
 
-// StartProbe creates the Attempt (Queued → Assigned with the current Plinth
-// binding), freezes the input snapshot, creates the probe grant, then hands
-// the dispatch envelope to the live stream (DATA-CONN-002: probe may run
-// while disabled/revalidation; the grant still binds the current pair and
-// current root binding). The attempt creation is an audited admin operation;
-// the dispatch callback fires only after the runner committed.
-func (service *Service) StartProbe(ctx context.Context, name string, runtimes *qruntime.Service, dispatch Dispatcher) (int64, error) {
+// StartProbe creates the Attempt (Queued) and freezes the input snapshot and
+// the probe grant in one audited runner transaction (HTTP-COMMAND-013,
+// ADR-0011). Execution is local: the Quoin local execution loop binds and
+// runs the probe through the metrics_probe internal tool over the Stele
+// gateway, so creation no longer couples to any runtime stream binding.
+func (service *Service) StartProbe(ctx context.Context, name string) (int64, error) {
 	summary, err := service.Get(ctx, name)
-	if err != nil {
-		return 0, err
-	}
-	actionSetID, actionSetVersion, err := ActionSet(summary.Type)
-	if err != nil {
-		return 0, err
-	}
-	contractDigest, err := ProbeContractDigest()
 	if err != nil {
 		return 0, err
 	}
@@ -97,16 +85,6 @@ func (service *Service) StartProbe(ctx context.Context, name string, runtimes *q
 		return 0, err
 	}
 	inputDigest := sha256.Sum256(input)
-	// Resolve the live binding BEFORE opening the runner transaction: View
-	// also draws from the single pool, so calling it inside the transaction
-	// would self-deadlock.
-	var binding *qruntime.SlotView
-	if runtimes != nil {
-		view, viewErr := runtimes.View(ctx, qruntime.SlotPlinth)
-		if viewErr == nil {
-			binding = &view
-		}
-	}
 	result, err := execution.Execute(ctx, service.commands.runner, service.commands.probeStart, func(tx *execution.Tx) (probeStartResult, error) {
 		// One active probe per connection (ux_execution_attempt_active_scope).
 		var active int
@@ -144,37 +122,17 @@ func (service *Service) StartProbe(ctx context.Context, name string, runtimes *q
 		if summary.Type == TypeModelProvider {
 			purposes = []string{"model_probe_chat", "model_probe_embedding"}
 		}
-		var grantID int64
 		for _, purpose := range purposes {
-			grantInsert, grantErr := tx.ExecContext(ctx, `INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,created_at) VALUES(?,?,?,?,?,?)`, attemptID, purpose, summary.ID, summary.CurrentRevisionID, summary.CurrentGenerationID, now)
-			if grantErr != nil {
-				return probeStartResult{}, grantErr
-			}
-			if purpose == purposes[0] {
-				grantID, grantErr = grantInsert.LastInsertId()
-				if grantErr != nil {
-					return probeStartResult{}, grantErr
-				}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,created_at) VALUES(?,?,?,?,?,?)`, attemptID, purpose, summary.ID, summary.CurrentRevisionID, summary.CurrentGenerationID, now); err != nil {
+				return probeStartResult{}, err
 			}
 		}
-		// Assign to the live plinth stream.
-		if binding == nil || !binding.Connected {
-			// Attempt stays Queued; the dispatcher retries when plinth connects.
-			return probeStartResult{attemptID: attemptID, grantID: grantID}, nil
-		}
-		lease := timestampOf(func() time.Time { return service.now().UTC().Add(5 * time.Minute) })
-		if _, err := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id=?,connection_epoch=?,lease_until=?,runtime_release_version=?,row_version=row_version+1 WHERE id=? AND state='Queued'`, binding.BootID, *binding.ConnectionEpoch, lease, releaseVersion, attemptID); err != nil {
-			return probeStartResult{}, err
-		}
-		return probeStartResult{attemptID: attemptID, grantID: grantID, assigned: true}, nil
+		// The attempt stays Queued: the local execution loop claims it
+		// (Queued→Assigned→Running under the local binding identity).
+		return probeStartResult{attemptID: attemptID}, nil
 	}, func(result probeStartResult) int64 { return result.attemptID })
 	if err != nil {
 		return 0, domainError(err)
-	}
-	// Release the runner transaction before the dispatch callback: the
-	// dispatcher re-reads the attempt grants through its own access path.
-	if result.assigned && dispatch != nil {
-		dispatch(result.attemptID, summary, *binding.ConnectionEpoch, binding.BootID, result.grantID, input, contractDigest, actionSetID, actionSetVersion)
 	}
 	return result.attemptID, nil
 }
@@ -193,10 +151,6 @@ func lastInsertID(ctx context.Context, reader interface {
 var releaseVersion = "v0.1.0-dev"
 
 func SetReleaseVersion(version string) { releaseVersion = version }
-
-// Dispatcher receives the probe dispatch envelope after the transaction
-// commits; production forwards it over the Plinth control stream.
-type Dispatcher func(attemptID int64, summary Summary, epoch uint64, bootID string, grantID int64, input []byte, contractDigest, actionSetID string, actionSetVersion int)
 
 // TypedProbeResult is the supervisor's canonical typed observation.
 type TypedProbeResult struct {

@@ -1,337 +1,212 @@
-// 外部测试包：只允许依赖 internal/plugins 的公开边界（注册/目录公共边界）。
 package plugins_test
+
+// Registry + generic-tool assembly tests (ADR-0004 reworked by ADR-0011):
+// blank-import style registration, freeze-time invariants, shared-contract
+// dedup, typed tool round-trips and reflection-derived schemas.
 
 import (
 	"context"
-	"errors"
-	"reflect"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Suknna/quoin/internal/plugins"
-	"github.com/Suknna/quoin/internal/plugins/builtin"
 )
 
-func TestRegisterDescriptor(t *testing.T) {
-	registry := plugins.NewRegistry()
-	descriptor := plugins.Descriptor{
-		ID:          "prometheus",
-		Version:     "1",
-		DisplayName: "Prometheus",
-		Description: "metrics source connection",
-	}
-	if err := registry.RegisterDescriptor(descriptor); err != nil {
-		t.Fatalf("RegisterDescriptor(prometheus) = %v, want nil", err)
-	}
-	got, ok := registry.Descriptor("prometheus")
-	if !ok {
-		t.Fatal("Descriptor(prometheus) not found after registration")
-	}
-	if !reflect.DeepEqual(got, descriptor) {
-		t.Fatalf("Descriptor(prometheus) = %+v, want %+v", got, descriptor)
-	}
-	if _, ok := registry.Descriptor("thanos"); ok {
-		t.Fatal("Descriptor(thanos) found before registration")
-	}
+type echoArgs struct {
+	Query   string   `json:"query" doc:"查询表达式"`
+	Tags    []string `json:"tags,omitempty"`
+	Attempt int      `json:"attempt,omitempty"`
 }
 
-func TestDescriptorsReturnsStableIDOrder(t *testing.T) {
-	registry := plugins.NewRegistry()
-	for _, id := range []string{"thanos", "alertmanager", "kubernetes", "prometheus"} {
-		descriptor := plugins.Descriptor{ID: id, Version: "1", DisplayName: id, Description: "test descriptor"}
-		if err := registry.RegisterDescriptor(descriptor); err != nil {
-			t.Fatalf("RegisterDescriptor(%s) = %v, want nil", id, err)
-		}
-	}
-	list := registry.Descriptors()
-	if len(list) != 4 {
-		t.Fatalf("len(Descriptors()) = %d, want 4", len(list))
-	}
-	for i, want := range []string{"alertmanager", "kubernetes", "prometheus", "thanos"} {
-		if got := list[i].ID; got != want {
-			t.Fatalf("Descriptors()[%d].ID = %q, want %q", i, got, want)
-		}
-	}
+type echoResult struct {
+	Echo string `json:"echo"`
 }
 
-// registrationError runs want on every rejected registration.
-func registrationError(t *testing.T, descriptor plugins.Descriptor, want error) {
+func newTestRegistry(t *testing.T) *plugins.Registry {
 	t.Helper()
 	registry := plugins.NewRegistry()
-	err := registry.RegisterDescriptor(descriptor)
-	if err == nil {
-		t.Fatalf("RegisterDescriptor(%s) accepted invalid descriptor", descriptor.ID)
+	if err := registry.Register(plugins.Plugin{
+		ID: "alpha", Version: "1", DefaultEnabled: true,
+		EventSource: stubSource{kind: "alphaevents"},
+		Tools: stubProvider{entries: []plugins.ToolEntry{
+			plugins.Tool[echoArgs, echoResult]{
+				Name: "alpha_query", Version: "3", FailureMode: plugins.FailureReturnToModel,
+				ResultKind: "alpha_result_v1", Description: "alpha query tool",
+				Handler: func(t *plugins.ToolContext, args echoArgs) (echoResult, error) {
+					return echoResult{Echo: args.Query}, nil
+				},
+			}.Entry("alpha"),
+		}},
+	}); err != nil {
+		t.Fatalf("register alpha: %v", err)
 	}
-	if !errors.Is(err, want) {
-		t.Fatalf("RegisterDescriptor(%s) = %v, want %v", descriptor.ID, err, want)
+	return registry
+}
+
+type stubSource struct{ kind string }
+
+func (s stubSource) Kind() string { return s.kind }
+func (s stubSource) VerifyAndParse(_ context.Context, _ plugins.InboundRequest) ([]plugins.Event, error) {
+	return nil, nil
+}
+
+type stubProvider struct{ entries []plugins.ToolEntry }
+
+func (p stubProvider) Tools() []plugins.ToolEntry { return p.entries }
+
+func TestRegistryDuplicatePluginRejected(t *testing.T) {
+	registry := newTestRegistry(t)
+	if err := registry.Register(plugins.Plugin{ID: "alpha", Version: "2"}); err == nil {
+		t.Fatal("duplicate plugin ID accepted")
 	}
 }
 
-func TestRegisterDescriptorRejectsInvalidDescriptors(t *testing.T) {
-	valid := plugins.Descriptor{ID: "prometheus", Version: "1", DisplayName: "Prometheus", Description: "metrics source"}
-	cases := map[string]struct {
-		mutate func(*plugins.Descriptor)
-		want   error
-	}{
-		"empty-id":          {func(d *plugins.Descriptor) { d.ID = "" }, plugins.ErrInvalidDescriptor},
-		"upper-id":          {func(d *plugins.Descriptor) { d.ID = "Prometheus" }, plugins.ErrInvalidDescriptor},
-		"empty-version":     {func(d *plugins.Descriptor) { d.Version = "" }, plugins.ErrInvalidDescriptor},
-		"empty-display":     {func(d *plugins.Descriptor) { d.DisplayName = "" }, plugins.ErrInvalidDescriptor},
-		"empty-description": {func(d *plugins.Descriptor) { d.Description = "" }, plugins.ErrInvalidDescriptor},
-		"unknown-capability": {func(d *plugins.Descriptor) {
-			d.Capabilities = []plugins.Capability{"magic"}
-		}, plugins.ErrInvalidDescriptor},
-		"duplicate-capability": {func(d *plugins.Descriptor) {
-			d.Capabilities = []plugins.Capability{plugins.CapabilityProbe, plugins.CapabilityProbe}
-		}, plugins.ErrInvalidDescriptor},
-		"tools-capability-without-tools": {func(d *plugins.Descriptor) {
-			d.Capabilities = []plugins.Capability{plugins.CapabilityTools}
-		}, plugins.ErrInvalidDescriptor},
-		"tools-without-capability": {func(d *plugins.Descriptor) {
-			d.Tools = []plugins.Tool{{Name: "p_query", Version: "1", ExecutionLocation: plugins.LocationPlinthSupervisor, FailureMode: "return_to_model", Description: "query"}}
-		}, plugins.ErrInvalidDescriptor},
-		"templates-capability-without-templates": {func(d *plugins.Descriptor) {
-			d.Capabilities = []plugins.Capability{plugins.CapabilityInspectionTemplates}
-		}, plugins.ErrInvalidDescriptor},
-		"execute-tool-without-tools": {func(d *plugins.Descriptor) {
-			d.Capabilities = []plugins.Capability{plugins.CapabilityExecuteTool}
-		}, plugins.ErrInvalidDescriptor},
-		"collect-without-templates": {func(d *plugins.Descriptor) {
-			d.Capabilities = []plugins.Capability{plugins.CapabilityCollect}
-		}, plugins.ErrInvalidDescriptor},
-		"schema-not-object": {func(d *plugins.Descriptor) {
-			d.ConfigSchema = map[string]any{"type": "string"}
-		}, plugins.ErrInvalidDescriptor},
-		"schema-open-world": {func(d *plugins.Descriptor) {
-			d.ConfigSchema = map[string]any{"type": "object"}
-		}, plugins.ErrInvalidDescriptor},
-		"schema-wrong-draft": {func(d *plugins.Descriptor) {
-			d.ConfigSchema = map[string]any{"type": "object", "additionalProperties": false, "$schema": "http://json-schema.org/draft-07/schema#"}
-		}, plugins.ErrInvalidDescriptor},
-		"tool-unknown-location": {func(d *plugins.Descriptor) {
-			d.Capabilities = []plugins.Capability{plugins.CapabilityTools}
-			d.Tools = []plugins.Tool{{Name: "p_query", Version: "1", ExecutionLocation: "browser_local", FailureMode: "return_to_model", Description: "query"}}
-		}, plugins.ErrInvalidDescriptor},
-		"tool-unknown-failure-mode": {func(d *plugins.Descriptor) {
-			d.Capabilities = []plugins.Capability{plugins.CapabilityTools}
-			d.Tools = []plugins.Tool{{Name: "p_query", Version: "1", ExecutionLocation: plugins.LocationQuoin, FailureMode: "crash", Description: "query"}}
-		}, plugins.ErrInvalidDescriptor},
-		"tool-bad-name": {func(d *plugins.Descriptor) {
-			d.Capabilities = []plugins.Capability{plugins.CapabilityTools}
-			d.Tools = []plugins.Tool{{Name: "P-Query", Version: "1", ExecutionLocation: plugins.LocationQuoin, FailureMode: "return_to_model", Description: "query"}}
-		}, plugins.ErrInvalidDescriptor},
-		"duplicate-tool-in-descriptor": {func(d *plugins.Descriptor) {
-			d.Capabilities = []plugins.Capability{plugins.CapabilityTools}
-			d.Tools = []plugins.Tool{
-				{Name: "p_query", Version: "1", ExecutionLocation: plugins.LocationQuoin, FailureMode: "return_to_model", Description: "query"},
-				{Name: "p_query", Version: "2", ExecutionLocation: plugins.LocationQuoin, FailureMode: "return_to_model", Description: "query"},
-			}
-		}, plugins.ErrInvalidDescriptor},
-		"duplicate-template": {func(d *plugins.Descriptor) {
-			d.Capabilities = []plugins.Capability{plugins.CapabilityInspectionTemplates}
-			d.InspectionTemplates = []plugins.InspectionTemplate{
-				{ID: "tls", Version: "1", Title: "TLS", Description: "checks"},
-				{ID: "tls", Version: "2", Title: "TLS", Description: "checks"},
-			}
-		}, plugins.ErrInvalidDescriptor},
+func TestRegistryEventSourceLookup(t *testing.T) {
+	registry := newTestRegistry(t)
+	source, pluginID, ok := registry.EventSource("alphaevents")
+	if !ok || pluginID != "alpha" || source == nil {
+		t.Fatalf("event source lookup failed: ok=%v plugin=%v", ok, pluginID)
 	}
-	for name, testCase := range cases {
-		t.Run(name, func(t *testing.T) {
-			descriptor := valid
-			testCase.mutate(&descriptor)
-			registrationError(t, descriptor, testCase.want)
-		})
+	if _, _, ok := registry.EventSource("missing"); ok {
+		t.Fatal("unknown event source kind resolved")
 	}
 }
 
-func TestRegisterDescriptorAcceptsConsistentToolAndTemplateDeclarations(t *testing.T) {
+func TestRegistrySharedContractDedup(t *testing.T) {
 	registry := plugins.NewRegistry()
-	descriptor := plugins.Descriptor{
-		ID:             "thanos",
-		Version:        "1",
-		DisplayName:    "Thanos",
-		Description:    "global query",
-		Capabilities:   []plugins.Capability{plugins.CapabilityProbe, plugins.CapabilityDiscover, plugins.CapabilityTools, plugins.CapabilityExecuteTool, plugins.CapabilityInspectionTemplates, plugins.CapabilityCollect},
-		ConnectionKind: "thanos",
-		ConfigSchema:   map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"region": map[string]any{"type": "string"}}, "required": []any{"region"}},
-		DiscoverObjects: []plugins.DiscoverObject{
-			{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
-		},
-		Tools: []plugins.Tool{
-			{Name: "p_query", Version: "1", ExecutionLocation: plugins.LocationPlinthSupervisor, FailureMode: "return_to_model", Description: "query"},
-		},
-		InspectionTemplates: []plugins.InspectionTemplate{
-			{ID: "tls-expiry", Version: "1", Title: "TLS expiry", Description: "deterministic checks"},
-		},
+	shared := func(owner string) plugins.ToolEntry {
+		return plugins.Tool[echoArgs, echoResult]{
+			Name: "shared_query", Version: "1", FailureMode: plugins.FailureReturnToModel,
+			ResultKind: "shared_result_v1", Description: "shared contract",
+			Handler: func(t *plugins.ToolContext, args echoArgs) (echoResult, error) { return echoResult{}, nil },
+		}.Entry(owner)
 	}
-	if err := registry.RegisterDescriptor(descriptor); err != nil {
-		t.Fatalf("RegisterDescriptor = %v, want nil", err)
+	_ = registry.Register(plugins.Plugin{ID: "one", Version: "1", Tools: stubProvider{[]plugins.ToolEntry{shared("one")}}})
+	_ = registry.Register(plugins.Plugin{ID: "two", Version: "1", Tools: stubProvider{[]plugins.ToolEntry{shared("two")}}})
+	// A divergent manifest under the same name must fail the freeze.
+	divergent := shared("two")
+	divergent.Definition.Description = "divergent"
+	if err := registry.Register(plugins.Plugin{ID: "three", Version: "1", Tools: stubProvider{[]plugins.ToolEntry{divergent}}}); err != nil {
+		t.Fatalf("register three: %v", err)
 	}
-	owner, ok := registry.ToolOwner("p_query")
-	if !ok || owner != "thanos" {
-		t.Fatalf("ToolOwner(p_query) = (%s, %t), want (thanos, true)", owner, ok)
+	assertPanic(t, func() { registry.ToolEntries() })
+}
+
+func TestRegistrySharedContractSingleOwnerLookup(t *testing.T) {
+	registry := plugins.NewRegistry()
+	shared := func(owner string) plugins.ToolEntry {
+		return plugins.Tool[echoArgs, echoResult]{
+			Name: "shared_query", Version: "1", FailureMode: plugins.FailureReturnToModel,
+			ResultKind: "shared_result_v1", Description: "shared contract",
+			Handler: func(t *plugins.ToolContext, args echoArgs) (echoResult, error) { return echoResult{}, nil },
+		}.Entry(owner)
+	}
+	_ = registry.Register(plugins.Plugin{ID: "one", Version: "1", Tools: stubProvider{[]plugins.ToolEntry{shared("one")}}})
+	_ = registry.Register(plugins.Plugin{ID: "two", Version: "1", Tools: stubProvider{[]plugins.ToolEntry{shared("two")}}})
+	entry, owners, ok := registry.ToolEntryByName("shared_query")
+	if !ok || len(owners) != 2 || entry.Owner != "one" {
+		t.Fatalf("shared contract dedup failed: ok=%v owners=%v owner=%v", ok, owners, entry.Owner)
 	}
 }
 
-func TestRegisterDescriptorRejectsDuplicateIDAndToolName(t *testing.T) {
-	registry := plugins.NewRegistry()
-	first := plugins.Descriptor{ID: "a", Version: "1", DisplayName: "A", Description: "a",
-		Capabilities: []plugins.Capability{plugins.CapabilityTools},
-		Tools:        []plugins.Tool{{Name: "shared_tool", Version: "1", ExecutionLocation: plugins.LocationQuoin, FailureMode: "return_to_model", Description: "x"}},
-	}
-	if err := registry.RegisterDescriptor(first); err != nil {
-		t.Fatal(err)
-	}
-	duplicateID := plugins.Descriptor{ID: "a", Version: "2", DisplayName: "A2", Description: "a2"}
-	if err := registry.RegisterDescriptor(duplicateID); !errors.Is(err, plugins.ErrDuplicateDescriptor) {
-		t.Fatalf("duplicate id = %v, want ErrDuplicateDescriptor", err)
-	}
-	// The SAME contract re-declared by another provider plugin is accepted:
-	// shared tools (e.g. PromQL query over prometheus/thanos) keep one name,
-	// one canonical declaration; authorization resolves the actual source.
-	second := plugins.Descriptor{ID: "b", Version: "1", DisplayName: "B", Description: "b",
-		Capabilities: []plugins.Capability{plugins.CapabilityTools},
-		Tools:        []plugins.Tool{{Name: "shared_tool", Version: "1", ExecutionLocation: plugins.LocationQuoin, FailureMode: "return_to_model", Description: "x"}},
-	}
-	if err := registry.RegisterDescriptor(second); err != nil {
-		t.Fatalf("identical re-declaration = %v, want nil", err)
-	}
-	owner, ok := registry.ToolOwner("shared_tool")
-	if !ok || owner != "a" {
-		t.Fatalf("ToolOwner(shared_tool) = (%s, %t), want canonical owner a", owner, ok)
-	}
-	// A DIVERGENT re-declaration is still rejected.
-	divergent := plugins.Descriptor{ID: "c", Version: "1", DisplayName: "C", Description: "c",
-		Capabilities: []plugins.Capability{plugins.CapabilityTools},
-		Tools:        []plugins.Tool{{Name: "shared_tool", Version: "2", ExecutionLocation: plugins.LocationQuoin, FailureMode: "return_to_model", Description: "x"}},
-	}
-	if err := registry.RegisterDescriptor(divergent); !errors.Is(err, plugins.ErrDuplicateToolName) {
-		t.Fatalf("divergent re-declaration = %v, want ErrDuplicateToolName", err)
-	}
-}
-
-func TestRegisterBundleEnforcesDeclarationAgreement(t *testing.T) {
-	descriptor := plugins.Descriptor{
-		ID: "p", Version: "1", DisplayName: "P", Description: "p",
-		Capabilities:    []plugins.Capability{plugins.CapabilityProbe, plugins.CapabilityDiscover},
-		ConnectionKind:  "prometheus",
-		DiscoverObjects: []plugins.DiscoverObject{{ObjectType: "target", IdentityLabels: []string{"job"}, Query: "up", Limit: 10}},
-	}
-	registry := plugins.NewRegistry()
-	if err := registry.RegisterDescriptor(descriptor); err != nil {
-		t.Fatal(err)
-	}
-	// Bundle without a registered descriptor is rejected.
-	err := registry.RegisterBundle(plugins.ExecutionBundle{PluginID: "ghost", Location: plugins.LocationQuoin, Capabilities: []plugins.Capability{plugins.CapabilityProbe}, Prober: fakeProber{}})
-	if !errors.Is(err, plugins.ErrUndeclaredBundle) {
-		t.Fatalf("ghost bundle = %v, want ErrUndeclaredBundle", err)
-	}
-	// Capability listed without its implementation is rejected.
-	err = registry.RegisterBundle(plugins.ExecutionBundle{PluginID: "p", Location: plugins.LocationQuoin, Capabilities: []plugins.Capability{plugins.CapabilityProbe, plugins.CapabilityDiscover}})
-	if !errors.Is(err, plugins.ErrInvalidBundle) {
-		t.Fatalf("unbacked capability = %v, want ErrInvalidBundle", err)
-	}
-	// Implemented but unlisted capability is rejected.
-	err = registry.RegisterBundle(plugins.ExecutionBundle{PluginID: "p", Location: plugins.LocationQuoin, Capabilities: []plugins.Capability{plugins.CapabilityProbe}, Prober: fakeProber{}, Discoverer: fakeDiscoverer{}})
-	if !errors.Is(err, plugins.ErrInvalidBundle) {
-		t.Fatalf("unlisted implementation = %v, want ErrInvalidBundle", err)
-	}
-	// Capability not declared by the descriptor is rejected.
-	err = registry.RegisterBundle(plugins.ExecutionBundle{PluginID: "p", Location: plugins.LocationQuoin, Capabilities: []plugins.Capability{plugins.CapabilityExecuteTool}, ToolExecutor: fakeExecutor{}})
-	if !errors.Is(err, plugins.ErrUndeclaredBundle) {
-		t.Fatalf("undeclared capability = %v, want ErrUndeclaredBundle", err)
-	}
-	bundle := plugins.ExecutionBundle{PluginID: "p", Location: plugins.LocationQuoin, Capabilities: []plugins.Capability{plugins.CapabilityProbe, plugins.CapabilityDiscover}, Prober: fakeProber{}, Discoverer: fakeDiscoverer{}}
-	if err := registry.RegisterBundle(bundle); err != nil {
-		t.Fatalf("RegisterBundle = %v, want nil", err)
-	}
-	// A second bundle for the same plugin is rejected.
-	err = registry.RegisterBundle(bundle)
-	if !errors.Is(err, plugins.ErrDuplicateBundle) {
-		t.Fatalf("duplicate bundle = %v, want ErrDuplicateBundle", err)
-	}
-	got, ok := registry.Bundle("p")
-	if !ok || !reflect.DeepEqual(got, bundle) {
-		t.Fatalf("Bundle(p) = (%+v, %t), want the registered bundle", got, ok)
-	}
-	if _, ok := registry.Bundle("thanos"); ok {
-		t.Fatal("Bundle(thanos) found without registration")
-	}
-}
-
-func TestRegisterBundleToolLocationMustMatch(t *testing.T) {
-	descriptor := plugins.Descriptor{
-		ID: "p", Version: "1", DisplayName: "P", Description: "p",
-		Capabilities: []plugins.Capability{plugins.CapabilityTools, plugins.CapabilityExecuteTool},
-		Tools:        []plugins.Tool{{Name: "p_tool", Version: "1", ExecutionLocation: plugins.LocationWorkerLocal, FailureMode: "return_to_model", Description: "t"}},
-	}
-	registry := plugins.NewRegistry()
-	if err := registry.RegisterDescriptor(descriptor); err != nil {
-		t.Fatal(err)
-	}
-	err := registry.RegisterBundle(plugins.ExecutionBundle{PluginID: "p", Location: plugins.LocationQuoin, Capabilities: []plugins.Capability{plugins.CapabilityExecuteTool}, ToolExecutor: fakeExecutor{}})
-	if !errors.Is(err, plugins.ErrInvalidBundle) {
-		t.Fatalf("mismatched tool location = %v, want ErrInvalidBundle", err)
-	}
-}
-
-func TestResolveEnabled(t *testing.T) {
-	registry := plugins.NewRegistry()
-	for _, descriptor := range builtin.Descriptors() {
-		if err := registry.RegisterDescriptor(descriptor); err != nil {
-			t.Fatalf("RegisterDescriptor(%s) = %v, want nil", descriptor.ID, err)
+func assertPanic(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected freeze to panic on divergent shared tool")
 		}
+	}()
+	fn()
+}
+
+func TestGenericToolRoundTrip(t *testing.T) {
+	registry := newTestRegistry(t)
+	entry, _, ok := registry.ToolEntryByName("alpha_query")
+	if !ok {
+		t.Fatal("alpha_query missing")
 	}
-	// Silent deployment config selects every DefaultEnabled descriptor. The
-	// browser and kubernetes descriptors are retired and no longer register.
-	defaults, err := registry.ResolveEnabled(nil)
+	def := entry.Definition
+	if def.ExecutionMode != plugins.ModeQuoinRouted {
+		t.Fatalf("execution mode %q", def.ExecutionMode)
+	}
+	parameters := def.ProviderParameters()
+	properties, _ := parameters["properties"].(map[string]any)
+	query, _ := properties["query"].(map[string]any)
+	if query["type"] != "string" || query["description"] != "查询表达式" {
+		t.Fatalf("derived query property: %#v", query)
+	}
+	required, _ := parameters["required"].([]string)
+	if len(required) != 1 || required[0] != "query" {
+		t.Fatalf("derived required: %#v", required)
+	}
+	// Typed round trip: arguments decode into the struct, the handler runs
+	// typed, the result marshals back at the rim.
+	arguments, _ := json.Marshal(map[string]any{"query": "up", "tags": []string{"a"}})
+	payload, err := entry.Invoke(context.Background(), plugins.ToolExecution{
+		Arguments: arguments,
+		Platform:  stubCaller{},
+	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("invoke: %v", err)
 	}
-	want := []string{"alertmanager", "prometheus", "thanos"}
-	if !reflect.DeepEqual(defaults, want) {
-		t.Fatalf("ResolveEnabled(nil) = %v, want %v", defaults, want)
+	var result echoResult
+	if err := json.Unmarshal(payload, &result); err != nil || result.Echo != "up" {
+		t.Fatalf("round trip payload: %s err=%v", payload, err)
 	}
-	// An explicit list is a whitelist: unknown ids fail deterministically —
-	// including the retired browser/kubernetes ids.
-	if _, err := registry.ResolveEnabled([]string{"prometheus", "ghost"}); !errors.Is(err, plugins.ErrUnknownPlugin) {
-		t.Fatalf("ResolveEnabled(ghost) = %v, want ErrUnknownPlugin", err)
-	}
-	if _, err := registry.ResolveEnabled([]string{"kubernetes"}); !errors.Is(err, plugins.ErrUnknownPlugin) {
-		t.Fatalf("ResolveEnabled(retired kubernetes) = %v, want ErrUnknownPlugin", err)
-	}
-	explicit, err := registry.ResolveEnabled([]string{"thanos", "prometheus", "thanos"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(explicit, []string{"prometheus", "thanos"}) {
-		t.Fatalf("ResolveEnabled(explicit) = %v, want [prometheus thanos]", explicit)
-	}
-	if !plugins.IsEnabled(explicit, "prometheus") || plugins.IsEnabled(explicit, "alertmanager") {
-		t.Fatal("IsEnabled disagrees with the resolved set")
-	}
-	// An explicit EMPTY whitelist disables every plugin: omission and empty
-	// array are different deployment facts and must never be conflated.
-	none, err := registry.ResolveEnabled([]string{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(none) != 0 {
-		t.Fatalf("ResolveEnabled([]) = %v, want no plugins enabled", none)
+	// Unknown fields are rejected (closed schema).
+	if err := entry.Definition.ValidateArguments([]byte(`{"query":"x","rogue":1}`)); err == nil {
+		t.Fatal("unknown argument accepted")
 	}
 }
 
-type fakeProber struct{}
-type fakeDiscoverer struct{}
-type fakeExecutor struct{}
-
-func (fakeProber) Probe(context.Context, *plugins.Call, plugins.ProbeRequest) (*plugins.ProbeResult, error) {
-	return &plugins.ProbeResult{}, nil
+func TestGenericToolStrictRequiredArguments(t *testing.T) {
+	registry := newTestRegistry(t)
+	entry, _, _ := registry.ToolEntryByName("alpha_query")
+	if err := entry.Definition.ValidateArguments([]byte(`{"attempt":1}`)); err == nil {
+		t.Fatal("missing required argument accepted")
+	}
+	if err := entry.Definition.ValidateArguments([]byte(`{"query":"up"}`)); err != nil {
+		t.Fatalf("valid arguments rejected: %v", err)
+	}
 }
 
-func (fakeDiscoverer) Discover(context.Context, *plugins.Call, plugins.DiscoverRequest) (*plugins.DiscoverResult, error) {
-	return &plugins.DiscoverResult{}, nil
+type stubCaller struct{}
+
+func (stubCaller) Call(_ context.Context, _ plugins.PlatformRequest) (*plugins.PlatformResponse, error) {
+	return &plugins.PlatformResponse{StatusCode: 200, Body: []byte(`{"status":"success"}`)}, nil
 }
 
-func (fakeExecutor) ExecuteTool(context.Context, *plugins.Call, plugins.ToolRequest) (*plugins.ToolResult, error) {
-	return &plugins.ToolResult{}, nil
+func TestToolNameVocabulary(t *testing.T) {
+	registry := plugins.NewRegistry()
+	bad := plugins.Tool[echoArgs, echoResult]{
+		Name: "Bad-Name", Version: "1", FailureMode: plugins.FailureReturnToModel, ResultKind: "k", Description: "d",
+		Handler: func(t *plugins.ToolContext, args echoArgs) (echoResult, error) { return echoResult{}, nil },
+	}
+	if err := registry.Register(plugins.Plugin{ID: "p", Version: "1", Tools: stubProvider{[]plugins.ToolEntry{bad.Entry("p")}}}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	caught := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				caught = true
+			}
+		}()
+		registry.ToolEntries()
+	}()
+	if !caught {
+		t.Fatal("invalid tool name accepted at freeze")
+	}
+}
+
+func TestEnabledResolution(t *testing.T) {
+	registry := newTestRegistry(t)
+	enabled, err := registry.ResolveEnabled(nil)
+	if err != nil || len(enabled) != 1 || enabled[0] != "alpha" {
+		t.Fatalf("default enabled: %v err=%v", enabled, err)
+	}
+	if _, err := registry.ResolveEnabled([]string{"ghost"}); err == nil || !strings.Contains(err.Error(), "ghost") {
+		t.Fatalf("unknown plugin whitelist accepted: %v", err)
+	}
 }

@@ -12,17 +12,17 @@ import (
 	"sort"
 
 	"github.com/Suknna/quoin/internal/plugins"
-	"github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/danielgtaylor/huma/v2"
 )
 
-// initPluginRegistry installs the shared builtin plugin registry. The
-// builtin package panics on a rejected built-in descriptor (a compile-time
-// fact), and declaration/implementation agreement for EVERY registered
-// descriptor is verified inside BuildCatalogs before serving.
+// initPluginRegistry installs the process default plugin registry
+// (ADR-0011 blank-import assembly: cmd/quoin blank-imports
+// internal/plugins/builtin, whose init() registrations populate the
+// registry). The registry freezes on first read; a rejected registration
+// panics at init — a compile-time fact, not a runtime condition.
 func (application *apiServer) initPluginRegistry() {
-	application.pluginRegistry = builtin.Registry()
+	application.pluginRegistry = plugins.Default()
 }
 
 // configurePlugins resolves deployment enablement once at boot and projects
@@ -35,7 +35,7 @@ func (application *apiServer) configurePlugins(configured []string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	catalogs, err := attempt.BuildCatalogs(application.pluginRegistry, attempt.Implementations(), enabled)
+	catalogs, err := attempt.BuildCatalogs(application.pluginRegistry, enabled)
 	if err != nil {
 		return nil, err
 	}
@@ -86,18 +86,30 @@ func (application *apiServer) integrationsPlugins(ctx context.Context, input *in
 	}
 	output := &integrationsPluginsOutput{CacheControl: "no-store", Pragma: "no-cache"}
 	output.Body.Items = []pluginCatalogItem{}
-	for _, descriptor := range application.pluginRegistry.Descriptors() {
-		capabilities := make([]string, 0, len(descriptor.Capabilities))
-		for _, capability := range descriptor.Capabilities {
-			capabilities = append(capabilities, string(capability))
+	for _, plugin := range application.pluginRegistry.Plugins() {
+		// ADR-0011 capability vocabulary: event_source (inbound gateway
+		// capability), tools (outbound model tools), discover/inspection_
+		// templates (declarative catalogs the schedulers consume).
+		var capabilities []string
+		if plugin.EventSource != nil {
+			capabilities = append(capabilities, "event_source")
+		}
+		if plugin.Tools != nil {
+			capabilities = append(capabilities, "tools")
+		}
+		if len(plugin.DiscoverObjects) > 0 {
+			capabilities = append(capabilities, "discover")
+		}
+		if len(plugin.InspectionTemplates) > 0 {
+			capabilities = append(capabilities, "inspection_templates")
 		}
 		sort.Strings(capabilities)
 		output.Body.Items = append(output.Body.Items, pluginCatalogItem{
-			ID:           descriptor.ID,
-			DisplayName:  descriptor.DisplayName,
-			Description:  descriptor.Description,
-			Enabled:      plugins.IsEnabled(enabled, descriptor.ID),
-			Version:      descriptor.Version,
+			ID:           plugin.ID,
+			DisplayName:  plugin.DisplayName,
+			Description:  plugin.Description,
+			Enabled:      plugins.IsEnabled(enabled, plugin.ID),
+			Version:      plugin.Version,
 			Capabilities: capabilities,
 		})
 	}

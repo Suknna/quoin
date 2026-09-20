@@ -390,7 +390,8 @@
         "quoinRuntimeEndpoint",
         "quoinRuntimeCaFile",
         "quoinRuntimeClientCertificateFile",
-        "quoinRuntimeClientPrivateKeyFile"
+        "quoinRuntimeClientPrivateKeyFile",
+        "dataDirectory"
       ],
       "properties": {
         "component": {
@@ -398,6 +399,10 @@
         },
         "quoinRuntimeEndpoint": {
           "$ref": "#/$defs/quoinRuntimeEndpoint"
+        },
+        "dataDirectory": {
+          "$ref": "#/$defs/absolutePath",
+          "description": "Stele 本地运行态目录（ADR-0011）：事件队列、去重键、限流计数、token 缓存与死信的 SQLite 状态库；非业务权威数据。"
         },
         "quoinRuntimeCaFile": {
           "$ref": "#/$defs/absolutePath"

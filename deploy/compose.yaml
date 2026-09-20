@@ -229,6 +229,9 @@ services:
     expose: ["8080", "9090"]
     volumes:
       - ./config/stele.yaml:/etc/quoin/component.yaml:ro
+      # ADR-0011: Stele owns local runtime state (event queue, dedup, rate
+      # counters, token cache, dead letters) in its own SQLite.
+      - stele-data:/var/lib/stele
       - ./secrets/quoin/runtime-ca.pem:/run/quoin-secrets/runtime-ca.pem:ro
       - ./secrets/quoin/stele-client.crt:/run/quoin-secrets/stele-client.crt:ro
       - ./secrets/quoin/stele-client.key:/run/quoin-secrets/stele-client.key:ro
@@ -248,3 +251,4 @@ volumes:
   quoin-backups: {}
   plinth-state: {}
   plinth-workspaces: {}
+  stele-data: {}

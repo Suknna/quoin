@@ -19,6 +19,7 @@ import (
 	"time"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	_ "github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	_ "modernc.org/sqlite"

@@ -261,36 +261,33 @@ func (service *Service) descriptorEnabled(id string) bool {
 // bound to one platform connection kind. A missing match is ErrNotObservable;
 // two enabled plugins claiming the same connection kind is an ambiguous
 // deployment that must fail closed instead of picking a winner.
-func (service *Service) discoverableDescriptor(connectionKind string) (plugins.Descriptor, error) {
-	var found []plugins.Descriptor
-	for _, descriptor := range service.registry.Descriptors() {
-		if descriptor.ConnectionKind != connectionKind || !service.descriptorEnabled(descriptor.ID) {
+func (service *Service) discoverableDescriptor(connectionKind string) (plugins.Plugin, error) {
+	var found []plugins.Plugin
+	for _, plugin := range service.registry.Plugins() {
+		if plugin.ConnectionKind != connectionKind || !service.descriptorEnabled(plugin.ID) {
 			continue
 		}
-		for _, capability := range descriptor.Capabilities {
-			if capability == plugins.CapabilityDiscover {
-				found = append(found, descriptor)
-				break
-			}
+		if len(plugin.DiscoverObjects) > 0 {
+			found = append(found, plugin)
 		}
 	}
 	switch len(found) {
 	case 1:
 		return found[0], nil
 	case 0:
-		return plugins.Descriptor{}, fmt.Errorf("%w: no enabled discover-capable plugin for connection kind %q", ErrNotObservable, connectionKind)
+		return plugins.Plugin{}, fmt.Errorf("%w: no enabled discover-capable plugin for connection kind %q", ErrNotObservable, connectionKind)
 	default:
 		ids := make([]string, 0, len(found))
-		for _, descriptor := range found {
-			ids = append(ids, descriptor.ID)
+		for _, plugin := range found {
+			ids = append(ids, plugin.ID)
 		}
 		sort.Strings(ids)
-		return plugins.Descriptor{}, fmt.Errorf("ambiguous deployment: %v all claim connection kind %q", ids, connectionKind)
+		return plugins.Plugin{}, fmt.Errorf("ambiguous deployment: %v all claim connection kind %q", ids, connectionKind)
 	}
 }
 
 // discoverObject returns one declared object type of an enabled descriptor.
-func discoverObject(descriptor plugins.Descriptor, objectType string) (plugins.DiscoverObject, error) {
+func discoverObject(descriptor plugins.Plugin, objectType string) (plugins.DiscoverObject, error) {
 	for _, object := range descriptor.DiscoverObjects {
 		if object.ObjectType == objectType {
 			return object, nil
@@ -305,15 +302,12 @@ func discoverObject(descriptor plugins.Descriptor, objectType string) (plugins.D
 // or deployment changes.
 func (service *Service) enabledDiscoverKinds() []string {
 	kinds := map[string]bool{}
-	for _, descriptor := range service.registry.Descriptors() {
-		if !service.descriptorEnabled(descriptor.ID) || descriptor.ConnectionKind == "" {
+	for _, plugin := range service.registry.Plugins() {
+		if !service.descriptorEnabled(plugin.ID) || plugin.ConnectionKind == "" {
 			continue
 		}
-		for _, capability := range descriptor.Capabilities {
-			if capability == plugins.CapabilityDiscover {
-				kinds[descriptor.ConnectionKind] = true
-				break
-			}
+		if len(plugin.DiscoverObjects) > 0 {
+			kinds[plugin.ConnectionKind] = true
 		}
 	}
 	ordered := make([]string, 0, len(kinds))

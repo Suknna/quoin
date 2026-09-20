@@ -4,7 +4,8 @@ package worker
 // attempt. stdin/stdout carry the framed protobuf protocol; stderr carries
 // bounded non-secret diagnostics. The worker builds Eino message/tool
 // semantics, drives the sequential loop and proposes the final domain
-// output; every model/tool execution happens on the supervisor.
+// output; worker_local 工具在本沙箱执行,quoin_routed 工具只消费
+// supervisor 转发的封存结果(ADR-0011:执行在 Quoin)。
 
 import (
 	"context"
@@ -210,10 +211,6 @@ var legacyInvestigationMode = attemptMode{
 func Run(ctx context.Context, config Config) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	// Boot-fences the typed executor registry (ADR-0004): after this point a
-	// plugin executor registration is a wiring failure, and unknown tools
-	// fail their tool call explicitly.
-	freezeTypedExecutors()
 	if err := os.MkdirAll(config.WorkspaceDir, 0o700); err != nil {
 		return fmt.Errorf("workspace: %w", err)
 	}
@@ -589,8 +586,8 @@ func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *Fr
 					return err
 				}
 			}
-			// Both execution modes converge on ToolResult (supervisor_typed
-			// tools are executed by the supervisor after ToolCallStarted).
+			// 两种执行模式都收敛于 ToolResult(ADR-0011:quoin_routed 工具
+			// 由 Quoin 执行并经 supervisor 转发已封存的结果)。
 			envelope, err = reader.Read()
 			if err != nil {
 				return err

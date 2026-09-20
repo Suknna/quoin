@@ -272,7 +272,7 @@ func TestProbeStartPersistsCorrelationAndInitiator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, created.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestProbeResultCommitSystemAuditPreservesTaskAssociation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, created.Name)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -165,6 +165,11 @@ func inScanScope(relPath string) bool {
 		return false // generated contract projections
 	case strings.HasPrefix(relPath, "internal/quoin/testfixture/"):
 		return false // shared test harness; every entry point requires *testing.T
+	case strings.HasPrefix(relPath, "internal/stele/"), strings.HasPrefix(relPath, "cmd/stele/"):
+		// Stele owns a separate local runtime-state database (ADR-0011: queue,
+		// dedup, rate counters, token cache, dead letters). This gate guards
+		// the Quoin business DB write surface; Stele never touches that DB.
+		return false
 	case strings.HasPrefix(relPath, "internal/"), strings.HasPrefix(relPath, "cmd/"):
 		return true
 	default:
@@ -826,6 +831,7 @@ var executionBaseline = []executionBaselineEntry{
 	{Path: "internal/quoin/upgrade/taskchangelogretire.go", Symbol: "upgrade.migrateTaskChangeLogRetireOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
 	{Path: "internal/quoin/upgrade/declareddiscoveryretire.go", Symbol: "upgrade.migrateDeclaredDiscoveryRetireOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
 	{Path: "internal/quoin/upgrade/oidcauthretire.go", Symbol: "upgrade.migrateOIDCAuthRetireOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
+	{Path: "internal/quoin/upgrade/pluginv2.go", Symbol: "upgrade.migratePluginV2On", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
 	{Path: "internal/quoin/upgrade/unifiedmtls.go", Symbol: "upgrade.migrateUnifiedMTLSOn", Rule: "sql_write_exec", Class: "lowlevel", Planned: "stage1"},
 }
 

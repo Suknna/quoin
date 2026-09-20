@@ -2861,7 +2861,7 @@ paths:
                           uniqueItems: true
                           items:
                             type: string
-                            enum: [probe, discover, tools, execute_tool, inspection_templates, collect]
+                            enum: [event_source, tools, discover, inspection_templates]
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':

@@ -1,9 +1,10 @@
-// Typed tool execution on the supervisor (ARCH-WORKER-003, ARCH-TOOL-002/003):
-// the pending->running begin fence, the fixed supervisor_typed tool
-// dispatch (artifact_read/artifact_grep/thanos_query), the attempt-scoped
-// Artifact upload and the CompleteToolCall sealing with the committed
-// payload, evidence ids and artifact locator. Split out of runner.go by
-// domain responsibility (tool execution vs. attempt lifecycle/model loop).
+// Tool execution on the supervisor (ARCH-WORKER-003, ARCH-TOOL-002/003;
+// ADR-0011): the pending->running begin fence 与授权裁决不变,执行则分成
+// 两条路径——worker_local 工具仍由 worker 沙箱自执行(LocalToolCompleted
+// -> commitLocalTool -> CompleteToolCall),quoin_routed 工具 Plinth 只转发
+// 不执行:BeginToolCallAck accepted 后等待 Quoin 推送的 ExternalToolResult
+// 帧并原样组装 worker 的 ToolResult(Quoin 已自行封存,Plinth 不再发送
+// CompleteToolCall)。
 package worker
 
 import (
@@ -19,9 +20,9 @@ import (
 )
 
 // executeTool persists pending->running and answers ToolCallStarted
-// (ARCH-TOOL-002); supervisor_typed tools (artifact_read/artifact_grep)
-// execute on the supervisor through the Attempt-scoped ArtifactService and
-// converge on ToolResult directly (ARCH-OUTPUT-004).
+// (ARCH-TOOL-002)。worker_local 工具到此返回,由 worker 在沙箱内执行;
+// quoin_routed 工具(artifact_read/artifact_grep/thanos_query 等)在
+// accepted 之后阻塞等待 Quoin 的封存结果(ADR-0011)。
 func (runner *Runner) executeTool(ctx context.Context, writer *FrameWriter, attemptID, toolCallID int64, meta toolMeta) error {
 	reply, err := runner.toolCallChannel().Request(ctx, &runtimev1.ControlEnvelope{
 		CorrelationId: uint64(attemptID),
@@ -36,180 +37,60 @@ func (runner *Runner) executeTool(ctx context.Context, writer *FrameWriter, atte
 	if ack == nil || !ack.GetAccepted() {
 		return fmt.Errorf("begin tool call %d rejected: %s", toolCallID, ack.GetDetail())
 	}
-	mode := runtimev1.ToolExecutionMode(runtimev1.ToolExecutionMode_value[meta.mode])
+	// 词表外的模式在发帧前 fail fast:继续下去 worker 只会等一个永不到来的
+	// ToolResult(ADR-0011 之后合法值只有 worker_local/quoin_routed)。
+	modeValue, known := runtimev1.ToolExecutionMode_value[meta.mode]
+	if !known || modeValue == 0 {
+		return fmt.Errorf("tool call %d carries unsupported execution mode %q", toolCallID, meta.mode)
+	}
+	mode := runtimev1.ToolExecutionMode(modeValue)
 	if err := writer.Send(&workerv1.WorkerEnvelope{AttemptId: attemptID, Msg: &workerv1.WorkerEnvelope_ToolCallStarted{
 		ToolCallStarted: &workerv1.ToolCallStarted{ToolCallId: toolCallID, ExecutionMode: mode},
 	}}); err != nil {
 		return err
 	}
-	if meta.mode != "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED" {
+	switch meta.mode {
+	case "TOOL_EXECUTION_MODE_WORKER_LOCAL":
 		return nil
+	case "TOOL_EXECUTION_MODE_QUOIN_ROUTED":
+		return runner.awaitQuoinRoutedTool(ctx, writer, attemptID, toolCallID)
+	default:
+		return fmt.Errorf("tool call %d carries unsupported execution mode %q", toolCallID, meta.mode)
 	}
-	// A Quoin routing preflight is a normal, model-visible Tool Result. It
-	// runs through the existing completion channel but cannot fetch a grant
-	// or reach a target because it returns before typed dispatch.
-	if meta.preflightCode != "" {
-		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, meta.name, meta.preflightCode, meta.preflightDetail)
-	}
-	return runner.executeTypedTool(ctx, writer, attemptID, toolCallID, meta.name)
 }
 
-// toolArguments rebuilds the persisted canonical arguments of one tool
-// call (the runner never trusts the worker's copy).
-func (runner *Runner) toolArguments(ctx context.Context, attemptID, toolCallID int64) (map[string]any, error) {
-	meta, ok := runner.tools[toolCallID]
-	if !ok {
-		return nil, fmt.Errorf("tool call %d metadata missing", toolCallID)
-	}
-	return meta.arguments, nil
-}
-
-// executeTypedTool runs one supervisor_typed tool (artifact_read,
-// artifact_grep or thanos_query) and seals it through CompleteToolCall;
-// the committed ToolResult returns to the worker immediately
-// (ARCH-TOOL-002/003).
-func (runner *Runner) executeTypedTool(ctx context.Context, writer *FrameWriter, attemptID, toolCallID int64, toolName string) error {
-	args, err := runner.toolArguments(ctx, attemptID, toolCallID)
+// awaitQuoinRoutedTool 等待 Quoin 对一个 QUOIN_ROUTED 工具调用的封存结果
+// (ExternalToolResult,ADR-0011)并组装 worker 的 ToolResult 帧:
+//   - SUCCEEDED:result_json 即 payload.canonical_json(已封存的 committed
+//     payload),携带 artifact 引用与确定性 evidence ids;
+//   - FAILED/CANCELLED:组装失败形态(result_json 优先用 Quoin 的 payload,
+//     缺失时本地合成 return_to_model 失败形状),worker 侧已有处理。
+//
+// CompleteToolCall 不由 Plinth 发送——Quoin 已是这类工具的权威封存方。
+// 等待期间 attempt 取消或 worker 退出时,ctx 结束会清理 waiter 并放弃
+// 结果(Quoin 侧封存事实不受影响)。
+func (runner *Runner) awaitQuoinRoutedTool(ctx context.Context, writer *FrameWriter, attemptID, toolCallID int64) error {
+	result, err := runner.externalResultSource().AwaitExternalToolResult(ctx, toolCallID)
 	if err != nil {
 		return err
-	}
-	executor, known := lookupTypedExecutor(toolName)
-	if !known {
-		return runner.failTypedTool(ctx, writer, attemptID, toolCallID, toolName, "unknown_tool", "supervisor tool "+toolName+" is not in the fixed catalog")
-	}
-	return executor(&TypedToolContext{
-		BaseCtx: ctx, Runner: runner, Writer: writer,
-		AttemptID: attemptID, ToolCallID: toolCallID, ToolName: toolName, Args: args,
-	})
-}
-
-// executeArtifactRead executes the artifact_read typed tool (registered in
-// typedexecutors.go like every plugin-owned executor).
-func executeArtifactRead(execution *TypedToolContext) error {
-	ctx, runner := execution.BaseCtx, execution.Runner
-	attemptID, args := execution.AttemptID, execution.Args
-	artifactIDText, _ := args["artifactId"].(string)
-	artifactID, err := parseLocator(artifactIDText)
-	if err != nil {
-		return execution.Fail("invalid_arguments", err.Error())
-	}
-	startLine := int64(1)
-	maxLines := int64(2000)
-	if offset, ok := args["offset"].(float64); ok && offset >= 1 {
-		startLine = int64(offset)
-	}
-	if limit, ok := args["limit"].(float64); ok && limit >= 1 && limit <= 2000 {
-		maxLines = int64(limit)
-	}
-	rpcCtx := runner.artifactContext(ctx)
-	response, rpcErr := runner.Artifacts.ReadText(rpcCtx, &runtimev1.ArtifactReadTextRequest{
-		AttemptId: attemptID, ArtifactId: artifactID, BootId: runner.Sink.BootID(),
-		ConnectionEpoch: runner.Sink.Epoch(), StartLine: uint64(startLine), MaxLines: uint32(maxLines),
-	})
-	if rpcErr != nil {
-		return execution.Fail("artifact_read_failed", rpcErr.Error())
-	}
-	payload := map[string]any{
-		"success": true, "output": string(response.GetContent()),
-		"startLine": response.GetStartLine(), "nextLine": response.GetNextLine(), "eof": response.GetEof(),
-		"totalBytes": response.GetTotalSizeBytes(), "totalLines": response.GetTotalLines(),
-		"artifact": map[string]any{"id": fmt.Sprint(response.GetArtifactId()), "mediaType": response.GetMediaType()},
-	}
-	return execution.Succeed(execution.DefaultResultSchemaKind(), payload, 0)
-}
-
-// executeArtifactGrep executes the artifact_grep typed tool.
-func executeArtifactGrep(execution *TypedToolContext) error {
-	ctx, runner := execution.BaseCtx, execution.Runner
-	attemptID, args := execution.AttemptID, execution.Args
-	artifactIDText, _ := args["artifactId"].(string)
-	artifactID, err := parseLocator(artifactIDText)
-	if err != nil {
-		return execution.Fail("invalid_arguments", err.Error())
-	}
-	pattern, _ := args["pattern"].(string)
-	if pattern == "" {
-		return execution.Fail("invalid_arguments", "pattern 必须是非空字符串")
-	}
-	rpcCtx := runner.artifactContext(ctx)
-	response, rpcErr := runner.Artifacts.GrepText(rpcCtx, &runtimev1.ArtifactGrepTextRequest{
-		AttemptId: attemptID, ArtifactId: artifactID, BootId: runner.Sink.BootID(),
-		ConnectionEpoch: runner.Sink.Epoch(), Re2Pattern: pattern,
-		MaxMatches: 200, ContextLines: 5,
-	})
-	if rpcErr != nil {
-		return execution.Fail("artifact_grep_failed", rpcErr.Error())
-	}
-	var lines []string
-	for _, match := range response.GetMatches() {
-		lines = append(lines, fmt.Sprintf("%d:%s", match.GetLine(), string(match.GetContent())))
-	}
-	payload := map[string]any{
-		"success": true, "output": joinLines(lines),
-		"matchCount": len(lines), "truncated": response.GetTruncated(),
-		"totalBytes": response.GetTotalSizeBytes(), "totalLines": response.GetTotalLines(),
-		"artifact": map[string]any{"id": fmt.Sprint(response.GetArtifactId()), "mediaType": response.GetMediaType()},
-	}
-	return execution.Succeed(execution.DefaultResultSchemaKind(), payload, 0)
-}
-
-// failTypedTool seals a failed supervisor_typed tool with the
-// return_to_model failure shape and relays the committed result.
-func (runner *Runner) failTypedTool(ctx context.Context, writer *FrameWriter, attemptID, toolCallID int64, toolName, errorCode, errorDetail string) error {
-	payload := map[string]any{"success": false, "errorCode": errorCode, "errorDetail": errorDetail}
-	// The frozen wire contract binds payload.schema_kind to the tool
-	// definition (runtime.proto ResultPayload): a structured failure of a
-	// tool carries that tool's own result schema kind, never a generic one.
-	return runner.commitTypedTool(ctx, writer, attemptID, toolCallID, typedResultSchemaKind(toolName), payload, 0)
-}
-
-// typedResultSchemaKind maps one supervisor_typed tool to its frozen
-// result schema kind (success and failure payloads share the kind).
-func typedResultSchemaKind(toolName string) string {
-	return toolName + "_result_v1"
-}
-
-// commitTypedTool seals the typed result through CompleteToolCall and
-// sends the committed ToolResult (evidence ids and artifact ref included)
-// to the worker (ARCH-TOOL-003, RUNTIME-AGENT-008: the worker only ever
-// consumes the committed payload).
-func (runner *Runner) commitTypedTool(ctx context.Context, writer *FrameWriter, attemptID, toolCallID int64, schemaKind string, payload map[string]any, artifactID int64) error {
-	canonical, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	digest := sha256.Sum256(canonical)
-	outcome := runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_SUCCEEDED
-	if success, _ := payload["success"].(bool); !success && artifactID == 0 {
-		outcome = runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_FAILED
-	}
-	reply, err := runner.toolCallChannel().Request(ctx, &runtimev1.ControlEnvelope{
-		CorrelationId: uint64(attemptID),
-		Msg: &runtimev1.ControlEnvelope_CompleteToolCall{CompleteToolCall: &runtimev1.CompleteToolCall{
-			AttemptId: attemptID, ToolCallId: toolCallID, Outcome: outcome,
-			Payload: &runtimev1.ResultPayload{
-				SchemaKind: schemaKind, CanonicalJson: canonical, ContentDigest: digest[:],
-			},
-			ArtifactId: artifactID, ErrorCode: payloadText(payload, "errorCode"), ErrorDetail: payloadText(payload, "errorDetail"),
-		}},
-	})
-	if err != nil {
-		return err
-	}
-	ack := reply.GetCompleteToolCallAck()
-	if ack == nil || !ack.GetAccepted() {
-		return fmt.Errorf("complete typed tool %d rejected: %s", toolCallID, ack.GetDetail())
-	}
-	committed := canonical
-	if committedPayload := ack.GetCommittedPayload(); committedPayload != nil && len(committedPayload.GetCanonicalJson()) > 0 {
-		committed = committedPayload.GetCanonicalJson()
 	}
 	toolResult := &workerv1.ToolResult{
-		ToolCallId: toolCallID, Success: outcome == runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_SUCCEEDED,
-		ResultJson: committed, ErrorCode: payloadText(payload, "errorCode"), ErrorDetail: payloadText(payload, "errorDetail"),
-		EvidenceIds: ack.GetEvidenceIds(),
+		ToolCallId: toolCallID,
+		Success:    result.GetOutcome() == runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_SUCCEEDED,
+		ErrorCode:  result.GetErrorCode(), ErrorDetail: result.GetErrorDetail(),
+		EvidenceIds: result.GetEvidenceIds(),
 	}
-	if ref := ack.GetArtifactRef(); ref != nil && ref.GetArtifactId() != 0 {
+	if payload := result.GetPayload(); payload != nil && len(payload.GetCanonicalJson()) > 0 {
+		toolResult.ResultJson = payload.GetCanonicalJson()
+	} else if !toolResult.Success {
+		// 失败帧可能不带 payload:合成模型可见的失败形状,保证 tool 消息
+		// 恒为合法 JSON 对象(与冻结的 return_to_model 契约一致)。
+		toolResult.ResultJson, _ = json.Marshal(map[string]any{
+			"success": false, "errorCode": result.GetErrorCode(), "errorDetail": result.GetErrorDetail(),
+		})
+	}
+	if ref := result.GetArtifactRef(); ref != nil && ref.GetArtifactId() != 0 {
+		// artifact 引用按现有 ToolResult 帧的 artifact 字段语义映射。
 		toolResult.ArtifactRef = &workerv1.WorkerArtifactRef{
 			ArtifactId: ref.GetArtifactId(), Role: ref.GetRole(), MediaType: ref.GetMediaType(),
 			SizeBytes: ref.GetSizeBytes(), Sha256: ref.GetSha256(), BodyExpired: ref.GetBodyExpired(),
@@ -308,7 +189,7 @@ func (runner *Runner) artifactContext(ctx context.Context) context.Context {
 }
 
 // uploadWorkspaceFileAs streams one spilled workspace output with the
-// caller's media type (the thanos spill is application/json).
+// caller's media type.
 func (runner *Runner) uploadWorkspaceFileAs(ctx context.Context, attemptID, toolCallID int64, path, mediaType string) (int64, error) {
 	if runner.uploadWorkspaceFileForTest != nil {
 		return runner.uploadWorkspaceFileForTest(ctx, attemptID, toolCallID, path, mediaType)
@@ -417,29 +298,4 @@ func fileTail(path string, limit int64) (string, error) {
 		return "", err
 	}
 	return string(body), nil
-}
-
-func parseLocator(value string) (int64, error) {
-	var id int64
-	_, err := fmt.Sscanf(value, "%d", &id)
-	if err != nil || id <= 0 {
-		return 0, fmt.Errorf("artifactId 必须是十进制 locator")
-	}
-	return id, nil
-}
-
-func joinLines(lines []string) string {
-	if len(lines) == 0 {
-		return "(无匹配)"
-	}
-	body := ""
-	for _, line := range lines {
-		body += line + "\n"
-	}
-	return body
-}
-
-func payloadText(payload map[string]any, key string) string {
-	value, _ := payload[key].(string)
-	return value
 }

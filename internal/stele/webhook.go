@@ -1,138 +1,154 @@
 package stele
 
+// 入向 webhook（ADR-0011）：POST /webhook/{source} → 按 source 解析
+// EventSource 插件 → 网关侧 Bearer 认证（快照 digest 常量时间比对）→
+// VerifyAndParse 归一化 → 单事务写入本地 outbox → 202。解析失败在入队前
+// 拒绝（400）。可靠性由队列重试+死信承担，这里不再同步等 Quoin 落库。
+
 import (
-	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
-	"google.golang.org/grpc/status"
-
-	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/Suknna/quoin/internal/plugins"
 )
 
-// Webhook is the Alertmanager HTTP intake handler.
+// CredentialLookup 是 webhook 依赖的快照认证面（Relay 实现；测试注入 stub）。
+type CredentialLookup interface {
+	Ready() bool
+	Credential(bearer, sourceKind string) (sourceID, credentialID int64, snapshotVersion uint64, ok bool)
+}
+
+// SourceRegistry 是 webhook 依赖的插件解析面（*plugins.Registry 实现）。
+type SourceRegistry interface {
+	EventSource(kind string) (plugins.EventSource, string, bool)
+}
+
+// Webhook is the inbound HTTP surface: one handler per source kind under
+// /webhook/, wired with the local queue, the snapshot lookup, the plugin
+// registry, and the process metrics.
 type Webhook struct {
-	relay      *Relay
-	deliveries *prometheus.CounterVec
-	ready      prometheus.Gauge
-	available  prometheus.Gauge
-	requests   *prometheus.CounterVec
+	queue   *Queue
+	lookup  CredentialLookup
+	sources SourceRegistry
+	metrics *Metrics
 }
 
-// NewWebhook wires the handler with the frozen metrics families
-// (metrics.yaml: stele_ready, stele_quoin_available, stele_deliveries_total,
-// stele_grpc_client_requests_total).
-func NewWebhook(relay *Relay, registry *prometheus.Registry) *Webhook {
-	deliveries := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "stele_deliveries_total",
-		Help: "Stele delivery attempts grouped by the authoritative relay DeliveryStatus.",
-	}, []string{"delivery_status"})
-	for _, status := range []string{"accepted", "rejected", "unavailable"} {
-		deliveries.WithLabelValues(status).Add(0)
-	}
-	requests := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "stele_grpc_client_requests_total",
-		Help: "Stele gRPC client requests grouped by service and canonical status.",
-	}, []string{"rpc_group", "grpc_status"})
-	for _, status := range []string{"OK", "Unavailable", "DeadlineExceeded", "ResourceExhausted", "Unauthenticated", "Unknown"} {
-		requests.WithLabelValues("runtime.v1.SteleRelay", status).Add(0)
-	}
-	ready := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "stele_ready",
-		Help: "Whether Stele can authenticate and relay Alertmanager deliveries.",
-	})
-	available := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "stele_quoin_available",
-		Help: "Whether Stele can currently reach an accepted same-version Quoin relay service.",
-	})
-	registry.MustRegister(deliveries, requests, ready, available)
-	webhook := &Webhook{relay: relay, deliveries: deliveries, ready: ready, available: available, requests: requests}
-	if relay.Ready() {
-		ready.Set(1)
-	}
-	return webhook
+// NewWebhook builds the handler. It never blocks on Quoin: enqueue is the
+// acknowledgement point.
+func NewWebhook(queue *Queue, lookup CredentialLookup, sources SourceRegistry, metrics *Metrics) *Webhook {
+	return &Webhook{queue: queue, lookup: lookup, sources: sources, metrics: metrics}
 }
 
-// ServeHTTP authenticates the bearer against the cached snapshot and relays
-// the exact body (CONTEXT「Stele」): 204 only after Quoin commits; 4xx for
-// permanent rejection; 5xx for retryable failures; 503 before the snapshot
-// loads.
-func (webhook *Webhook) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+// Handler returns the routed HTTP handler: POST /webhook/{source} plus a 404
+// fallback. The deployment gateway strips the /stele prefix before dialing.
+func (webhook *Webhook) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/webhook/", webhook.serveSource)
+	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "not found", http.StatusNotFound)
+	})
+	return mux
+}
+
+// serveSource dispatches one /webhook/{source} request.
+func (webhook *Webhook) serveSource(writer http.ResponseWriter, request *http.Request) {
+	source := strings.TrimPrefix(request.URL.Path, "/webhook/")
+	if source == "" || strings.Contains(source, "/") {
+		http.Error(writer, "not found", http.StatusNotFound)
+		return
+	}
 	if request.Method != http.MethodPost {
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !webhook.relay.Ready() {
-		http.Error(writer, "credential snapshot not loaded", http.StatusServiceUnavailable)
-		webhook.deliveries.WithLabelValues("unavailable").Inc()
-		return
-	}
-	webhook.ready.Set(1)
-	webhook.available.Set(1)
-	authHeader := request.Header.Get("Authorization")
-	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
-		http.Error(writer, "missing bearer", http.StatusUnauthorized)
-		webhook.deliveries.WithLabelValues("rejected").Inc()
-		return
-	}
-	bearer := authHeader[7:]
-	sourceID, credentialID, snapshotVersion, ok := webhook.relay.Credential(bearer)
+	eventSource, _, ok := webhook.sources.EventSource(source)
 	if !ok {
-		http.Error(writer, "unknown credential", http.StatusUnauthorized)
-		webhook.deliveries.WithLabelValues("rejected").Inc()
+		// 未知 source 在认证前就 404：不向探测者泄露已装配的协议面。
+		http.Error(writer, "unknown source", http.StatusNotFound)
+		return
+	}
+	if !webhook.lookup.Ready() {
+		http.Error(writer, "credential snapshot not loaded", http.StatusServiceUnavailable)
+		webhook.metrics.RecordIntake("unavailable")
+		return
+	}
+	sourceID, credentialID, snapshotVersion, authorized := webhook.authenticate(request, source)
+	if !authorized {
+		http.Error(writer, "invalid bearer credential", http.StatusUnauthorized)
+		webhook.metrics.RecordIntake("rejected")
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, maxWebhookBody+1))
 	if err != nil {
 		http.Error(writer, "read body failed", http.StatusBadRequest)
-		webhook.deliveries.WithLabelValues("rejected").Inc()
+		webhook.metrics.RecordIntake("rejected")
 		return
 	}
 	if len(body) > maxWebhookBody {
 		http.Error(writer, "body too large", http.StatusRequestEntityTooLarge)
-		webhook.deliveries.WithLabelValues("rejected").Inc()
+		webhook.metrics.RecordIntake("rejected")
 		return
 	}
-	relayID, err := randomRelayID()
+	receivedAt := time.Now().UTC()
+	events, err := eventSource.VerifyAndParse(request.Context(), plugins.InboundRequest{
+		Header: request.Header, Body: body, ReceivedAt: receivedAt,
+	})
 	if err != nil {
-		http.Error(writer, "relay id unavailable", http.StatusServiceUnavailable)
-		webhook.deliveries.WithLabelValues("unavailable").Inc()
+		// 入队前拒绝：坏负载不进入可靠性管道。
+		http.Error(writer, "payload rejected: "+err.Error(), http.StatusBadRequest)
+		webhook.metrics.RecordIntake("rejected")
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), 40*time.Second)
-	defer cancel()
-	status, relayErr := webhook.relay.Deliver(ctx, relayID, sourceID, credentialID, snapshotVersion, body, time.Now().UTC())
-	if relayErr != nil {
-		http.Error(writer, "relay failed", http.StatusServiceUnavailable)
-		webhook.deliveries.WithLabelValues("unavailable").Inc()
-		webhook.requests.WithLabelValues("runtime.v1.SteleRelay", statusName(relayErr)).Inc()
+	queued := make([]QueuedEvent, 0, len(events))
+	for _, event := range events {
+		eventID, err := randomEventID()
+		if err != nil {
+			http.Error(writer, "event id unavailable", http.StatusServiceUnavailable)
+			webhook.metrics.RecordIntake("unavailable")
+			return
+		}
+		queued = append(queued, QueuedEvent{
+			ID:                        eventID,
+			SourceKind:                source,
+			SourceID:                  sourceID,
+			CredentialID:              credentialID,
+			CredentialSnapshotVersion: snapshotVersion,
+			EventType:                 event.Type,
+			ReceivedAt:                receivedAt,
+			Payload:                   event.Payload,
+		})
+	}
+	if err := webhook.queue.EnqueueEvents(request.Context(), queued); err != nil {
+		http.Error(writer, "enqueue failed", http.StatusInternalServerError)
+		webhook.metrics.RecordIntake("unavailable")
 		return
 	}
-	switch status {
-	case runtimev1.DeliveryStatus_DELIVERY_STATUS_ACCEPTED:
-		writer.WriteHeader(http.StatusNoContent)
-		webhook.deliveries.WithLabelValues("accepted").Inc()
-		webhook.requests.WithLabelValues("runtime.v1.SteleRelay", "OK").Inc()
-	case runtimev1.DeliveryStatus_DELIVERY_STATUS_REJECTED:
-		http.Error(writer, "delivery rejected", http.StatusBadRequest)
-		webhook.deliveries.WithLabelValues("rejected").Inc()
-		webhook.requests.WithLabelValues("runtime.v1.SteleRelay", "Unknown").Inc()
-	default:
-		http.Error(writer, "relay unavailable", http.StatusServiceUnavailable)
-		webhook.deliveries.WithLabelValues("unavailable").Inc()
-		webhook.requests.WithLabelValues("runtime.v1.SteleRelay", "Unavailable").Inc()
+	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	writer.WriteHeader(http.StatusAccepted)
+	_, _ = writer.Write([]byte("queued\n"))
+}
+
+// authenticate parses the bearer and resolves it on this source's protocol;
+// both failure modes (missing header, no digest hit) answer 401 without
+// distinguishing them.
+func (webhook *Webhook) authenticate(request *http.Request, source string) (int64, int64, uint64, bool) {
+	authHeader := request.Header.Get("Authorization")
+	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+		return 0, 0, 0, false
 	}
+	sourceID, credentialID, snapshotVersion, ok := webhook.lookup.Credential(authHeader[7:], source)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return sourceID, credentialID, snapshotVersion, true
 }
 
-func statusName(err error) string {
-	return status.Code(err).String()
-}
-
-func randomRelayID() (string, error) {
+// randomEventID 生成 16 字节随机数的 base64url：DeliverEvents 的幂等键。
+func randomEventID() (string, error) {
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err

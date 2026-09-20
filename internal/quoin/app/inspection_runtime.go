@@ -1,9 +1,12 @@
 package app
 
-// Manual Inspection runtime slice (T24, CFG-INSPECTRUN-001/002): dispatch of
-// run_check PromQL children and inspection_analysis attempts to the live
-// Plinth stream, plus the ResultProposal adjudication boundary for
-// inspection_promql_result_v1 and inspection_report_result_v1.
+// Manual Inspection runtime slice (T24, CFG-INSPECTRUN-001/002, ADR-0011):
+// run_check collection children execute locally (local_execution.go) through
+// the metrics_collect internal tool; only inspection_analysis report attempts
+// still dispatch to the live Plinth stream. This file carries that dispatch,
+// the local cancellation convergence of collection children, and the
+// ResultProposal adjudication boundary for inspection_promql_result_v1 /
+// inspection_plugin_result_v1 / inspection_report_result_v1.
 
 import (
 	"context"
@@ -20,64 +23,6 @@ import (
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
-
-// dispatchInspectionAttempt binds one pre-frozen run_check PromQL child to the
-// live Plinth stream and sends the DispatchAttempt frame.
-func (service *RuntimeService) dispatchInspectionAttempt(ctx context.Context, attemptID int64) error {
-	if service.Inspections == nil {
-		return fmt.Errorf("inspections are not wired")
-	}
-	view, err := service.Slots.View(ctx, qruntime.SlotPlinth)
-	if err != nil {
-		return err
-	}
-	if !view.Connected || view.ConnectionEpoch == nil {
-		return fmt.Errorf("plinth is not connected")
-	}
-	attempts := service.Inspections.Attempts()
-	if err := attempts.BindToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease, view.ReleaseVersion); err != nil {
-		return err
-	}
-	input, err := attempts.DispatchInputFor(ctx, attemptID)
-	if err != nil {
-		return err
-	}
-	var scopeID int64
-	if err := service.Inspections.Reader().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
-		return err
-	}
-	operationCorrelationID, err := dispatchOperationCorrelation(ctx, service.Inspections.Reader(), attemptID)
-	if err != nil {
-		return err
-	}
-	rows, err := service.Inspections.Reader().QueryContext(ctx, `SELECT id,connection_revision_id,credential_generation_id,purpose FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id`, attemptID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	var grants []*runtimev1.ConnectionGrant
-	for rows.Next() {
-		grant := &runtimev1.ConnectionGrant{}
-		if err := rows.Scan(&grant.GrantId, &grant.ConnectionRevisionId, &grant.CredentialGenerationId, &grant.Purpose); err != nil {
-			return err
-		}
-		grants = append(grants, grant)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	return service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
-		ConnectionEpoch: *view.ConnectionEpoch,
-		CorrelationId:   uint64(attemptID),
-		BootId:          view.BootID,
-		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
-			AttemptId: attemptID, AttemptType: runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION,
-			ScopeType: runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK, ScopeId: scopeID, OperationCorrelationId: operationCorrelationID,
-			LeaseDeadline: timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
-			Input:         &runtimev1.AttemptInputSnapshot{SchemaKind: input.SchemaKind, CanonicalJson: input.CanonicalJSON, ContentDigest: input.ContentDigest, ConnectionGrants: grants},
-		}},
-	})
-}
 
 // dispatchInspectionAnalysis binds one Queued inspection_analysis attempt to
 // the live Plinth stream as an agent attempt.
@@ -129,24 +74,23 @@ func (service *RuntimeService) dispatchInspectionAnalysis(ctx context.Context, a
 	})
 }
 
-// dispatchInspectionCancellation routes an already-committed inspection fence.
-// PromQL collection and report analysis both run on Plinth.
+// dispatchInspectionCancellation routes an already-committed inspection fence
+// (ADR-0011): report analysis runs on Plinth and keeps the CancelAttempt
+// frame; collection children execute locally, so their fence converges to
+// Cancelled in-process without a runtime round trip.
 func (service *RuntimeService) dispatchInspectionCancellation(ctx context.Context, attemptID int64) error {
 	if service.Inspections == nil {
 		return fmt.Errorf("inspections are not wired")
 	}
-	var attemptType, scopeType string
-	if err := service.Inspections.Reader().QueryRowContext(ctx, `SELECT attempt_type,scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&attemptType, &scopeType); err != nil {
+	var attemptType string
+	if err := service.Inspections.Reader().QueryRowContext(ctx, `SELECT attempt_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&attemptType); err != nil {
 		return err
 	}
-	if attemptType == "inspection_collection" && scopeType == "resource_refresh_run" {
-		// Resource refresh is retired, but a legacy in-flight attempt still has
-		// the same Plinth process boundary. Keep this narrow cancellation route
-		// after its producer/scheduler are removed so migration fences reach the
-		// physical worker instead of becoming stranded database state.
-		scopeType = "legacy_resource_refresh_run"
+	if attemptType == "inspection_collection" {
+		service.finalizeCancellation(ctx, attemptID, attemptType)
+		return nil
 	}
-	if attemptType != "inspection_collection" && attemptType != "inspection_analysis" {
+	if attemptType != "inspection_analysis" {
 		return fmt.Errorf("attempt %d is not an inspection cancellation target", attemptID)
 	}
 	view, err := service.Slots.View(ctx, qruntime.SlotPlinth)
@@ -166,48 +110,43 @@ func (service *RuntimeService) dispatchInspectionCancellation(ctx context.Contex
 	})
 }
 
-// dispatchQueuedInspections sweeps the queued Plinth paths.
+// dispatchQueuedInspections sweeps the queued report analyses (collection
+// children are consumed by the local execution loop).
 func (service *RuntimeService) dispatchQueuedInspections(ctx context.Context) {
 	if service.Inspections == nil {
 		return
 	}
 	view, err := service.Slots.View(ctx, qruntime.SlotPlinth)
-	if err == nil && view.Connected && view.ConnectionEpoch != nil {
-		promqlIDs, scanErr := service.Inspections.QueuedPromQLAttempts(ctx)
-		if scanErr != nil {
-			sharedops.LogEvent("quoin", "error", "inspection.queue_scan", scanErr.Error())
-		} else {
-			for _, id := range promqlIDs {
-				if dispatchErr := service.dispatchInspectionAttempt(ctx, id); dispatchErr != nil {
-					sharedops.LogEvent("quoin", "error", "inspection.queue_dispatch", dispatchErr.Error())
-				}
-			}
-		}
-		analysisIDs, scanErr := service.Inspections.QueuedAnalysisAttempts(ctx)
-		if scanErr != nil {
-			sharedops.LogEvent("quoin", "error", "inspection.analysis_queue_scan", scanErr.Error())
-		} else {
-			for _, id := range analysisIDs {
-				if dispatchErr := service.dispatchInspectionAnalysis(ctx, id); dispatchErr != nil {
-					sharedops.LogEvent("quoin", "error", "inspection.analysis_queue_dispatch", dispatchErr.Error())
-				}
-			}
+	if err != nil || !view.Connected || view.ConnectionEpoch == nil {
+		return
+	}
+	analysisIDs, scanErr := service.Inspections.QueuedAnalysisAttempts(ctx)
+	if scanErr != nil {
+		sharedops.LogEvent("quoin", "error", "inspection.analysis_queue_scan", scanErr.Error())
+		return
+	}
+	for _, id := range analysisIDs {
+		if dispatchErr := service.dispatchInspectionAnalysis(ctx, id); dispatchErr != nil {
+			sharedops.LogEvent("quoin", "error", "inspection.analysis_queue_dispatch", dispatchErr.Error())
 		}
 	}
 }
 
 // RunInspectionScheduler starts the durable minute scheduler after every
 // Quoin boot. SQLite keys, rather than process memory, make repeated startup
-// ticks safe.
+// ticks safe. Collection availability now tracks the Stele gateway (the
+// collector's platform transport, ADR-0011); a boundary observed with the
+// gateway down records its durable runtime_unavailable gap.
 func (service *RuntimeService) RunInspectionScheduler(ctx context.Context) {
 	if service.Inspections == nil {
 		return
 	}
 	availability := func(ctx context.Context) inspection.RuntimeAvailability {
-		plinth, plinthErr := service.Slots.View(ctx, qruntime.SlotPlinth)
-		return inspection.RuntimeAvailability{
-			Plinth: plinthErr == nil && plinth.Connected && plinth.ConnectionEpoch != nil,
+		if service.SteleGateway == nil {
+			return inspection.RuntimeAvailability{}
 		}
+		connected, _ := service.SteleGateway.Connected()
+		return inspection.RuntimeAvailability{Collection: connected}
 	}
 	if blocking := service.MaintenanceBlocking; blocking != nil {
 		inner := availability
@@ -218,7 +157,7 @@ func (service *RuntimeService) RunInspectionScheduler(ctx context.Context) {
 			return inner(ctx)
 		}
 	}
-	scheduler.New(service.Inspections, availability).AfterTick(service.dispatchQueuedInspections).Run(ctx, func(err error) {
+	scheduler.New(service.Inspections, availability).AfterTick(service.kickLocalExecution).Run(ctx, func(err error) {
 		sharedops.LogEvent("quoin", "error", "inspection.schedule", err.Error())
 	})
 }

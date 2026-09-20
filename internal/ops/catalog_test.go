@@ -45,7 +45,7 @@ func TestMetricsLabelProjection(t *testing.T) {
 	assertEqualSet(t, "runtime_slot", proto.enums["RuntimeSlot"], ops.ProjectedLabelValues(t, "runtime_slot"))
 	assertEqualSet(t, "attempt_type", proto.enums["AttemptType"], ops.ProjectedLabelValues(t, "attempt_type"))
 	assertEqualSet(t, "attempt_termination_reason", proto.enums["TerminationReason"], ops.ProjectedLabelValues(t, "attempt_termination_reason"))
-	assertEqualSet(t, "delivery_status", proto.enums["DeliveryStatus"], ops.ProjectedLabelValues(t, "delivery_status"))
+	assertEqualSet(t, "delivery_status", proto.enums["EventDeliveryStatus"], ops.ProjectedLabelValues(t, "delivery_status"))
 	assertEqualSet(t, "rpc_group", proto.services, ops.ProjectedLabelValues(t, "rpc_group"))
 
 	schema, err := os.ReadFile(filepath.Join(root, "sql", "schema.sql"))

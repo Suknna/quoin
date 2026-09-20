@@ -13,18 +13,18 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/Suknna/quoin/internal/plugins/builtin"
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/observation"
 )
 
 // newSourceObservationService builds the observation authority for one
 // deployment. A nil enabledPlugins means the deployment YAML is silent and
 // the registry's DefaultEnabled plugins are observed; an explicit list is a
-// whitelist and unknown or retired ids fail closed. The shared builtin
-// source panics on a rejected built-in descriptor (a compile-time fact),
-// so a violation aborts the process instead of serving with a lying catalog.
+// whitelist and unknown or retired ids fail closed. The process default
+// registry (ADR-0011 blank-import assembly) panics on a rejected
+// registration at init — a compile-time fact, not a runtime condition.
 func newSourceObservationService(db *sql.DB, enabledPlugins []string) (*observation.Service, error) {
-	registry := builtin.Registry()
+	registry := plugins.Default()
 	enabled, err := registry.ResolveEnabled(enabledPlugins)
 	if err != nil {
 		return nil, err
@@ -92,9 +92,9 @@ func (scheduler *SourceObservationScheduler) Run(ctx context.Context, onError fu
 		if err := scheduler.poll(ctx, scheduler.clock.Now()); err != nil && onError != nil {
 			onError(err)
 		}
-		// Newly admitted children use the normal production Plinth dispatch
-		// path. A disconnected runtime leaves them Queued for this pass or
-		// the reconnect kick.
+		// Newly admitted children are consumed by the local execution loop
+		// (ADR-0011); the kick only lowers latency. A disconnected gateway
+		// leaves them Queued for this pass or the periodic scan.
 		if scheduler.dispatch != nil {
 			scheduler.dispatch(ctx)
 		}

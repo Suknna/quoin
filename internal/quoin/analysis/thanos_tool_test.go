@@ -94,7 +94,7 @@ func createQualifiedThanos(t *testing.T, db *sql.DB, name string, epoch uint64) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := service.StartProbe(analysisAdminContext(t), summary.Name, nil, nil)
+	attemptID, err := service.StartProbe(analysisAdminContext(t), summary.Name)
 	if err != nil {
 		t.Fatal(err)
 	}

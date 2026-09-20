@@ -131,10 +131,9 @@ func newTestService(t *testing.T, db *sql.DB, dbPath string, registry *plugins.R
 func observationTestRegistry(t *testing.T) (*plugins.Registry, []string) {
 	t.Helper()
 	registry := plugins.NewRegistry()
-	descriptors := []plugins.Descriptor{
+	descriptors := []plugins.Plugin{
 		{
 			ID: "prometheus", Version: "1", DisplayName: "Prometheus", Description: "metrics source",
-			Capabilities:   []plugins.Capability{plugins.CapabilityDiscover},
 			ConnectionKind: "prometheus",
 			DiscoverObjects: []plugins.DiscoverObject{
 				{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
@@ -142,7 +141,6 @@ func observationTestRegistry(t *testing.T) (*plugins.Registry, []string) {
 		},
 		{
 			ID: "thanos", Version: "1", DisplayName: "Thanos", Description: "global metrics source",
-			Capabilities:   []plugins.Capability{plugins.CapabilityDiscover},
 			ConnectionKind: "thanos",
 			DiscoverObjects: []plugins.DiscoverObject{
 				{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
@@ -150,7 +148,7 @@ func observationTestRegistry(t *testing.T) (*plugins.Registry, []string) {
 		},
 	}
 	for _, descriptor := range descriptors {
-		if err := registry.RegisterDescriptor(descriptor); err != nil {
+		if err := registry.Register(descriptor); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -171,7 +169,7 @@ func seedEnabledMetricsConnection(t *testing.T, ctx context.Context, h *harness,
 	if err != nil {
 		t.Fatalf("SEED create: %v", err)
 	}
-	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, summary.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -838,7 +836,7 @@ func reEnableConnection(t *testing.T, h *harness, name string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := h.conns.StartProbe(admin, name, nil, nil)
+	attemptID, err := h.conns.StartProbe(admin, name)
 	if err != nil {
 		t.Fatal(err)
 	}

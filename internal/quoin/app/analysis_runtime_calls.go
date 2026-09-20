@@ -228,7 +228,10 @@ func (service *RuntimeService) rejectComplete(ctx context.Context, envelope *run
 }
 
 // handleBeginToolCallRouted moves one pending tool call to running behind
-// the attempt fence (ARCH-TOOL-002).
+// the attempt fence (ARCH-TOOL-002). ADR-0011 分流：worker_local 工具保持
+// 现状（Plinth 执行后回 CompleteToolCall）；quoin_routed 工具在回
+// BeginToolCallAck accepted 后由 Quoin 异步编排执行（executeRoutedToolCall），
+// 不再期待 Plinth 的 CompleteToolCall。
 func (service *RuntimeService) handleBeginToolCallRouted(ctx context.Context, envelope *runtimev1.ControlEnvelope, begin *runtimev1.BeginToolCall) {
 	ack := &runtimev1.ControlEnvelope{
 		ConnectionEpoch: envelope.GetConnectionEpoch(),
@@ -256,14 +259,27 @@ func (service *RuntimeService) handleBeginToolCallRouted(ctx context.Context, en
 		ack.GetBeginToolCallAck().Accepted = false
 		ack.GetBeginToolCallAck().Detail = err.Error()
 		sharedops.LogEvent("quoin", "error", "toolcall.begin_rejected", err.Error())
-	} else {
-		ack.GetBeginToolCallAck().Accepted = true
+		_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
+		return
 	}
+	ack.GetBeginToolCallAck().Accepted = true
 	_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
+	// ADR-0011：quoin_routed 工具在 ack 之后异步执行（每调用一个
+	// goroutine，超时由 ToolEntry 声明并受编排上限约束）。
+	toolName, routed, routeErr := service.quoinRoutedToolCall(ctx, attempts, begin.GetAttemptId(), begin.GetToolCallId())
+	if routeErr != nil {
+		sharedops.LogEvent("quoin", "error", "toolcall.route_lookup_failed", routeErr.Error())
+		return
+	}
+	if routed {
+		go service.executeRoutedToolCall(context.Background(), attempts, begin.GetAttemptId(), begin.GetToolCallId(), toolName)
+	}
 }
 
 // handleCompleteToolCallRouted seals one tool execution (ARCH-TOOL-003);
-// the committed payload and artifact ref travel back to the worker.
+// the committed payload and artifact ref travel back to the worker. ADR-0011
+// 防御：quoin_routed 工具的终态已由 Quoin 编排封存，来自 Plinth 的
+// CompleteToolCall 属于旧帧/重放，确定性拒绝。
 func (service *RuntimeService) handleCompleteToolCallRouted(ctx context.Context, envelope *runtimev1.ControlEnvelope, complete *runtimev1.CompleteToolCall) {
 	ack := &runtimev1.ControlEnvelope{
 		ConnectionEpoch: envelope.GetConnectionEpoch(),
@@ -298,61 +314,37 @@ func (service *RuntimeService) handleCompleteToolCallRouted(ctx context.Context,
 		reject("attempt type not handled")
 		return
 	}
+	if _, routed, routeErr := service.quoinRoutedToolCall(ctx, attempts, complete.GetAttemptId(), complete.GetToolCallId()); routeErr == nil && routed {
+		reject("quoin_routed tool calls are sealed by Quoin; worker completions are not accepted")
+		return
+	}
 	payload := complete.GetPayload()
 	if payload == nil || payload.GetSchemaKind() == "" {
 		reject("tool result payload schema kind is required")
 		return
 	}
-	expectedSchema, err := attempts.ExpectedToolResultSchema(ctx, complete.GetToolCallId())
-	if err != nil {
-		reject("tool result schema lookup failed: " + err.Error())
-		return
-	}
-	if payload.GetSchemaKind() != expectedSchema {
-		reject("tool result schema kind does not match the fixed tool definition")
-		return
-	}
-	if err := attempt.ValidateToolResultPayload(attempts.Catalogs.Implementations, expectedSchema, payload.GetCanonicalJson()); err != nil {
-		reject("tool result payload violates the fixed schema: " + err.Error())
-		return
-	}
-	var resultJSON string
+	var canonical []byte
 	if len(payload.GetCanonicalJson()) > 0 {
 		digest := sha256.Sum256(payload.GetCanonicalJson())
 		if hex.EncodeToString(digest[:]) != hex.EncodeToString(payload.GetContentDigest()) {
 			reject("result payload digest mismatch")
 			return
 		}
-		resultJSON = string(payload.GetCanonicalJson())
+		canonical = payload.GetCanonicalJson()
 	}
-	evidenceIDs, err := attempts.CompleteToolCall(ctx, attempt.ToolResult{
-		AttemptID: complete.GetAttemptId(), ToolCallID: complete.GetToolCallId(),
-		Outcome: outcome, ResultJSON: resultJSON, ArtifactID: complete.GetArtifactId(),
-		ErrorCode: complete.GetErrorCode(), ErrorDetail: complete.GetErrorDetail(),
+	receipt, sealErr := service.sealToolCall(ctx, attempts, toolCallSeal{
+		attemptID: complete.GetAttemptId(), toolCallID: complete.GetToolCallId(),
+		outcome: outcome, schemaKind: payload.GetSchemaKind(), canonical: canonical,
+		artifactID: complete.GetArtifactId(), errorCode: complete.GetErrorCode(), errorDetail: complete.GetErrorDetail(),
 	})
-	if err != nil {
-		reject(err.Error())
+	if sealErr != nil {
+		reject(sealErr.Error())
 		return
 	}
 	ack.GetCompleteToolCallAck().Accepted = true
-	ack.GetCompleteToolCallAck().EvidenceIds = evidenceIDs
-	if payload != nil {
-		ack.GetCompleteToolCallAck().CommittedPayload = &runtimev1.ResultPayload{
-			SchemaKind: payload.GetSchemaKind(), CanonicalJson: payload.GetCanonicalJson(),
-			ContentDigest: payload.GetContentDigest(), EvidenceIds: nil, ArtifactIds: nil,
-		}
-	}
-	if complete.GetArtifactId() != 0 {
-		ref, err := service.Artifacts.RefFor(ctx, complete.GetAttemptId(), complete.GetArtifactId())
-		if err != nil {
-			reject(err.Error())
-			return
-		}
-		ack.GetCompleteToolCallAck().ArtifactRef = &runtimev1.ArtifactRef{
-			ArtifactId: ref.ArtifactID, Role: "tool_result", MediaType: ref.MediaType,
-			SizeBytes: uint64(ref.SizeBytes), Sha256: ref.SHA256, BodyExpired: ref.BodyExpired,
-		}
-	}
+	ack.GetCompleteToolCallAck().EvidenceIds = receipt.evidenceIDs
+	ack.GetCompleteToolCallAck().CommittedPayload = receipt.committedPayload
+	ack.GetCompleteToolCallAck().ArtifactRef = receipt.artifactRef
 	_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
 }
 
@@ -363,13 +355,21 @@ func (service *RuntimeService) handleCompleteToolCallRouted(ctx context.Context,
 // same-boot reconnect must still be stoppable — the old epoch's envelope
 // would be dropped by the envelope fence). Not connected: the loss
 // convergence (stream end / lease sweeper) closes the fence.
+//
+// ADR-0011: connection_probe and inspection_collection execute locally, so
+// their fences converge in-process (Cancelled via the owning CancelAck) and
+// never travel a CancelAttempt frame.
 func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attemptID int64) error {
 	attemptType, err := service.attemptTypeOf(ctx, attemptID)
 	if err != nil {
 		return err
 	}
 	if attemptType == "connection_probe" {
-		return service.dispatchCancel(ctx, attemptID)
+		if service.Connections == nil {
+			return fmt.Errorf("connections service not wired")
+		}
+		// No runtime owns the probe: finalize the committed fence locally.
+		return service.Connections.RecordCancelAck(ctx, attemptID)
 	}
 	// T15: investigation attempts share the same plinth cancel frame as
 	// initial analysis; only the unbound local finalizer differs by scope.
@@ -386,24 +386,10 @@ func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attempt
 		}
 		finalizeUnbound = func() error { return service.Investigations.CancelAck(ctx, attemptID) }
 	case "inspection_collection":
-		var scopeType string
-		if err := service.Analyses.Reader().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeType); err != nil {
-			return err
-		}
-		switch scopeType {
-		case "observation_run":
-			if service.Observations == nil {
-				return fmt.Errorf("source observation service not wired")
-			}
-			finalizeUnbound = func() error { return service.Observations.Attempts().CancelAck(ctx, attemptID) }
-		case "run_check":
-			if service.Inspections == nil {
-				return fmt.Errorf("inspection service not wired")
-			}
-			finalizeUnbound = func() error { return service.Inspections.Attempts().CancelAck(ctx, attemptID) }
-		default:
-			return fmt.Errorf("attempt %d has unsupported inspection collection scope %s", attemptID, scopeType)
-		}
+		// Locally executed: the collection executor observes the fence at its
+		// own commit; converging here closes it without a runtime round trip.
+		service.finalizeCancellation(ctx, attemptID, attemptType)
+		return nil
 	case "knowledge_extraction":
 		if service.Knowledge == nil {
 			return fmt.Errorf("knowledge service not wired")

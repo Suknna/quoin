@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	_ "modernc.org/sqlite"
 

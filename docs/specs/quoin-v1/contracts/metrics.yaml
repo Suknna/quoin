@@ -69,12 +69,15 @@ enum_sources:
     transform: snake_case
   delivery_status:
     path: contracts/runtime.proto
-    symbol: quoin.runtime.v1.DeliveryStatus
+    symbol: quoin.runtime.v1.EventDeliveryStatus
     parser: proto-enum
-    exclude: [DELIVERY_STATUS_UNSPECIFIED]
+    exclude: [EVENT_DELIVERY_STATUS_UNSPECIFIED]
     transform:
-      strip_prefix: DELIVERY_STATUS_
+      strip_prefix: EVENT_DELIVERY_STATUS_
       case: lowercase
+  platform_call_status:
+    values: [succeeded, rate_limited, credential_unavailable, unreachable, internal]
+    authority: metrics
   storage_operation:
     values: [sqlite, artifact, backup]
     authority: metrics
@@ -141,10 +144,14 @@ label_sets:
     authority: metrics
   delivery_status:
     values_from: delivery_status
+  platform_call_status:
+    values: [succeeded, rate_limited, credential_unavailable, unreachable, internal]
+    authority: metrics
 
 histogram_buckets:
   interactive_seconds: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
   backup_seconds: [1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200]
+  gateway_latency_ms: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000]
 
 families:
   - name: quoin_ready
@@ -372,7 +379,7 @@ families:
 
   - name: stele_ready
     type: gauge
-    help: Whether Stele can authenticate and relay Alertmanager deliveries.
+    help: Whether Stele can authenticate inbound sources and forward queued events.
     labels: []
     preinitialize: true
   - name: stele_quoin_available
@@ -382,11 +389,37 @@ families:
     preinitialize: true
   - name: stele_deliveries_total
     type: counter
-    help: Stele delivery attempts grouped by the authoritative relay DeliveryStatus.
+    help: Stele webhook intake outcomes grouped by the authoritative relay DeliveryStatus; accepted means enqueued locally (ADR-0011).
     labels: [delivery_status]
     preinitialize: true
   - name: stele_grpc_client_requests_total
     type: counter
     help: Stele gRPC client requests grouped by service and canonical status.
     labels: [rpc_group, grpc_status]
+    preinitialize: true
+  - name: stele_queue_depth
+    type: gauge
+    help: Current number of pending events in Stele's local outbound queue.
+    labels: []
+    preinitialize: true
+  - name: stele_queue_dead_letters_total
+    type: counter
+    help: Events moved into Stele's local dead-letter table.
+    labels: []
+    preinitialize: true
+  - name: stele_events_forwarded_total
+    type: counter
+    help: Stele queue events handed to Quoin DeliverEvents grouped by the authoritative relay DeliveryStatus.
+    labels: [delivery_status]
+    preinitialize: true
+  - name: stele_gateway_calls_total
+    type: counter
+    help: Stele outbound gateway platform calls grouped by gateway-judged PlatformCallStatus.
+    labels: [platform_call_status]
+    preinitialize: true
+  - name: stele_gateway_latency_ms
+    type: histogram
+    help: Stele outbound gateway platform call latency in milliseconds.
+    labels: []
+    buckets: gateway_latency_ms
     preinitialize: true

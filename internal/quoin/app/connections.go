@@ -288,7 +288,7 @@ func (application *apiServer) probeConnection(ctx context.Context, input *struct
 	if _, err := application.authenticateAdmin(ctx, input.Session, "发起连接探测"); err != nil {
 		return nil, err
 	}
-	attemptID, err := application.connections.StartProbe(ctx, input.ConnectionName, application.runtime, application.dispatchProbe)
+	attemptID, err := application.connections.StartProbe(ctx, input.ConnectionName)
 	if err != nil {
 		return nil, connectionError(err)
 	}
@@ -360,23 +360,6 @@ func (application *apiServer) disableConnection(ctx context.Context, input *stru
 	return &struct {
 		Body connectionSummaryJSON
 	}{Body: renderConnection(summary)}, nil
-}
-
-// dispatchProbe forwards the committed probe dispatch to the live Plinth
-// control stream via the RuntimeService task slice; send failures are
-// audited and the queued dispatcher retries when the stream reattaches.
-func (application *apiServer) dispatchProbe(attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte, contractDigest, actionSetID string, actionSetVersion int) {
-	if dispatcher := application.probeDispatcher(); dispatcher != nil {
-		if err := dispatcher(context.Background(), attemptID, summary, epoch, bootID, grantID, input); err != nil {
-			sharedops.LogEvent("quoin", "error", "probe.dispatch_failed", err.Error())
-		}
-	}
-}
-
-// probeDispatcher returns the stream dispatcher owned by the runtime task
-// slice, or nil when the gRPC surface is not mounted (unit harnesses).
-func (application *apiServer) probeDispatcher() func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error {
-	return application.probeDispatchFunc
 }
 
 // attemptState reads the authoritative execution_attempts.state.

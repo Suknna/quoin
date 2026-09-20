@@ -120,7 +120,9 @@ func (service *RuntimeService) dispatchQueuedAnalyses(ctx context.Context) {
 }
 
 // handleAttemptAcceptRouted records Assigned -> Running for whichever task
-// slice owns the attempt (RUNTIME-TASK-004).
+// slice owns the attempt (RUNTIME-TASK-004). The locally-executed types
+// (connection_probe, inspection_collection) never arrive here: nothing
+// dispatches them onto the stream anymore.
 func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, envelope *runtimev1.ControlEnvelope, accept *runtimev1.AttemptAccept) {
 	// A received frame must finish its bounded adjudication even if transport closes.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -131,30 +133,6 @@ func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, en
 		return
 	}
 	switch attemptType {
-	case "inspection_collection":
-		var scopeType string
-		if err := service.Analyses.Reader().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, accept.GetAttemptId()).Scan(&scopeType); err != nil {
-			sharedops.LogEvent("quoin", "error", "accept.scope_lookup_failed", err.Error())
-			return
-		}
-		var owner *attempt.Service
-		switch scopeType {
-		case "observation_run":
-			if service.Observations != nil {
-				owner = service.Observations.Attempts()
-			}
-		case "run_check":
-			if service.Inspections != nil {
-				owner = service.Inspections.Attempts()
-			}
-		}
-		if owner == nil {
-			sharedops.LogEvent("quoin", "error", "accept.scope_unwired", scopeType)
-			return
-		}
-		if err := owner.Accept(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
-			sharedops.LogEvent("quoin", "error", "collection.accept_failed", scopeType+": "+err.Error())
-		}
 	case "inspection_analysis":
 		if service.Inspections != nil {
 			if err := service.Inspections.Attempts().Accept(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
@@ -175,12 +153,6 @@ func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, en
 		if service.Investigations != nil {
 			if err := service.Investigations.AcceptAttempt(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
 				sharedops.LogEvent("quoin", "error", "investigation.accept_failed", err.Error())
-			}
-		}
-	case "connection_probe":
-		if service.Connections != nil {
-			if err := service.Connections.AcceptProbe(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
-				sharedops.LogEvent("quoin", "error", "probe.accept_failed", err.Error())
 			}
 		}
 	default:
@@ -297,7 +269,9 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 }
 
 // handleCancelAckRouted finishes Cancelling -> Cancelled for the owning
-// slice (RUNTIME-CANCEL-003).
+// slice (RUNTIME-CANCEL-003). The locally-executed types (connection_probe,
+// inspection_collection) never receive CancelAck frames: their cancellation
+// fences converge locally without a runtime round trip.
 func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot string, ack *runtimev1.CancelAck) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
@@ -316,37 +290,6 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot s
 		return
 	}
 	switch attemptType {
-	case "inspection_collection":
-		var scopeType string
-		if err := service.Analyses.Reader().QueryRowContext(ctx, `SELECT scope_type FROM execution_attempts WHERE id=?`, ack.GetAttemptId()).Scan(&scopeType); err != nil {
-			sharedops.LogEvent("quoin", "error", "cancel_ack.scope_lookup_failed", err.Error())
-			return
-		}
-		if scopeType == "observation_run" {
-			if service.Observations == nil {
-				sharedops.LogEvent("quoin", "error", "cancel_ack.scope_unwired", scopeType)
-				return
-			}
-			if err := service.Observations.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
-				sharedops.LogEvent("quoin", "error", "source_observation.cancel_ack", err.Error())
-				return
-			}
-			if err := service.Observations.ConvergeInterruptedChild(ctx, ack.GetAttemptId(), "cancelled"); err != nil {
-				sharedops.LogEvent("quoin", "error", "source_observation.cancel_converge", err.Error())
-			}
-			return
-		}
-		if scopeType == "run_check" {
-			if service.Inspections == nil {
-				sharedops.LogEvent("quoin", "error", "cancel_ack.scope_unwired", scopeType)
-				return
-			}
-			if err := service.Inspections.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
-				sharedops.LogEvent("quoin", "error", "inspection.cancel_ack", err.Error())
-			}
-			return
-		}
-		sharedops.LogEvent("quoin", "error", "cancel_ack.unhandled_scope", scopeType)
 	case "inspection_analysis":
 		if service.Inspections != nil {
 			if err := service.Inspections.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
@@ -367,12 +310,6 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot s
 		if service.Investigations != nil {
 			if err := service.Investigations.CancelAck(ctx, ack.GetAttemptId()); err != nil {
 				sharedops.LogEvent("quoin", "error", "investigation.cancel_ack", err.Error())
-			}
-		}
-	case "connection_probe":
-		if service.Connections != nil {
-			if err := service.Connections.RecordCancelAck(ctx, ack.GetAttemptId()); err != nil {
-				sharedops.LogEvent("quoin", "error", "probe.cancel_ack", err.Error())
 			}
 		}
 	default:

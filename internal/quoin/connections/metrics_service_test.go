@@ -50,7 +50,7 @@ func TestPrometheusAndThanosHaveIndependentCredentialsAndEnabledState(t *testing
 	// The bearer token decrypts only through the actual audited grant
 	// fulfillment path, and the Prometheus carrier stays distinct from the
 	// Thanos alias.
-	revealAttempt, err := service.StartProbe(ctx, prometheus.Name, nil, nil)
+	revealAttempt, err := service.StartProbe(ctx, prometheus.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestPrometheusProbeCreatesExactGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, created.Name)
 	if err != nil {
 		t.Fatalf("start Prometheus probe: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestInterruptPrometheusProbeClosesTypedResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, created.Name)
 	if err != nil {
 		t.Fatal(err)
 	}

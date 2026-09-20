@@ -17,8 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Suknna/quoin/internal/plugins/builtin"
-	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/schema"
 )
@@ -34,77 +32,59 @@ func sseChunk(t *testing.T, writer http.ResponseWriter, payload string) {
 // TestAdapterSendsCanonicalOpenAITools exercises the same executor adapter used
 // by inspection and investigation workers. The canonical catalog is already in
 // OpenAI's nested tools format, so decoding it as Eino ToolInfo would silently
-// produce zero-value names and descriptions on the provider wire.
+// produce zero-value names and descriptions on the provider wire. The frozen
+// catalog bytes are represented by an in-process fixture (Plinth 对插件体系
+// 零感知,ADR-0011;catalog 由 Quoin 冻结下发)。
 func TestAdapterSendsCanonicalOpenAITools(t *testing.T) {
-	for _, agentVersion := range []string{"initial-analysis-v1", "investigation-v1"} {
-		t.Run(agentVersion, func(t *testing.T) {
-			registry := builtin.Registry()
-			enabled, err := registry.ResolveEnabled(nil)
-			if err != nil {
-				t.Fatal(err)
+	toolsJSON := []byte(`[{"type":"function","function":{"name":"bash","description":"在当前一次性工作区执行一条 bash 命令。","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},{"type":"function","function":{"name":"artifact_read","description":"按范围读取一个 Artifact 的文本片段。","parameters":{"type":"object","properties":{"artifactId":{"type":"string"},"offset":{"type":"number"},"limit":{"type":"number"}},"required":["artifactId"]}}}]`)
+	provider := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		defer request.Body.Close()
+		var body struct {
+			Tools []struct {
+				Type     string `json:"type"`
+				Function struct {
+					Name        string         `json:"name"`
+					Description string         `json:"description"`
+					Parameters  map[string]any `json:"parameters"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+			http.Error(writer, "bad request", http.StatusBadRequest)
+			return
+		}
+		if len(body.Tools) == 0 {
+			t.Error("provider request has no tools")
+		}
+		for index, tool := range body.Tools {
+			if tool.Type != "function" || tool.Function.Name == "" || tool.Function.Description == "" || tool.Function.Parameters == nil {
+				t.Errorf("tools[%d]=%+v: expected nested OpenAI function name, description, and parameters", index, tool)
+				continue
 			}
-			catalogs, err := attempt.BuildCatalogs(registry, attempt.Implementations(), enabled)
-			if err != nil {
-				t.Fatal(err)
+			// OpenAI-compatible providers, including DeepSeek, require every
+			// function parameter root to declare object.
+			if tool.Function.Parameters["type"] != "object" {
+				t.Errorf("tools[%d] %q parameters root type=%#v, want object: %#v", index, tool.Function.Name, tool.Function.Parameters["type"], tool.Function.Parameters)
 			}
-			catalog, err := catalogs.CatalogFor(agentVersion)
-			if err != nil {
-				t.Fatal(err)
-			}
-			toolsJSON, err := catalog.ProviderToolsJSON()
-			if err != nil {
-				t.Fatal(err)
-			}
-			provider := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-				defer request.Body.Close()
-				var body struct {
-					Tools []struct {
-						Type     string `json:"type"`
-						Function struct {
-							Name        string         `json:"name"`
-							Description string         `json:"description"`
-							Parameters  map[string]any `json:"parameters"`
-						} `json:"function"`
-					} `json:"tools"`
-				}
-				if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-					t.Errorf("decode request: %v", err)
-					http.Error(writer, "bad request", http.StatusBadRequest)
-					return
-				}
-				if len(body.Tools) == 0 {
-					t.Error("provider request has no tools")
-				}
-				for index, tool := range body.Tools {
-					if tool.Type != "function" || tool.Function.Name == "" || tool.Function.Description == "" || tool.Function.Parameters == nil {
-						t.Errorf("tools[%d]=%+v: expected nested OpenAI function name, description, and parameters", index, tool)
-						continue
-					}
-					// OpenAI-compatible providers, including DeepSeek, require every
-					// function parameter root to declare object.
-					if tool.Function.Parameters["type"] != "object" {
-						t.Errorf("tools[%d] %q parameters root type=%#v, want object: %#v", index, tool.Function.Name, tool.Function.Parameters["type"], tool.Function.Parameters)
-					}
-				}
-				writer.Header().Set("Content-Type", "application/json")
-				_, _ = writer.Write([]byte(`{"id":"completion","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
-			}))
-			defer provider.Close()
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"completion","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer provider.Close()
 
-			contract := Contract{ModelID: "m", BaseURL: provider.URL, APIKey: "k", ContextBudget: 4096, MaxOutput: 1024}
-			adapter, _, err := newAdapter(context.Background(), toolsJSON, contract.APIKey, contract)
-			if err != nil {
-				t.Fatal(err)
-			}
-			executor := &Executor{}
-			text, _, _, finish, _, _, err := executor.callProvider(context.Background(), adapter, []*schema.Message{schema.SystemMessage("s"), schema.UserMessage("u")}, contract)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if text != "ok" || finish != "stop" {
-				t.Fatalf("response text=%q finish=%q", text, finish)
-			}
-		})
+	contract := Contract{ModelID: "m", BaseURL: provider.URL, APIKey: "k", ContextBudget: 4096, MaxOutput: 1024}
+	adapter, _, err := newAdapter(context.Background(), toolsJSON, contract.APIKey, contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &Executor{}
+	text, _, _, finish, _, _, err := executor.callProvider(context.Background(), adapter, []*schema.Message{schema.SystemMessage("s"), schema.UserMessage("u")}, contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "ok" || finish != "stop" {
+		t.Fatalf("response text=%q finish=%q", text, finish)
 	}
 }
 

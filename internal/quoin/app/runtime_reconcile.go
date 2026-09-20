@@ -206,7 +206,8 @@ func (service *RuntimeService) attemptsService() *attempt.Service {
 // onPlinthAttached adjudicates every active plinth attempt after an
 // accepted Hello: attempts bound to a different boot interrupt immediately
 // (RUNTIME-TASK-006); same-boot attempts reconcile without re-dispatch
-// (RUNTIME-TASK-005).
+// (RUNTIME-TASK-005). Locally-executed bindings (ADR-0011) never join the
+// frame protocol — the local execution loop and the lease sweeper own them.
 func (service *RuntimeService) onPlinthAttached(ctx context.Context, helloBoot string, helloEpoch uint64) {
 	attempts := service.attemptsService()
 	if attempts == nil {
@@ -219,6 +220,9 @@ func (service *RuntimeService) onPlinthAttached(ctx context.Context, helloBoot s
 	}
 	var sameBoot, replacedBoot []attempt.View
 	for _, view := range active {
+		if isLocalExecutionBinding(sql.NullString{String: dereferenceString(view.BootID), Valid: view.BootID != nil}) {
+			continue
+		}
 		if view.BootID == nil || *view.BootID != helloBoot {
 			replacedBoot = append(replacedBoot, view)
 			continue
@@ -271,9 +275,18 @@ func (service *RuntimeService) finalizeLoss(ctx context.Context, view attempt.Vi
 	}
 	// A connection_probe has its own immutable typed result closure. During a
 	// restart it must append the interrupted child before the terminal Attempt
-	// update; generic interruption would violate that database fence.
+	// update; generic interruption would violate that database fence. A probe
+	// nobody accepted (legacy Assigned binding) has no typed observation to
+	// seal and converges through the generic interruption instead.
 	if view.AttemptType == "connection_probe" && service.Connections != nil {
-		if err := service.Connections.InterruptProbe(ctx, view.ID, reason); err != nil {
+		if err := service.Connections.InterruptProbe(ctx, view.ID, reason); err == nil {
+			return
+		}
+		attempts := service.attemptsService()
+		if attempts == nil {
+			return
+		}
+		if _, err := attempts.Interrupt(ctx, view.ID, reason); err != nil {
 			sharedops.LogEvent("quoin", "error", "reconcile.interrupt_failed", fmt.Sprintf("attempt=%d %v", view.ID, err))
 		}
 		return
@@ -447,6 +460,8 @@ func (service *RuntimeService) reconcileSameBoot(ctx context.Context, bootID str
 }
 
 // alignReconcileReport applies the report alignment for one reconnect.
+// Locally-bound attempts (ADR-0011) never join the frame protocol and are
+// skipped: the local execution loop and the lease sweeper own them.
 func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID string, active []attempt.View, running []int64) {
 	attempts := service.attemptsService()
 	reported := map[int64]bool{}
@@ -455,9 +470,12 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 	}
 	renew := false
 	for _, view := range active {
+		if isLocalExecutionBinding(sql.NullString{String: dereferenceString(view.BootID), Valid: view.BootID != nil}) {
+			continue
+		}
 		if reported[view.ID] {
 			renew = true
-			if view.State == "Cancelling" && (view.AttemptType == "inspection_collection" || view.AttemptType == "inspection_analysis") {
+			if view.State == "Cancelling" && view.AttemptType == "inspection_analysis" {
 				// The Runtime is still executing a fence whose first send may have
 				// been lost. Re-send rather than treating its active report as proof
 				// that the cancellation converged.
@@ -486,17 +504,7 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 					sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
 				}
 			}
-			if view.State == "Assigned" && (view.AttemptType == "inspection_collection" || view.AttemptType == "inspection_analysis") && service.Inspections != nil {
-				// Source observation children belong to the observation
-				// authority: its rebuilder is the only one that can re-seal
-				// their frozen input, so the accept must flow through the
-				// owning service, never the inspection aggregate.
-				if view.AttemptType == "inspection_collection" && view.ScopeType == "observation_run" && service.Observations != nil {
-					if err := service.Observations.Attempts().Accept(ctx, view.ID, bootID, 0); err != nil {
-						sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
-					}
-					continue
-				}
+			if view.State == "Assigned" && view.AttemptType == "inspection_analysis" && service.Inspections != nil {
 				if err := service.Inspections.Attempts().Accept(ctx, view.ID, bootID, 0); err != nil {
 					sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
 				}
@@ -505,14 +513,17 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 		}
 		switch view.State {
 		case "Assigned":
+			if view.AttemptType == "inspection_collection" {
+				// A legacy plinth-bound collection child the runtime never
+				// accepted: nothing can execute it through the frame protocol
+				// anymore (ADR-0011) — converge it as loss.
+				service.finalizeLoss(ctx, view, "replaced")
+				sharedops.LogEvent("quoin", "info", "reconcile.local_type_loss", fmt.Sprintf("attempt=%d", view.ID))
+				continue
+			}
 			// Never accepted by the runtime: idempotent re-dispatch with
 			// the frozen binding (RUNTIME-TASK-005).
-			var err error
-			if view.AttemptType == "inspection_collection" && view.ScopeType == "observation_run" {
-				err = service.reDispatchSourceObservationAttempt(ctx, view)
-			} else {
-				err = service.reDispatchAgentAttempt(ctx, view)
-			}
+			err := service.reDispatchAgentAttempt(ctx, view)
 			if err != nil {
 				sharedops.LogEvent("quoin", "error", "reconcile.redispatch", fmt.Sprintf("attempt=%d %v", view.ID, err))
 			} else {
@@ -537,10 +548,11 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 
 // reDispatchAgentAttempt re-sends the DispatchAttempt frame for one Assigned
 // agent attempt with its frozen binding (the schema forbids rebinding;
-// the accept fence matches the boot, RUNTIME-TASK-005).
+// the accept fence matches the boot, RUNTIME-TASK-005). Locally-executed
+// types never ride this path (ADR-0011).
 func (service *RuntimeService) reDispatchAgentAttempt(ctx context.Context, view attempt.View) error {
 	attempts := service.attemptsService()
-	if (view.AttemptType == "inspection_collection" || view.AttemptType == "inspection_analysis") && service.Inspections != nil {
+	if view.AttemptType == "inspection_analysis" && service.Inspections != nil {
 		attempts = service.Inspections.Attempts()
 	}
 	if view.AttemptType == "knowledge_extraction" && service.Knowledge != nil {
@@ -560,7 +572,7 @@ func (service *RuntimeService) reDispatchAgentAttempt(ctx context.Context, view 
 	if service.Analyses != nil {
 		correlationDB = service.Analyses.Reader()
 	}
-	if (view.AttemptType == "inspection_collection" || view.AttemptType == "inspection_analysis") && service.Inspections != nil {
+	if view.AttemptType == "inspection_analysis" && service.Inspections != nil {
 		correlationDB = service.Inspections.Reader()
 	}
 	if view.AttemptType == "knowledge_extraction" && service.Knowledge != nil {
@@ -601,9 +613,6 @@ func (service *RuntimeService) reDispatchAgentAttempt(ctx context.Context, view 
 	} else if view.AttemptType == "knowledge_extraction" {
 		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION
 		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH
-	} else if view.AttemptType == "inspection_collection" && view.ScopeType == "run_check" {
-		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION
-		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_RUN_CHECK
 	} else if view.AttemptType == "inspection_analysis" && view.ScopeType == "run" {
 		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS
 		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_RUN
@@ -747,7 +756,8 @@ func (service *RuntimeService) RunLeaseSweeper(ctx context.Context) {
 }
 
 // dispatchAllCancellingInspections replays durable Plinth cancellation fences
-// after reconnect. Sending is best effort; the fence stays Cancelling and this
+// for report analyses after reconnect (collection children converge locally,
+// ADR-0011). Sending is best effort; the fence stays Cancelling and this
 // method retries on every attachment until a CancelAck or loss convergence.
 func (service *RuntimeService) dispatchAllCancellingInspections(ctx context.Context) {
 	if service.Inspections == nil {
@@ -755,7 +765,7 @@ func (service *RuntimeService) dispatchAllCancellingInspections(ctx context.Cont
 	}
 	rows, err := service.Inspections.Reader().QueryContext(ctx, `
 		SELECT a.id FROM execution_attempts a
-		WHERE a.state='Cancelling' AND a.attempt_type IN ('inspection_collection','inspection_analysis')
+		WHERE a.state='Cancelling' AND a.attempt_type='inspection_analysis'
 		ORDER BY a.id`)
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "inspection.cancel_replay", err.Error())

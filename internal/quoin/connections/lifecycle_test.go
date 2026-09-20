@@ -57,7 +57,7 @@ func runningProbeFixture(t *testing.T, name string) (*connections.Service, *sql.
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, created.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestProbeLifecycleWiredMatchingCorrelationPassesThrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt2, err := service.StartProbe(ctx, created.Name, nil, nil)
+	attempt2, err := service.StartProbe(ctx, created.Name)
 	if err != nil {
 		t.Fatal(err)
 	}

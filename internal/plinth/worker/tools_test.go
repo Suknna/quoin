@@ -1,90 +1,134 @@
 package worker
 
-// Frozen-contract pins: the worker's provider tool schema and agent
-// version must render byte-identical to the Quoin-side catalog
-// (internal/quoin/attempt), so the BeginModelCall tool-schema digest gate
-// and the agent-version fence can never drift silently.
+// 冻结契约钉子(ADR-0011 之后 Plinth 对插件体系零感知,不再与
+// Quoin 侧 attempt 包交叉钉住):worker 的 provider 工具目录渲染、执行
+// 模式词表归一(含 supervisor_typed -> quoin_routed 的迁移映射)与 agent
+// 版本身份都在本地钉死,防止静默漂移。
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"testing"
 
-	"github.com/Suknna/quoin/internal/plugins/builtin"
-	"github.com/Suknna/quoin/internal/quoin/attempt"
-	"github.com/Suknna/quoin/internal/quoin/investigation"
+	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 )
 
-func TestToolSchemaMatchesQuoinCatalog(t *testing.T) {
-	registry := builtin.Registry()
-	enabled, err := registry.ResolveEnabled(nil)
+// fixtureCatalogInput 构造一个内嵌冻结目录的 canonical input 文档
+// ({toolCatalog:{tools:[...]}}),覆盖 worker_local 与 quoin_routed 两种
+// 模式及一个历史 supervisor_typed 条目。
+func fixtureCatalogInput(t *testing.T) []byte {
+	t.Helper()
+	catalog := map[string]any{
+		"schemaVersion": "tools-v1",
+		"agentVersion":  WorkerAgentVersion,
+		"tools": []map[string]any{
+			{"name": "bash", "version": "1", "executionMode": "worker_local", "failureMode": "return_to_model", "description": "在工作区执行一条 bash 命令。", "parameters": map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string"}}, "required": []string{"command"}}},
+			{"name": "artifact_read", "version": "2", "executionMode": "quoin_routed", "failureMode": "return_to_model", "description": "按范围读取一个 Artifact 的文本片段。", "parameters": map[string]any{"type": "object", "properties": map[string]any{"artifactId": map[string]any{"type": "string"}}, "required": []string{"artifactId"}}},
+			{"name": "thanos_query", "version": "3", "executionMode": "supervisor_typed", "failureMode": "return_to_model", "description": "执行一条 PromQL 即时/区间查询。", "parameters": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}, "required": []string{"query"}}},
+		},
+	}
+	body, err := json.Marshal(map[string]any{"toolCatalog": catalog})
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalogs, err := attempt.BuildCatalogs(registry, attempt.Implementations(), enabled)
+	return body
+}
+
+func TestProviderToolsJSONForInputRendersFrozenCatalog(t *testing.T) {
+	input := fixtureCatalogInput(t)
+	rendered, err := ProviderToolsJSONForInput(input, WorkerAgentVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, agentVersion := range []string{WorkerAgentVersion, WorkerInvestigationAgentVersion} {
-		// The canonical input document freezes the per-attempt catalog
-		// (ADR-0004); the worker must render exactly those frozen bytes.
-		quoinJSON, catalog, err := attempt.FrozenCatalogJSONForCreation(catalogs, agentVersion)
-		if err != nil {
-			t.Fatal(err)
-		}
-		inputJSON, err := json.Marshal(map[string]json.RawMessage{"toolCatalog": quoinJSON})
-		if err != nil {
-			t.Fatal(err)
-		}
-		workerJSON, err := ProviderToolsJSONForInput(inputJSON, agentVersion)
-		if err != nil {
-			t.Fatal(err)
-		}
-		providerJSON, err := catalog.ProviderToolsJSON()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(workerJSON, providerJSON) {
-			t.Fatalf("%s tool schema drift:\nworker=%s\nquoin =%s", agentVersion, workerJSON, providerJSON)
-		}
-		workerDigest, err := ProviderToolsDigestForInput(inputJSON, agentVersion)
-		if err != nil {
-			t.Fatal(err)
-		}
-		providerSum := sha256.Sum256(providerJSON)
-		quoinDigest := hex.EncodeToString(providerSum[:])
-		if workerDigest != quoinDigest {
-			t.Fatalf("%s tool schema digest drift: worker=%s quoin=%s", agentVersion, workerDigest, quoinDigest)
-		}
+	// 渲染形状冻结:嵌套 OpenAI function 对象,逐工具 name/description/
+	// parameters 原样来自冻结目录。
+	var tools []map[string]any
+	if err := json.Unmarshal(rendered, &tools); err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 3 {
+		t.Fatalf("rendered %d tools, want 3", len(tools))
+	}
+	first := tools[0]["function"].(map[string]any)
+	if first["name"] != "bash" || tools[0]["type"] != "function" {
+		t.Fatalf("first rendered tool drifted: %s", rendered)
+	}
+	if _, ok := first["parameters"].(map[string]any); !ok {
+		t.Fatalf("parameters must render as an object: %s", rendered)
+	}
+	digest, err := ProviderToolsDigestForInput(input, WorkerAgentVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(rendered)
+	if digest != hex.EncodeToString(sum[:]) {
+		t.Fatalf("digest drift: %s != %s", digest, hex.EncodeToString(sum[:]))
 	}
 }
 
-func TestAgentVersionMatchesQuoinContract(t *testing.T) {
-	if WorkerAgentVersion != attempt.AgentVersion {
-		t.Fatalf("agent version drift: worker=%s quoin=%s", WorkerAgentVersion, attempt.AgentVersion)
+func TestProviderToolsJSONForInputRejectsLegacyInput(t *testing.T) {
+	if _, err := ProviderToolsJSONForInput([]byte(`{"schemaKind":"initial_analysis_v1"}`), WorkerAgentVersion); err == nil {
+		t.Fatal("legacy input without a frozen catalog must fail explicitly")
 	}
-	if LegacyInitialAnalysisAgentVersion != attempt.PreviousAgentVersion {
-		t.Fatalf("previous initial-analysis identity drift: worker=%s quoin=%s", LegacyInitialAnalysisAgentVersion, attempt.PreviousAgentVersion)
+	if _, err := ExecutionModesForInput([]byte(`{}`)); err == nil {
+		t.Fatal("execution mode resolution must fail without a frozen catalog")
 	}
-	if KnowledgeExtractionAgentVersion != attempt.KnowledgeAgentVersion {
-		t.Fatalf("knowledge identity drift: worker=%s quoin=%s", KnowledgeExtractionAgentVersion, attempt.KnowledgeAgentVersion)
+}
+
+func TestExecutionModesForInputNormalizesVocabulary(t *testing.T) {
+	modes, err := ExecutionModesForInput(fixtureCatalogInput(t))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if InspectionAnalysisAgentVersion != attempt.InspectionAgentVersion {
-		t.Fatalf("inspection identity drift: worker=%s quoin=%s", InspectionAnalysisAgentVersion, attempt.InspectionAgentVersion)
+	if modes["bash"] != "TOOL_EXECUTION_MODE_WORKER_LOCAL" {
+		t.Fatalf("bash must be worker_local, got %q", modes["bash"])
 	}
-	if ReportComplianceInspectionAnalysisAgentVersion != attempt.ReportComplianceInspectionAgentVersion {
-		t.Fatalf("report-compliance inspection identity drift: worker=%s quoin=%s", ReportComplianceInspectionAnalysisAgentVersion, attempt.ReportComplianceInspectionAgentVersion)
+	// ADR-0011:quoin_routed 保持;历史 supervisor_typed 词映射为
+	// quoin_routed(Plinth 对这两类工具都只转发不执行)。
+	if modes["artifact_read"] != "TOOL_EXECUTION_MODE_QUOIN_ROUTED" {
+		t.Fatalf("artifact_read must be quoin_routed, got %q", modes["artifact_read"])
 	}
-	if PreviousInspectionAnalysisAgentVersion != attempt.PreviousInspectionAgentVersion {
-		t.Fatalf("initial inspection identity drift: worker=%s quoin=%s", PreviousInspectionAnalysisAgentVersion, attempt.PreviousInspectionAgentVersion)
+	if modes["thanos_query"] != "TOOL_EXECUTION_MODE_QUOIN_ROUTED" {
+		t.Fatalf("legacy supervisor_typed must map to quoin_routed, got %q", modes["thanos_query"])
 	}
-	if WorkerInvestigationAgentVersion != investigation.AgentVersion {
-		t.Fatalf("investigation identity drift: worker=%s quoin=%s", WorkerInvestigationAgentVersion, investigation.AgentVersion)
+}
+
+func TestExecutionModesForInputRejectsUnknownMode(t *testing.T) {
+	input := []byte(`{"toolCatalog":{"tools":[{"name":"odd","executionMode":"elsewhere","description":"d","parameters":{"type":"object"}}]}}`)
+	if _, err := ExecutionModesForInput(input); err == nil {
+		t.Fatal("unknown execution mode must fail fast")
 	}
-	if PreviousInvestigationAgentVersion != investigation.PreviousAgentVersion {
-		t.Fatalf("previous investigation identity drift: worker=%s quoin=%s", PreviousInvestigationAgentVersion, investigation.PreviousAgentVersion)
+}
+
+// Agent 版本身份钉子:与 Quoin 侧 attempt/investigation 常量的相等性原本
+// 由跨包测试钉住;ADR-0011 后 Plinth 不再 import Quoin 内部包,这里改为
+// 钉住字面量——身份变更必须是有意识的契约变更。
+func TestAgentVersionIdentityPins(t *testing.T) {
+	pins := map[string]string{
+		"WorkerAgentVersion":                             WorkerAgentVersion,
+		"LegacyInitialAnalysisAgentVersion":              LegacyInitialAnalysisAgentVersion,
+		"KnowledgeExtractionAgentVersion":                KnowledgeExtractionAgentVersion,
+		"InspectionAnalysisAgentVersion":                 InspectionAnalysisAgentVersion,
+		"ReportComplianceInspectionAnalysisAgentVersion": ReportComplianceInspectionAnalysisAgentVersion,
+		"PreviousInspectionAnalysisAgentVersion":         PreviousInspectionAnalysisAgentVersion,
+		"WorkerInvestigationAgentVersion":                WorkerInvestigationAgentVersion,
+		"PreviousInvestigationAgentVersion":              PreviousInvestigationAgentVersion,
+	}
+	want := map[string]string{
+		"WorkerAgentVersion":                             "initial-analysis-v2",
+		"LegacyInitialAnalysisAgentVersion":              "initial-analysis-v1",
+		"KnowledgeExtractionAgentVersion":                "initial-analysis-v1",
+		"InspectionAnalysisAgentVersion":                 "inspection-analysis-v3",
+		"ReportComplianceInspectionAnalysisAgentVersion": "inspection-analysis-v2",
+		"PreviousInspectionAnalysisAgentVersion":         "inspection-analysis-v1",
+		"WorkerInvestigationAgentVersion":                "investigation-v3",
+		"PreviousInvestigationAgentVersion":              "investigation-v2",
+	}
+	for name, value := range pins {
+		if value != want[name] {
+			t.Fatalf("%s drift: got %s, want %s", name, value, want[name])
+		}
 	}
 	if LegacyInvestigationAgentVersion != "investigation-v1" {
 		t.Fatalf("legacy investigation identity drift: %s", LegacyInvestigationAgentVersion)
@@ -105,15 +149,5 @@ func TestReadOnlyRuntimePathsParse(t *testing.T) {
 			t.Fatalf("frozen readonly path %s missing", required)
 		}
 	}
-}
-
-func TestExecutionModeCatalog(t *testing.T) {
-	if ExecutionModeFor("bash") != "TOOL_EXECUTION_MODE_WORKER_LOCAL" {
-		t.Fatal("bash must be worker_local")
-	}
-	if ExecutionModeFor("artifact_read") != "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED" {
-		t.Fatal("artifact_read must be supervisor_typed")
-	}
-	_ = sha256.Sum256
-	_ = hex.EncodeToString
+	_ = gencontracts.PlinthWorkerToolsYAML
 }

@@ -19,7 +19,6 @@ import (
 	"strings"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
-	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -77,6 +76,35 @@ const (
 	spillLines = 2000
 )
 
+// frozenTool 是冻结目录中单个工具的契约(与 Quoin 侧 attempt.FrozenTool
+// 的 JSON 形状一致,ADR-0004)。Plinth 侧只消费 name/description/parameters
+// (渲染 provider schema)与 executionMode(判定 worker_local/quoin_routed),
+// 不依赖目录其余字段——对插件体系零感知(ADR-0011)。
+type frozenTool struct {
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	Parameters    map[string]any `json:"parameters"`
+	ExecutionMode string         `json:"executionMode"`
+}
+
+// frozenToolCatalog 是 canonical input 内嵌的冻结工具目录文档
+// ({toolCatalog:{tools:[...]}})。渲染方式与 Quoin 侧逐字节一致。
+type frozenToolCatalog struct {
+	Tools []frozenTool `json:"tools"`
+}
+
+// catalogFromInputDocument 提取 canonical input 内嵌的冻结目录;ok 为
+// false 表示早于按-attempt 冻结的遗留输入(不可解析,显式失败)。
+func catalogFromInputDocument(canonical []byte) (*frozenToolCatalog, bool) {
+	var document struct {
+		ToolCatalog *frozenToolCatalog `json:"toolCatalog"`
+	}
+	if err := json.Unmarshal(canonical, &document); err != nil || document.ToolCatalog == nil {
+		return nil, false
+	}
+	return document.ToolCatalog, true
+}
+
 // ProviderToolsJSONForInput renders the provider tool schema of ONE attempt:
 // attempts created with per-attempt freezing carry their frozen catalog
 // inside the canonical input document (ADR-0004) and render exactly those
@@ -84,10 +112,31 @@ const (
 // resolvable and fail explicitly.
 func ProviderToolsJSONForInput(canonicalInput []byte, agentVersion string) ([]byte, error) {
 	_ = agentVersion
-	if catalog, ok := attempt.CatalogFromInputDocument(canonicalInput); ok {
+	if catalog, ok := catalogFromInputDocument(canonicalInput); ok {
 		return catalog.ProviderToolsJSON()
 	}
 	return nil, fmt.Errorf("attempt input predates per-attempt catalog freezing and has no resolvable tool catalog")
+}
+
+// ProviderToolsJSON renders the frozen catalog into the canonical
+// provider-facing tool schema bytes. 构造与 Quoin 侧目录渲染相同(同名键的
+// map + json.Marshal),因此两边的字节与摘要逐字节一致。
+func (catalog *frozenToolCatalog) ProviderToolsJSON() ([]byte, error) {
+	if catalog == nil {
+		return nil, fmt.Errorf("frozen tool catalog is absent")
+	}
+	tools := make([]any, 0, len(catalog.Tools))
+	for _, tool := range catalog.Tools {
+		tools = append(tools, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        tool.Name,
+				"description": tool.Description,
+				"parameters":  tool.Parameters,
+			},
+		})
+	}
+	return json.Marshal(tools)
 }
 
 // ProviderToolsDigestForInput is the SHA-256 hex of
@@ -100,6 +149,50 @@ func ProviderToolsDigestForInput(canonicalInput []byte, agentVersion string) (st
 	}
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// Plinth 侧的执行模式常量(与 runtimev1.ToolExecutionMode 枚举名一致)。
+const (
+	executionModeWorkerLocal = "TOOL_EXECUTION_MODE_WORKER_LOCAL"
+	executionModeQuoinRouted = "TOOL_EXECUTION_MODE_QUOIN_ROUTED"
+)
+
+// normalizeFrozenExecutionMode 把冻结目录携带的执行模式词表归一到 Plinth
+// 侧仅有的两个合法值(ADR-0011):
+//   - worker_local 保持(worker 沙箱自执行);
+//   - quoin_routed 保持(Quoin 编排执行并推送 ExternalToolResult);
+//   - supervisor_typed 是历史目录冻结的旧词(协议中 SUPERVISOR_TYPED 已
+//     reserved、共享契约文件不可改):Plinth 对这类工具同样只转发不执行,
+//     语义等同 quoin_routed,这是迁移期的显式词表映射;
+//   - 其他未知值返回空串,由调用方 fail fast。
+func normalizeFrozenExecutionMode(mode string) string {
+	switch mode {
+	case "worker_local":
+		return executionModeWorkerLocal
+	case "quoin_routed", "supervisor_typed":
+		return executionModeQuoinRouted
+	default:
+		return ""
+	}
+}
+
+// ExecutionModesForInput 解析 canonical input 内嵌冻结目录的执行模式
+// (tool name -> 归一化常量)。执行位置的判定完全信任目录冻结的
+// executionMode 字段(ADR-0011);目录缺失或携带未知模式都显式失败。
+func ExecutionModesForInput(canonicalInput []byte) (map[string]string, error) {
+	catalog, ok := catalogFromInputDocument(canonicalInput)
+	if !ok {
+		return nil, fmt.Errorf("attempt input predates per-attempt catalog freezing and has no resolvable tool catalog")
+	}
+	modes := make(map[string]string, len(catalog.Tools))
+	for _, tool := range catalog.Tools {
+		mode := normalizeFrozenExecutionMode(tool.ExecutionMode)
+		if mode == "" {
+			return nil, fmt.Errorf("frozen tool %s carries unsupported execution mode %q", tool.Name, tool.ExecutionMode)
+		}
+		modes[tool.Name] = mode
+	}
+	return modes, nil
 }
 
 // ReadOnlyRuntimePaths mirrors the frozen plinth-worker-tools.yaml
@@ -127,17 +220,6 @@ func ReadOnlyRuntimePaths() ([]string, error) {
 
 func runtimeGOARCH() string {
 	return archToken
-}
-
-// ExecutionModeFor resolves the fixed execution mode of one tool name
-// (mirrors the Quoin-side catalog; pinned equal by tools_test.go).
-func ExecutionModeFor(name string) string {
-	switch name {
-	case "artifact_read", "artifact_grep", "thanos_query":
-		return "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED"
-	default:
-		return "TOOL_EXECUTION_MODE_WORKER_LOCAL"
-	}
 }
 
 // LocalResult is the deterministic outcome of one workspace tool run.

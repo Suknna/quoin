@@ -145,7 +145,7 @@ func TestEnvelopeRoundTripAndTamper(t *testing.T) {
 	// Decrypt through the actual supervisor grant path: bind the probe to a
 	// live stream, then fulfill the frozen grant — the only audited operation
 	// by which a sealed secret leaves storage.
-	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, created.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestChatOnlyModelProviderProbeClosure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptID, err := service.StartProbe(ctx, provider.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, provider.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestEnableFencesAndModelProviderQualification(t *testing.T) {
 func passedMetricsProbe(t *testing.T, service *connections.Service, database *sql.DB, summary connections.Summary, boot string, epoch uint64) int64 {
 	t.Helper()
 	ctx := adminContext(t, nextCorrelation())
-	attemptID, err := service.StartProbe(ctx, summary.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, summary.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +388,7 @@ func TestProbeClosureCommitOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No live plinth: attempt stays Queued (dispatch waits for the runtime).
-	attemptID, err := service.StartProbe(ctx, created.Name, nil, nil)
+	attemptID, err := service.StartProbe(ctx, created.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestProbeClosureCommitOrder(t *testing.T) {
 		t.Fatal("accept against Queued must fail")
 	}
 	// One active probe per connection.
-	if _, err := service.StartProbe(ctx, created.Name, nil, nil); !errors.Is(err, connections.ErrActiveConflict) {
+	if _, err := service.StartProbe(ctx, created.Name); !errors.Is(err, connections.ErrActiveConflict) {
 		t.Fatalf("second active probe must conflict, got %v", err)
 	}
 }

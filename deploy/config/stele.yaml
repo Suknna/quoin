@@ -4,3 +4,6 @@ quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
 # mTLS client identity (CN=stele) signed by the deployment CA (ADR-0009).
 quoinRuntimeClientCertificateFile: /run/quoin-secrets/stele-client.crt
 quoinRuntimeClientPrivateKeyFile: /run/quoin-secrets/stele-client.key
+# ADR-0011: Stele local runtime state (event queue, dedup, rate counters,
+# token cache, dead letters) lives in its own SQLite under this directory.
+dataDirectory: /var/lib/stele

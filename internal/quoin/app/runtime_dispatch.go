@@ -1,19 +1,14 @@
 package app
 
-// Connection-probe task slice of the control stream (T07): DispatchAttempt
-// envelopes to the live Plinth stream, AttemptAccept/ResultProposal/CancelAck
-// adjudication on the way back, and the FetchCredentialGrant RPC that
-// decrypts one attempt-scoped secret over the authenticated channel.
+// 连接探测收口（T07 的 ADR-0011 形态）：探测不再派发 Plinth，本地执行器
+// （local_execution.go）构建与原 supervisor 相同语义的 canonical 载荷后经
+// commitProbeResultPayload 收口；本文件同时承载 FetchCredentialGrant RPC——
+// 它仍服务 model_provider 模型调用 grant（Plinth）。
 
 import (
 	"context"
-	"crypto/sha256"
-	"database/sql"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"time"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
@@ -23,11 +18,7 @@ import (
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
-
-// The dispatch lease window is attempt.DispatchLease (single frozen
-// authority, RUNTIME-SCOPE-004).
 
 // sendEnvelope stamps per-direction ids and forwards only through the exact
 // boot/epoch stream embedded in the message. A stale dispatch must fail rather
@@ -54,123 +45,6 @@ func dispatchOperationCorrelation(ctx context.Context, db audit.Reader, attemptI
 	return correlation.OperationCorrelationID, nil
 }
 
-// dispatchAttempt sends the DispatchAttempt frame for one already-Assigned
-// probe attempt (RUNTIME-TASK-002/003).
-func (service *RuntimeService) dispatchAttempt(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error {
-	if service.Connections == nil {
-		return errors.New("connections not wired")
-	}
-	digest := sha256.Sum256(input)
-	contractDigest, err := connections.ProbeContractDigest()
-	if err != nil {
-		return err
-	}
-	// The input snapshot carries every attempt grant (model_provider
-	// probes dispatch with chat + embedding purposes).
-	var grants []*runtimev1.ConnectionGrant
-	if service.Connections != nil {
-		rows, grantErr := service.Connections.Reader().QueryContext(ctx, `SELECT id,connection_revision_id,credential_generation_id,purpose FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id`, attemptID)
-		if grantErr != nil {
-			return grantErr
-		}
-		for rows.Next() {
-			var grantID, revisionID, generationID int64
-			var purpose string
-			if err := rows.Scan(&grantID, &revisionID, &generationID, &purpose); err != nil {
-				rows.Close()
-				return err
-			}
-			grants = append(grants, &runtimev1.ConnectionGrant{GrantId: grantID, ConnectionRevisionId: revisionID, CredentialGenerationId: generationID, Purpose: purpose})
-		}
-		rows.Close()
-	}
-	actionSetID, actionSetVersion, err := connections.ActionSet(summary.Type)
-	if err != nil {
-		return err
-	}
-	// The stored association is the single correlation authority (ADR-0006):
-	// dispatch echoes the persisted identity verbatim; a legacy row without
-	// correlation dispatches with an empty id. No reply ever carries it —
-	// every adjudication joins attempts by id, never a runtime-supplied
-	// correlation.
-	operationCorrelationID, err := dispatchOperationCorrelation(ctx, service.Connections.Reader(), attemptID)
-	if err != nil {
-		return err
-	}
-	envelope := &runtimev1.ControlEnvelope{
-		ConnectionEpoch: epoch,
-		CorrelationId:   uint64(attemptID),
-		BootId:          bootID,
-		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{
-			DispatchAttempt: &runtimev1.DispatchAttempt{
-				AttemptId:              attemptID,
-				AttemptType:            runtimev1.AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE,
-				ScopeType:              runtimev1.ScopeType_SCOPE_TYPE_CONNECTION,
-				ScopeId:                summary.ID,
-				OperationCorrelationId: operationCorrelationID,
-				LeaseDeadline:          timestamppb.New(time.Now().UTC().Add(probeLeaseWindow())),
-				Input: &runtimev1.AttemptInputSnapshot{
-					SchemaKind:       "connection_probe_v1",
-					CanonicalJson:    input,
-					ContentDigest:    digest[:],
-					ArtifactRefs:     nil,
-					AgentVersion:     "",
-					ConnectionGrants: grants,
-				},
-			},
-		},
-	}
-	// The action-set identity travels with the input snapshot; the
-	// supervisor validates it against the frozen catalog digest.
-	_, _, _ = contractDigest, actionSetID, actionSetVersion
-	return service.sendEnvelope(qruntime.SlotPlinth, envelope)
-}
-
-// dispatchQueuedProbes binds and dispatches every Queued connection_probe
-// attempt after a Plinth stream attaches (created while disconnected).
-func (service *RuntimeService) dispatchQueuedProbes(ctx context.Context) {
-	if service.Connections == nil {
-		return
-	}
-	view, err := service.Slots.View(ctx, qruntime.SlotPlinth)
-	if err != nil || !view.Connected || view.ConnectionEpoch == nil {
-		return
-	}
-	ids, err := service.Connections.QueuedProbeAttempts(ctx)
-	if err != nil {
-		sharedops.LogEvent("quoin", "error", "probe.queue_scan", err.Error())
-		return
-	}
-	for _, id := range ids {
-		summary, grantID, input, ok, err := service.Connections.BindQueuedToStream(ctx, id, view.BootID, *view.ConnectionEpoch, probeLeaseWindow())
-		if err != nil || !ok {
-			if err != nil {
-				sharedops.LogEvent("quoin", "error", "probe.queue_bind", err.Error())
-			}
-			continue
-		}
-		if err := service.dispatchAttempt(ctx, id, summary, *view.ConnectionEpoch, view.BootID, grantID, input); err != nil {
-			sharedops.LogEvent("quoin", "error", "probe.queue_dispatch", err.Error())
-		}
-	}
-}
-
-func probeLeaseWindow() time.Duration {
-	// attempt.DispatchLease is the single frozen lease authority for
-	// probes and agent attempts alike (RUNTIME-SCOPE-004).
-	return attempt.DispatchLease
-}
-
-// handleAttemptAccept records Assigned -> Running (RUNTIME-TASK-004).
-func (service *RuntimeService) handleAttemptAccept(ctx context.Context, envelope *runtimev1.ControlEnvelope, accept *runtimev1.AttemptAccept) {
-	if service.Connections == nil {
-		return
-	}
-	if err := service.Connections.AcceptProbe(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
-		sharedops.LogEvent("quoin", "error", "probe.accept_failed", err.Error())
-	}
-}
-
 // probeResultJSON is the supervisor's canonical result payload body.
 type probeResultJSON struct {
 	Outcome    string          `json:"outcome"`
@@ -179,9 +53,39 @@ type probeResultJSON struct {
 	FinishedAt string          `json:"finishedAt"`
 }
 
-// handleResultProposal adjudicates a connection_probe result: digest
-// verification, typed-child write and attempt terminal state commit in one
-// transaction (RUNTIME-AGENT-010), then ResultAck.
+// commitProbeResultPayload 是连接探测结果的唯一收口：解析 canonical 载荷、
+// 校验 outcome 与类型化子行形状，然后在同一事务内提交 header + typed child +
+// attempt 终态（RUNTIME-AGENT-010）。本地执行器与（历史协议的）ResultProposal
+// 帧处理共用此路径；boot/epoch 是结果的派发绑定围栏。
+func (service *RuntimeService) commitProbeResultPayload(ctx context.Context, attemptID int64, schemaKind string, canonical []byte, bootID string, epoch uint64) error {
+	if service.Connections == nil {
+		return fmt.Errorf("connections not wired")
+	}
+	var parsed probeResultJSON
+	if err := json.Unmarshal(canonical, &parsed); err != nil {
+		return fmt.Errorf("result payload unparseable: %w", err)
+	}
+	if parsed.Outcome != "passed" && parsed.Outcome != "failed" {
+		return fmt.Errorf("outcome must be passed or failed")
+	}
+	resultDigest := sha256DigestOf(schemaKind, canonical)
+	typed := connections.TypedProbeResult{
+		Outcome:      parsed.Outcome,
+		Detail:       parsed.Detail,
+		ResultDigest: resultDigest,
+		StartedAt:    parsed.StartedAt,
+		FinishedAt:   parsed.FinishedAt,
+	}
+	child, err := parseTypedChild(schemaKind, parsed.Detail)
+	if err != nil {
+		return err
+	}
+	return service.Connections.CommitProbeResult(ctx, attemptID, bootID, epoch, typed, child)
+}
+
+// handleResultProposal adjudicates a connection_probe result proposal arriving
+// on the control stream (a legacy producer; new probes execute locally and call
+// commitProbeResultPayload directly).
 func (service *RuntimeService) handleResultProposal(ctx context.Context, envelope *runtimev1.ControlEnvelope, proposal *runtimev1.ResultProposal) {
 	if service.Connections == nil {
 		return
@@ -203,49 +107,16 @@ func (service *RuntimeService) handleResultProposal(ctx context.Context, envelop
 		reject("result payload incomplete")
 		return
 	}
-	digest := sha256.Sum256(payload.GetCanonicalJson())
-	if hex.EncodeToString(digest[:]) != hex.EncodeToString(payload.GetContentDigest()) {
+	if !digestMatches(payload.GetCanonicalJson(), payload.GetContentDigest()) {
 		reject("content digest mismatch")
 		return
 	}
-	var parsed probeResultJSON
-	if err := json.Unmarshal(payload.GetCanonicalJson(), &parsed); err != nil {
-		reject("result payload unparseable")
-		return
-	}
-	if parsed.Outcome != "passed" && parsed.Outcome != "failed" {
-		reject("outcome must be passed or failed")
-		return
-	}
-	resultDigest := sha256.Sum256(append([]byte(payload.GetSchemaKind()+"\n"), payload.GetCanonicalJson()...))
-	typed := connections.TypedProbeResult{
-		Outcome:      parsed.Outcome,
-		Detail:       parsed.Detail,
-		ResultDigest: hex.EncodeToString(resultDigest[:]),
-		StartedAt:    parsed.StartedAt,
-		FinishedAt:   parsed.FinishedAt,
-	}
-	child, err := parseTypedChild(payload.GetSchemaKind(), parsed.Detail)
-	if err != nil {
-		reject(err.Error())
-		return
-	}
-	if err := service.Connections.CommitProbeResult(ctx, proposal.GetAttemptId(), proposal.GetBootId(), proposal.GetConnectionEpoch(), typed, child); err != nil {
+	if err := service.commitProbeResultPayload(ctx, proposal.GetAttemptId(), payload.GetSchemaKind(), payload.GetCanonicalJson(), proposal.GetBootId(), proposal.GetConnectionEpoch()); err != nil {
 		reject(err.Error())
 		return
 	}
 	ack.GetResultAck().Accepted = true
 	_ = service.sendEnvelope(qruntime.SlotPlinth, ack)
-}
-
-// handleCancelAck finalizes a cancelled probe (RUNTIME-CANCEL-003).
-func (service *RuntimeService) handleCancelAck(ctx context.Context, ack *runtimev1.CancelAck) {
-	if service.Connections == nil {
-		return
-	}
-	if err := service.Connections.RecordCancelAck(ctx, ack.GetAttemptId()); err != nil {
-		sharedops.LogEvent("quoin", "error", "probe.cancel_ack", err.Error())
-	}
 }
 
 // FetchCredentialGrant decrypts the attempt-scoped secret after re-checking
@@ -273,15 +144,14 @@ func (service *RuntimeService) FetchCredentialGrant(ctx context.Context, request
 		RevisionConfigJson:     payload.RevisionConfigJSON,
 	}
 	switch {
-	case payload.Metrics != nil:
-		// The established wire slot is named `thanos`; it deliberately carries
-		// either Prometheus or Thanos credentials, while ConnectionType remains
-		// the authoritative discriminator.
-		response.Secret = &runtimev1.FetchCredentialGrantResponse_Thanos{Thanos: &runtimev1.ThanosCredentialSecret{Username: payload.Metrics.Username, Password: payload.Metrics.Password, BearerToken: payload.Metrics.BearerToken}}
 	case payload.ModelProvider != nil:
+		// ADR-0011 收窄：FetchCredentialGrant 只服务 model_provider grant
+		// （Plinth 模型调用）。metrics 凭据不经此信道——出向指标执行已迁至
+		// Stele 网关，连接材料按需经 SteleRelay.AcquireConnectionCredential
+		// 投递；旧的 thanos oneof 成员已从契约删除。
 		response.Secret = &runtimev1.FetchCredentialGrantResponse_ModelProvider{ModelProvider: &runtimev1.ModelProviderCredentialSecret{ApiKey: payload.ModelProvider.APIKey}}
 	default:
-		return nil, status.Error(codes.Internal, "typed secret missing")
+		return nil, status.Error(codes.PermissionDenied, "grant denied")
 	}
 	return response, nil
 }
@@ -360,28 +230,4 @@ type modelProviderDetailJSON struct {
 	RequestIDObserved          bool    `json:"requestIdObserved"`
 	EmbeddingSupported         bool    `json:"embeddingSupported"`
 	EmbeddingVectorDim         int     `json:"embeddingVectorDim,omitempty"`
-}
-
-// dispatchCancel sends the committed cancellation fence to the runtime that
-// owns the attempt (RUNTIME-CANCEL-001..003).
-func (service *RuntimeService) dispatchCancel(ctx context.Context, attemptID int64) error {
-	var boot sql.NullString
-	var epoch sql.NullInt64
-	if service.Connections == nil {
-		return errors.New("connections not wired")
-	}
-	row := service.Connections.Reader().QueryRowContext(ctx, `SELECT boot_id,connection_epoch FROM execution_attempts WHERE id=?`, attemptID)
-	if err := row.Scan(&boot, &epoch); err != nil {
-		return err
-	}
-	if !boot.Valid || !epoch.Valid {
-		// Unbound attempts finalize locally.
-		return service.Connections.RecordCancelAck(ctx, attemptID)
-	}
-	return service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
-		ConnectionEpoch: uint64(epoch.Int64),
-		CorrelationId:   uint64(attemptID),
-		BootId:          boot.String,
-		Msg:             &runtimev1.ControlEnvelope_CancelAttempt{CancelAttempt: &runtimev1.CancelAttempt{AttemptId: attemptID}},
-	})
 }

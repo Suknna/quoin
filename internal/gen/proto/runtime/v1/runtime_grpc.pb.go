@@ -55,7 +55,8 @@ type RuntimeControlClient interface {
 	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ControlEnvelope, ControlEnvelope], error)
 	// 任务级连接凭据 grant 获取（supervisor-only，RUNTIME-GRANT-001..003）：返回 Attempt 派发
 	// 绑定的 revision/generation 的非秘密配置投影与解密后的类型化秘密；仅 Attempt Running 期间
-	// 可用，终态即清除。worker 进程不得调用本 RPC。
+	// 可用，终态即清除。ADR-0011 后只服务 model_provider grant；外部平台凭据由 Stele 经
+	// SteleRelay.AcquireConnectionCredential 按需获取。worker 进程不得调用本 RPC。
 	FetchCredentialGrant(ctx context.Context, in *FetchCredentialGrantRequest, opts ...grpc.CallOption) (*FetchCredentialGrantResponse, error)
 }
 
@@ -103,7 +104,8 @@ type RuntimeControlServer interface {
 	Connect(grpc.BidiStreamingServer[ControlEnvelope, ControlEnvelope]) error
 	// 任务级连接凭据 grant 获取（supervisor-only，RUNTIME-GRANT-001..003）：返回 Attempt 派发
 	// 绑定的 revision/generation 的非秘密配置投影与解密后的类型化秘密；仅 Attempt Running 期间
-	// 可用，终态即清除。worker 进程不得调用本 RPC。
+	// 可用，终态即清除。ADR-0011 后只服务 model_provider grant；外部平台凭据由 Stele 经
+	// SteleRelay.AcquireConnectionCredential 按需获取。worker 进程不得调用本 RPC。
 	FetchCredentialGrant(context.Context, *FetchCredentialGrantRequest) (*FetchCredentialGrantResponse, error)
 	mustEmbedUnimplementedRuntimeControlServer()
 }
@@ -373,24 +375,33 @@ var ArtifactService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	SteleRelay_GetCredentialSnapshot_FullMethodName = "/quoin.runtime.v1.SteleRelay/GetCredentialSnapshot"
-	SteleRelay_Deliver_FullMethodName               = "/quoin.runtime.v1.SteleRelay/Deliver"
+	SteleRelay_Connect_FullMethodName                     = "/quoin.runtime.v1.SteleRelay/Connect"
+	SteleRelay_GetCredentialSnapshot_FullMethodName       = "/quoin.runtime.v1.SteleRelay/GetCredentialSnapshot"
+	SteleRelay_DeliverEvents_FullMethodName               = "/quoin.runtime.v1.SteleRelay/DeliverEvents"
+	SteleRelay_AcquireConnectionCredential_FullMethodName = "/quoin.runtime.v1.SteleRelay/AcquireConnectionCredential"
 )
 
 // SteleRelayClient is the client API for SteleRelay service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Stele 告警接入：非 Runtime 的独立 unary 服务。Stele 以部署 CA 签发的客户端证书
-// （CN=stele）经 mTLS 认证（ADR-0009）。每个请求必须携带完整 Proto 权威契约的
-// SHA-256 指纹；发布版本只用于展示与溯源，绝不作为通信准入条件。
+// Stele 外部网关服务（ADR-0011）：Stele 以部署 CA 签发的客户端证书（CN=stele）经
+// mTLS 认证（ADR-0009），是所有外部平台交互的唯一出入口——入向接收平台推送并归一化
+// 入本地队列（入队即 ACK，可靠性由队列重试 + 死信承担），出向按 Quoin 派发注入凭证、
+// 限流并执行平台调用。每个请求必须携带完整 Proto 权威契约的 SHA-256 指纹；发布版本
+// 只用于展示与溯源，绝不作为通信准入条件。单 Stele 实例假设。
 type SteleRelayClient interface {
-	// 版本化只读凭据 digest 快照；Stele 仅内存缓存，未成功加载时拒绝接收请求
-	// （RUNTIME-STELE-002）。
+	// 长期网关双向流（拓扑同 RuntimeControl.Connect）：Quoin 经该流向 Stele 下发
+	// 出向平台执行请求，Stele 回传执行结果；心跳维护活性投影。
+	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SteleEnvelope, SteleEnvelope], error)
+	// 版本化只读凭据 digest 快照（入向来源认证）；Stele 仅内存缓存，未成功加载时
+	// 拒绝接收入向请求（RUNTIME-STELE-002）。
 	GetCredentialSnapshot(ctx context.Context, in *GetCredentialSnapshotRequest, opts ...grpc.CallOption) (*GetCredentialSnapshotResponse, error)
-	// 精确原始 Delivery 转交；relay_id 幂等；credential_id + credential_snapshot_version
-	// 必填（RUNTIME-STELE-003/004）。
-	Deliver(ctx context.Context, in *DeliveryRelayRequest, opts ...grpc.CallOption) (*DeliveryRelayResponse, error)
+	// 归一化事件批量转交：Stele 本地队列的消费转发；event_id 幂等，逐事件裁决。
+	DeliverEvents(ctx context.Context, in *DeliverEventsRequest, opts ...grpc.CallOption) (*DeliverEventsResponse, error)
+	// 按需连接材料获取（出向执行）：返回非秘密配置投影与解密后的类型化秘密；Stele
+	// 缓存于本地状态，动态凭证生命周期管理归 Stele；Quoin 对外部平台凭据只写不读。
+	AcquireConnectionCredential(ctx context.Context, in *AcquireConnectionCredentialRequest, opts ...grpc.CallOption) (*AcquireConnectionCredentialResponse, error)
 }
 
 type steleRelayClient struct {
@@ -400,6 +411,19 @@ type steleRelayClient struct {
 func NewSteleRelayClient(cc grpc.ClientConnInterface) SteleRelayClient {
 	return &steleRelayClient{cc}
 }
+
+func (c *steleRelayClient) Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SteleEnvelope, SteleEnvelope], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SteleRelay_ServiceDesc.Streams[0], SteleRelay_Connect_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SteleEnvelope, SteleEnvelope]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SteleRelay_ConnectClient = grpc.BidiStreamingClient[SteleEnvelope, SteleEnvelope]
 
 func (c *steleRelayClient) GetCredentialSnapshot(ctx context.Context, in *GetCredentialSnapshotRequest, opts ...grpc.CallOption) (*GetCredentialSnapshotResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -411,10 +435,20 @@ func (c *steleRelayClient) GetCredentialSnapshot(ctx context.Context, in *GetCre
 	return out, nil
 }
 
-func (c *steleRelayClient) Deliver(ctx context.Context, in *DeliveryRelayRequest, opts ...grpc.CallOption) (*DeliveryRelayResponse, error) {
+func (c *steleRelayClient) DeliverEvents(ctx context.Context, in *DeliverEventsRequest, opts ...grpc.CallOption) (*DeliverEventsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(DeliveryRelayResponse)
-	err := c.cc.Invoke(ctx, SteleRelay_Deliver_FullMethodName, in, out, cOpts...)
+	out := new(DeliverEventsResponse)
+	err := c.cc.Invoke(ctx, SteleRelay_DeliverEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *steleRelayClient) AcquireConnectionCredential(ctx context.Context, in *AcquireConnectionCredentialRequest, opts ...grpc.CallOption) (*AcquireConnectionCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AcquireConnectionCredentialResponse)
+	err := c.cc.Invoke(ctx, SteleRelay_AcquireConnectionCredential_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -425,16 +459,23 @@ func (c *steleRelayClient) Deliver(ctx context.Context, in *DeliveryRelayRequest
 // All implementations must embed UnimplementedSteleRelayServer
 // for forward compatibility.
 //
-// Stele 告警接入：非 Runtime 的独立 unary 服务。Stele 以部署 CA 签发的客户端证书
-// （CN=stele）经 mTLS 认证（ADR-0009）。每个请求必须携带完整 Proto 权威契约的
-// SHA-256 指纹；发布版本只用于展示与溯源，绝不作为通信准入条件。
+// Stele 外部网关服务（ADR-0011）：Stele 以部署 CA 签发的客户端证书（CN=stele）经
+// mTLS 认证（ADR-0009），是所有外部平台交互的唯一出入口——入向接收平台推送并归一化
+// 入本地队列（入队即 ACK，可靠性由队列重试 + 死信承担），出向按 Quoin 派发注入凭证、
+// 限流并执行平台调用。每个请求必须携带完整 Proto 权威契约的 SHA-256 指纹；发布版本
+// 只用于展示与溯源，绝不作为通信准入条件。单 Stele 实例假设。
 type SteleRelayServer interface {
-	// 版本化只读凭据 digest 快照；Stele 仅内存缓存，未成功加载时拒绝接收请求
-	// （RUNTIME-STELE-002）。
+	// 长期网关双向流（拓扑同 RuntimeControl.Connect）：Quoin 经该流向 Stele 下发
+	// 出向平台执行请求，Stele 回传执行结果；心跳维护活性投影。
+	Connect(grpc.BidiStreamingServer[SteleEnvelope, SteleEnvelope]) error
+	// 版本化只读凭据 digest 快照（入向来源认证）；Stele 仅内存缓存，未成功加载时
+	// 拒绝接收入向请求（RUNTIME-STELE-002）。
 	GetCredentialSnapshot(context.Context, *GetCredentialSnapshotRequest) (*GetCredentialSnapshotResponse, error)
-	// 精确原始 Delivery 转交；relay_id 幂等；credential_id + credential_snapshot_version
-	// 必填（RUNTIME-STELE-003/004）。
-	Deliver(context.Context, *DeliveryRelayRequest) (*DeliveryRelayResponse, error)
+	// 归一化事件批量转交：Stele 本地队列的消费转发；event_id 幂等，逐事件裁决。
+	DeliverEvents(context.Context, *DeliverEventsRequest) (*DeliverEventsResponse, error)
+	// 按需连接材料获取（出向执行）：返回非秘密配置投影与解密后的类型化秘密；Stele
+	// 缓存于本地状态，动态凭证生命周期管理归 Stele；Quoin 对外部平台凭据只写不读。
+	AcquireConnectionCredential(context.Context, *AcquireConnectionCredentialRequest) (*AcquireConnectionCredentialResponse, error)
 	mustEmbedUnimplementedSteleRelayServer()
 }
 
@@ -445,11 +486,17 @@ type SteleRelayServer interface {
 // pointer dereference when methods are called.
 type UnimplementedSteleRelayServer struct{}
 
+func (UnimplementedSteleRelayServer) Connect(grpc.BidiStreamingServer[SteleEnvelope, SteleEnvelope]) error {
+	return status.Errorf(codes.Unimplemented, "method Connect not implemented")
+}
 func (UnimplementedSteleRelayServer) GetCredentialSnapshot(context.Context, *GetCredentialSnapshotRequest) (*GetCredentialSnapshotResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetCredentialSnapshot not implemented")
 }
-func (UnimplementedSteleRelayServer) Deliver(context.Context, *DeliveryRelayRequest) (*DeliveryRelayResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Deliver not implemented")
+func (UnimplementedSteleRelayServer) DeliverEvents(context.Context, *DeliverEventsRequest) (*DeliverEventsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeliverEvents not implemented")
+}
+func (UnimplementedSteleRelayServer) AcquireConnectionCredential(context.Context, *AcquireConnectionCredentialRequest) (*AcquireConnectionCredentialResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AcquireConnectionCredential not implemented")
 }
 func (UnimplementedSteleRelayServer) mustEmbedUnimplementedSteleRelayServer() {}
 func (UnimplementedSteleRelayServer) testEmbeddedByValue()                    {}
@@ -472,6 +519,13 @@ func RegisterSteleRelayServer(s grpc.ServiceRegistrar, srv SteleRelayServer) {
 	s.RegisterService(&SteleRelay_ServiceDesc, srv)
 }
 
+func _SteleRelay_Connect_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(SteleRelayServer).Connect(&grpc.GenericServerStream[SteleEnvelope, SteleEnvelope]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SteleRelay_ConnectServer = grpc.BidiStreamingServer[SteleEnvelope, SteleEnvelope]
+
 func _SteleRelay_GetCredentialSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetCredentialSnapshotRequest)
 	if err := dec(in); err != nil {
@@ -490,20 +544,38 @@ func _SteleRelay_GetCredentialSnapshot_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
-func _SteleRelay_Deliver_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeliveryRelayRequest)
+func _SteleRelay_DeliverEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeliverEventsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(SteleRelayServer).Deliver(ctx, in)
+		return srv.(SteleRelayServer).DeliverEvents(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: SteleRelay_Deliver_FullMethodName,
+		FullMethod: SteleRelay_DeliverEvents_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SteleRelayServer).Deliver(ctx, req.(*DeliveryRelayRequest))
+		return srv.(SteleRelayServer).DeliverEvents(ctx, req.(*DeliverEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SteleRelay_AcquireConnectionCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AcquireConnectionCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SteleRelayServer).AcquireConnectionCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SteleRelay_AcquireConnectionCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SteleRelayServer).AcquireConnectionCredential(ctx, req.(*AcquireConnectionCredentialRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -520,10 +592,21 @@ var SteleRelay_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _SteleRelay_GetCredentialSnapshot_Handler,
 		},
 		{
-			MethodName: "Deliver",
-			Handler:    _SteleRelay_Deliver_Handler,
+			MethodName: "DeliverEvents",
+			Handler:    _SteleRelay_DeliverEvents_Handler,
+		},
+		{
+			MethodName: "AcquireConnectionCredential",
+			Handler:    _SteleRelay_AcquireConnectionCredential_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Connect",
+			Handler:       _SteleRelay_Connect_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "runtime.proto",
 }

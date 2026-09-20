@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +47,9 @@ type Runner struct {
 	// tools tracks the durable identity of each prepared tool call
 	// (toolCallID -> tool name + execution mode).
 	tools map[int64]toolMeta
+	// executionModes 是本次 attempt 冻结目录解析出的 tool name -> 执行模式
+	// (ADR-0011:worker_local 自执行,quoin_routed 等 Quoin 推送结果)。
+	executionModes map[string]string
 	// lastModelFailure carries the most recent structured model-call
 	// failure class so a worker exit without a result proposes the attempt
 	// failure with the provider's real reason instead of a generic
@@ -63,20 +65,20 @@ type Runner struct {
 	// toolCalls is test-only injectable transport for the typed-tool path.
 	// Production leaves it nil and uses the outbound runtime Channel.
 	toolCalls toolCallChannel
+	// externalResults is test-only injectable transport for QUOIN_ROUTED
+	// tool results (ADR-0011). Production leaves it nil and waits on the
+	// runtime Channel's ExternalToolResult waiters.
+	externalResults externalResultChannel
 	// uploadWorkspaceFileForTest captures a spilled body in typed-tool tests.
 	// Production leaves it nil and always streams through ArtifactService.
 	uploadWorkspaceFileForTest func(context.Context, int64, int64, string, string) (int64, error)
 }
 
+// toolMeta 只保留 Plinth 执行路由真正需要的身份:工具名与执行模式。
+// 参数与 grant 的消费方(插件执行/凭据获取)已随 ADR-0011 移交 Quoin。
 type toolMeta struct {
-	name            string
-	mode            string
-	arguments       map[string]any
-	argumentsJSON   []byte
-	argumentsDigest []byte
-	grants          []*runtimev1.ConnectionGrant
-	preflightCode   string
-	preflightDetail string
+	name string
+	mode string
 }
 
 // toolCallChannel is the narrow supervisor transport used only for typed
@@ -87,9 +89,25 @@ type toolCallChannel interface {
 	Request(context.Context, *runtimev1.ControlEnvelope) (*runtimev1.ControlEnvelope, error)
 }
 
+// externalResultChannel is the narrow supervisor seam quoin_routed tools
+// wait on (ADR-0011): one waiter per tool_call_id until Quoin pushes the
+// sealed ExternalToolResult frame.
+type externalResultChannel interface {
+	AwaitExternalToolResult(ctx context.Context, toolCallID int64) (*runtimev1.ExternalToolResult, error)
+}
+
 func (runner *Runner) toolCallChannel() toolCallChannel {
 	if runner.toolCalls != nil {
 		return runner.toolCalls
+	}
+	return runner.Channel
+}
+
+// externalResultSource resolves the QUOIN_ROUTED wait seam (test seam first,
+// production runtime Channel).
+func (runner *Runner) externalResultSource() externalResultChannel {
+	if runner.externalResults != nil {
+		return runner.externalResults
 	}
 	return runner.Channel
 }
@@ -237,6 +255,14 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 		return err
 	}
 	start.ToolSchemaDigest = decoded
+	// 解析冻结目录的工具执行模式(ADR-0011):worker_local / quoin_routed
+	// 的路由判定完全信任目录内嵌的 executionMode 字段。
+	executionModes, err := ExecutionModesForInput(input.GetCanonicalJson())
+	if err != nil {
+		process.Process.Kill()
+		return err
+	}
+	runner.executionModes = executionModes
 	if err := writer.Send(&workerv1.WorkerEnvelope{AttemptId: attemptID, Msg: &workerv1.WorkerEnvelope_StartAttempt{StartAttempt: start}}); err != nil {
 		process.Process.Kill()
 		return err
@@ -349,7 +375,7 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 				ModelCallId: callID, AssistantText: assistantText, ResponseDigest: responseDigest,
 				Usage: &workerv1.ModelUsage{},
 			}
-			prepared, authorizedTools, err := prepareAuthorizedToolCalls(proposed, authorizations)
+			prepared, authorizedTools, err := prepareAuthorizedToolCalls(proposed, authorizations, runner.executionModes)
 			if err != nil {
 				return err
 			}
@@ -421,10 +447,11 @@ func (runner *Runner) runWorker(ctx context.Context, attemptID int64, dispatch *
 // attempt on Quoin even after same-boot reconnects; a rejected ack means
 // the attempt was already terminal through another commit-order winner.
 // prepareAuthorizedToolCalls preserves the original model proposal in the
-// worker-visible prepared call while keeping the separately authorized execution
-// JSON private to supervisor-side tool metadata. Thanos must never fall back to
-// the proposal because Quoin scopes its query before authorizing execution.
-func prepareAuthorizedToolCalls(proposed []model.ProposedTool, authorizations []model.Authorization) ([]*workerv1.PreparedToolCall, map[int64]toolMeta, error) {
+// worker-visible prepared call. 执行位置的裁决来自本次 attempt 冻结目录
+// (ADR-0011):worker_local 由 worker 自执行,quoin_routed 等 Quoin 推送
+// 封存结果;Quoin 的执行参数覆盖(如查询改写)只做摘要一致性校验,
+// Plinth 不再依据它执行任何工具。
+func prepareAuthorizedToolCalls(proposed []model.ProposedTool, authorizations []model.Authorization, executionModes map[string]string) ([]*workerv1.PreparedToolCall, map[int64]toolMeta, error) {
 	prepared := make([]*workerv1.PreparedToolCall, 0, len(authorizations))
 	authorizedTools := make(map[int64]toolMeta, len(authorizations))
 	for _, authorization := range authorizations {
@@ -438,29 +465,19 @@ func prepareAuthorizedToolCalls(proposed []model.ProposedTool, authorizations []
 		if matched == nil {
 			return nil, nil, fmt.Errorf("authorization index %d has no proposed tool", authorization.ProviderIndex)
 		}
-		executionJSON := matched.ArgumentsJSON
-		executionDigest := matched.ArgumentsDigest
+		// 控制流完整性:Quoin 下发的执行参数覆盖必须与其摘要一致。Plinth
+		// 已不消费执行参数(ADR-0011),但错乱的授权数据仍要在最早处暴露。
 		if len(authorization.ExecutionArgumentsJSON) != 0 {
 			sum := sha256.Sum256(authorization.ExecutionArgumentsJSON)
 			if len(authorization.ExecutionArgumentsDigest) != sha256.Size || !bytes.Equal(sum[:], authorization.ExecutionArgumentsDigest) {
 				return nil, nil, fmt.Errorf("tool %d execution arguments digest mismatch", authorization.ToolCallID)
 			}
-			executionJSON = authorization.ExecutionArgumentsJSON
-			executionDigest = hex.EncodeToString(authorization.ExecutionArgumentsDigest)
-		} else if matched.ToolName == "thanos_query" {
-			return nil, nil, fmt.Errorf("thanos_query %d lacks Quoin-authorized execution arguments", authorization.ToolCallID)
 		}
-		var arguments map[string]any
-		if err := json.Unmarshal(executionJSON, &arguments); err != nil {
-			return nil, nil, fmt.Errorf("tool %d execution arguments invalid: %w", authorization.ToolCallID, err)
+		mode, known := executionModes[matched.ToolName]
+		if !known {
+			return nil, nil, fmt.Errorf("tool %q is not in the attempt's frozen catalog", matched.ToolName)
 		}
-		mode := ExecutionModeFor(matched.ToolName)
-		authorizedTools[authorization.ToolCallID] = toolMeta{
-			name: matched.ToolName, mode: mode, arguments: arguments,
-			argumentsJSON: append([]byte(nil), executionJSON...), argumentsDigest: []byte(executionDigest),
-			grants: authorization.ConnectionGrants, preflightCode: authorization.PreflightErrorCode,
-			preflightDetail: authorization.PreflightErrorDetail,
-		}
+		authorizedTools[authorization.ToolCallID] = toolMeta{name: matched.ToolName, mode: mode}
 		prepared = append(prepared, &workerv1.PreparedToolCall{
 			ToolCallId: authorization.ToolCallID, ProviderIndex: authorization.ProviderIndex,
 			ProviderToolCallId: matched.ProviderToolCallID, ToolName: matched.ToolName,

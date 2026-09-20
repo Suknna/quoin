@@ -8,14 +8,14 @@ import (
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/plinth/runtime"
 	"github.com/Suknna/quoin/internal/plinth/supervisor"
-	"github.com/Suknna/quoin/internal/plinth/worker"
-	"github.com/Suknna/quoin/internal/quoin/attempt"
 )
 
 // RunServe is the long-lived serve path: ops endpoint plus the outbound
 // mTLS-authenticated Connect control loop, retried with backoff. The process
 // stays alive so the deployment keeps it running; readiness stays strict
 // (not ready until a Quoin-accepted handshake).
+// ADR-0011 之后 Plinth 是纯推理沙箱:这里不再装配任何插件注册表或类型化
+// 执行表(执行已移交 Quoin),supervisor 只带通道与工作区根目录。
 func RunServe(ctx context.Context, config contract.PlinthConfig, server *sharedops.Server) error {
 	channel, err := runtime.NewChannel(runtime.ChannelConfig{
 		Slot:                              "plinth",
@@ -28,20 +28,7 @@ func RunServe(ctx context.Context, config contract.PlinthConfig, server *sharedo
 	if err != nil {
 		return err
 	}
-	// ONE plugin registry assembly for the whole process: the shared
-	// builtin declarations plus the execution bundles this host really
-	// provides. The typed-tool dispatch table derives from the same
-	// assembly — an assembly failure is a launch failure, never a silent
-	// dispatch hole.
-	registry := supervisor.HostRegistry()
-	table, err := attempt.NewImplementationTable(attempt.Implementations())
-	if err != nil {
-		return err
-	}
-	if err := worker.AssembleTypedExecutors(registry, table); err != nil {
-		return err
-	}
-	channel.Tasks = &supervisor.Supervisor{Channel: channel, WorkspaceRoot: config.WorkspaceDirectory, Registry: registry}
+	channel.Tasks = &supervisor.Supervisor{Channel: channel, WorkspaceRoot: config.WorkspaceDirectory}
 	// Terminal results retry until a ResultAck survives the stream it
 	// travelled on (T12, RUNTIME-TASK-008); the loop is boot-scoped.
 	go channel.RunResultDeliveryLoop(ctx)

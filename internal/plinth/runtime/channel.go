@@ -39,7 +39,8 @@ type Channel struct {
 	Config ChannelConfig
 	bootID string
 	epoch  uint64 // per-boot connection counter (RUNTIME-CTRL-004)
-	// Tasks executes connection_probe dispatches when wired (T07).
+	// Tasks executes dispatched inference attempts when wired (T10;
+	// ADR-0011 之后 Plinth 只承载推理 attempt)。
 	Tasks TaskSupervisor
 	// Artifacts is the ArtifactService client on the live connection
 	// (T10: tool_result uploads and attempt-scoped reads).
@@ -67,6 +68,13 @@ type Channel struct {
 	replyMu   sync.Mutex
 	nextCorr  uint64
 	waiters   map[uint64]chan *runtimev1.ControlEnvelope
+	// externalMu guards the QUOIN_ROUTED tool-result waiters (ADR-0011):
+	// supervisor 按 tool_call_id 等待 Quoin 推送的 ExternalToolResult 帧。
+	// waiter 挂在 Channel(而非单条流)上,所以同 boot 重连后 Quoin 的
+	// 重发仍能送达;没有 waiter 的迟到结果只审计丢弃(Quoin 已自行封存,
+	// Plinth 不是裁决方)。
+	externalMu      sync.Mutex
+	externalWaiters map[int64]chan *runtimev1.ExternalToolResult
 }
 
 // resultDeliveryInterval is the fixed retry cadence for outstanding terminal
@@ -289,6 +297,11 @@ func (channel *Channel) dispatchServerFrame(ctx context.Context, sink *FrameSink
 	case *runtimev1.ControlEnvelope_ModelTokenDelta:
 		// Transient observer deltas never reply; the ledger is the
 		// authority (RUNTIME-AGENT).
+	case *runtimev1.ControlEnvelope_ExternalToolResult:
+		// QUOIN_ROUTED 工具的封存结果下发(ADR-0011):Quoin 已完成执行、
+		// 封存(tool_calls 终态+evidence+artifact),这里只按 tool_call_id
+		// 路由给等待中的 supervisor waiter,由其组装 worker 的 ToolResult。
+		channel.deliverExternalToolResult(payload.ExternalToolResult)
 	default:
 		// Handshake-adjacent frames do not concern the
 		// plinth task slice.
@@ -309,8 +322,8 @@ func (channel *Channel) sendEnvelope(envelope *runtimev1.ControlEnvelope) error 
 	return channel.sendStream.Send(envelope)
 }
 
-// TaskSupervisor executes dispatched attempts (T07 probes, T10 agent
-// analysis). Channel owns cancellation acknowledgement so it can wait for the
+// TaskSupervisor executes dispatched attempts (agent analysis and
+// embedding). Channel owns cancellation acknowledgement so it can wait for the
 // registered task's physical shutdown before replying (RUNTIME-CANCEL-003).
 type TaskSupervisor interface {
 	HandleDispatchAttempt(ctx context.Context, sink *FrameSink, client runtimev1.RuntimeControlClient, dispatch *runtimev1.DispatchAttempt, binding DispatchBinding, stopTask func(int64) bool)
@@ -643,5 +656,58 @@ func (channel *Channel) HasAnyPendingResult() bool {
 	return len(channel.pending) > 0
 }
 
-// resultDeliveryInterval is the fixed retry cadence for outstanding
-// terminal results (RUNTIME-SCOPE-004: frozen release-internal constant).
+// AwaitExternalToolResult 注册一个按 tool_call_id 等待 QUOIN_ROUTED 工具
+// 结果的 waiter 并阻塞到 Quoin 的 ExternalToolResult 帧到达、调用方上下文
+// 结束(attempt 取消/worker 退出)或进程关闭为止。上下文结束时 waiter 被
+// 就地清理并放弃结果(Quoin 已封存,Plinth 侧无需也不应再消费)。
+// waiter 生命周期跨流:同 boot 重连后 Quoin 重发的结果仍能送达,重放语义
+// 由 Quoin 的幂等封存保证。
+func (channel *Channel) AwaitExternalToolResult(ctx context.Context, toolCallID int64) (*runtimev1.ExternalToolResult, error) {
+	waiter := make(chan *runtimev1.ExternalToolResult, 1)
+	channel.externalMu.Lock()
+	if channel.externalWaiters == nil {
+		channel.externalWaiters = map[int64]chan *runtimev1.ExternalToolResult{}
+	}
+	channel.externalWaiters[toolCallID] = waiter
+	channel.externalMu.Unlock()
+	select {
+	case result := <-waiter:
+		return result, nil
+	case <-ctx.Done():
+		channel.abandonExternalToolResult(toolCallID, waiter)
+		return nil, ctx.Err()
+	}
+}
+
+// abandonExternalToolResult 摘除一个 waiter;只有仍是注册的那个 chan 才
+// 删除,避免迟到的 deliver 与新 waiter 交叉时误删。
+func (channel *Channel) abandonExternalToolResult(toolCallID int64, waiter chan *runtimev1.ExternalToolResult) {
+	channel.externalMu.Lock()
+	if channel.externalWaiters[toolCallID] == waiter {
+		delete(channel.externalWaiters, toolCallID)
+	}
+	channel.externalMu.Unlock()
+}
+
+// deliverExternalToolResult 把一帧 ExternalToolResult 路由给按 tool_call_id
+// 注册的 waiter。没有 waiter(结果迟到于 attempt 取消/worker 退出,或重复
+// 下发)时只审计丢弃:Quoin 是这类工具的权威封存方,丢帧不影响封存事实。
+func (channel *Channel) deliverExternalToolResult(result *runtimev1.ExternalToolResult) {
+	if result == nil {
+		return
+	}
+	channel.externalMu.Lock()
+	waiter, live := channel.externalWaiters[result.GetToolCallId()]
+	if live {
+		delete(channel.externalWaiters, result.GetToolCallId())
+	}
+	channel.externalMu.Unlock()
+	if !live {
+		sharedops.LogEvent("plinth", "info", "runtime.external_result_unwaited", fmt.Sprintf("tool_call=%d attempt=%d outcome=%s", result.GetToolCallId(), result.GetAttemptId(), result.GetOutcome()))
+		return
+	}
+	select {
+	case waiter <- result:
+	default:
+	}
+}

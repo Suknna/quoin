@@ -10,17 +10,17 @@ import (
 	"testing"
 
 	"github.com/Suknna/quoin/internal/plugins"
-	"github.com/Suknna/quoin/internal/plugins/builtin"
+	_ "github.com/Suknna/quoin/internal/plugins/builtin"
 )
 
 func buildTestCatalogs(t *testing.T, configured []string) (*plugins.Registry, *Catalogs) {
 	t.Helper()
-	registry := builtin.Registry()
+	registry := plugins.Default()
 	enabled, err := registry.ResolveEnabled(configured)
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalogs, err := BuildCatalogs(registry, Implementations(), enabled)
+	catalogs, err := BuildCatalogs(registry, enabled)
 	if err != nil {
 		t.Fatal(err)
 	}

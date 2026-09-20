@@ -1,14 +1,11 @@
 package app
 
-// Regression coverage for the source observation recovery slice (mall-shop
-// incident 2026-09-16): the control-stream envelope adjudicators must route
-// observation_run children to the observation authority — never silently drop
-// them through the config verification aggregate — and must survive a request
-// context that died with the transport, because the durable accept is a
-// bounded adjudication of one envelope, not work owned by the stream. The
-// reconnect redispatch must rebuild the frozen source_observation_execution_v1
-// input through the observation rebuilder so an Assigned child the runtime
-// never accepted recovers through the normal product path.
+// Regression coverage for the source observation slice in its ADR-0011 local
+// execution shape: observation_run children bind, execute (metrics_discover
+// internal tool) and commit through the observation authority inside Quoin,
+// a dead caller context never kills a claimed execution, cancellation fences
+// converge locally without a runtime round trip, and the Plinth reconnect
+// reconciliation neither dispatches nor disturbs locally-bound children.
 
 import (
 	"context"
@@ -48,76 +45,149 @@ type observationRecoveryInput struct {
 	GrantID          int64    `json:"grantId"`
 }
 
-func TestSourceObservationAcceptRoutesToObservationAuthorityAndSurvivesDeadRequestContext(t *testing.T) {
-	db, service, _, attemptID := newSourceObservationRecoveryFixture(t)
-	// The transport died between frame delivery and adjudication (stream
-	// replacement under single-connection SQLite contention): the durable
-	// accept must still commit on its detached, bounded scope.
+// stubLocalDiscoverTool replaces the internal tool lookup for one test: the
+// discover stub returns one complete pass over a single target.
+func stubLocalDiscoverTool(t *testing.T) {
+	t.Helper()
+	previous := localMetricsToolEntry
+	localMetricsToolEntry = func(name string) (plugins.ToolEntry, bool) {
+		if name != "metrics_discover" {
+			return plugins.ToolEntry{}, false
+		}
+		return plugins.ToolEntry{Timeout: time.Second, Invoke: func(ctx context.Context, exec plugins.ToolExecution) (json.RawMessage, error) {
+			if exec.Conn.Type != "prometheus" || exec.Conn.ID != 1 {
+				return nil, fmt.Errorf("discover stub got connection %d/%s", exec.Conn.ID, exec.Conn.Type)
+			}
+			return json.Marshal(plugins.DiscoverResult{Objects: []plugins.DiscoveredObject{{
+				ObjectType: "target", CanonicalIdentity: "job=api,instance=127.0.0.1:9090", DisplayName: "api/127.0.0.1:9090",
+			}}})
+		}}, true
+	}
+	t.Cleanup(func() { localMetricsToolEntry = previous })
+}
+
+// TestLocalObservationExecutionRunsThroughObservationAuthorityAndSurvivesDeadRequestContext
+// drives one full local execution: the Queued child binds under the local
+// identity, the frozen input rebuilds through the observation authority, the
+// internal discovery tool executes, and the typed result commits with the run
+// converging — all on a caller context that died before the scan started.
+func TestLocalObservationExecutionRunsThroughObservationAuthorityAndSurvivesDeadRequestContext(t *testing.T) {
+	stubLocalDiscoverTool(t)
+	db, service, sent, attemptID := newSourceObservationRecoveryFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	envelope := &runtimev1.ControlEnvelope{BootId: "plinth-boot", ConnectionEpoch: 1}
-	accept := &runtimev1.AttemptAccept{AttemptId: attemptID}
-	service.handleAttemptAcceptRouted(ctx, envelope, accept)
-	var state string
+	service.runLocalExecutionPass(ctx)
+
+	var state, runState string
 	mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=?`, &state, attemptID)
-	if state != "Running" {
-		t.Fatalf("observation accept on a dead request context left attempt %d in %s, want Running", attemptID, state)
+	if state != "Succeeded" {
+		t.Fatalf("local observation execution left attempt %d in %s, want Succeeded", attemptID, state)
+	}
+	mustQuery(t, db, `SELECT r.state FROM observation_runs r JOIN execution_attempts a ON a.scope_id=r.id WHERE a.id=?`, &runState, attemptID)
+	if runState != "Completed" {
+		t.Fatalf("local observation execution left the run in %s, want Completed", runState)
+	}
+	var identityKey string
+	mustQuery(t, db, `SELECT identity_key FROM observed_source_objects WHERE connection_id=1 AND object_type='target'`, &identityKey)
+	if identityKey != "instance=127.0.0.1:9090\x1fjob=api" {
+		t.Fatalf("observed identity key %q, want the projected source identity", identityKey)
+	}
+	var boot string
+	mustQuery(t, db, `SELECT boot_id FROM execution_attempts WHERE id=?`, &boot, attemptID)
+	if boot != localExecutionBootID {
+		t.Fatalf("local execution binding boot %q, want %q", boot, localExecutionBootID)
+	}
+	if frames := sent(); len(frames) != 0 {
+		t.Fatalf("local execution sent %d control frames, want none", len(frames))
 	}
 }
 
-func TestSourceObservationCancelAckConvergesRunThroughObservationAuthority(t *testing.T) {
-	db, service, _, attemptID := newSourceObservationRecoveryFixture(t)
-	// Simulate the stuck cancellation fence of the incident: the runtime
-	// confirmed the stop, the CancelAck arrives, the run must converge.
-	mustExec(t, db, `UPDATE execution_attempts SET state='Cancelling',row_version=row_version+1 WHERE id=?`, attemptID)
-	service.handleCancelAckRouted(context.Background(), "plinth", &runtimev1.CancelAck{AttemptId: attemptID})
+// TestLocalObservationCancellationConvergesWithoutRuntimeFrames proves the
+// Cancelling fence of a locally executed child converges in-process: the
+// attempt reaches Cancelled, the object records its honest cancelled gap and
+// the run closes with warnings — no CancelAttempt/CancelAck frame involved.
+func TestLocalObservationCancellationConvergesWithoutRuntimeFrames(t *testing.T) {
+	db, service, sent, attemptID := newSourceObservationRecoveryFixture(t)
+	// Claim the child locally first: the cancellation fence of a locally
+	// executed child must converge without a runtime round trip.
+	if err := service.bindLocalAttempt(context.Background(), service.Observations.Attempts(), attemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Observations.Attempts().CancelFence(context.Background(), attemptID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.dispatchCancelRouted(context.Background(), attemptID); err != nil {
+		t.Fatal(err)
+	}
 	var attemptState, runState string
 	mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=?`, &attemptState, attemptID)
 	mustQuery(t, db, `SELECT r.state FROM observation_runs r JOIN execution_attempts a ON a.scope_id=r.id WHERE a.id=?`, &runState, attemptID)
 	if attemptState != "Cancelled" {
-		t.Fatalf("observation cancel ack left attempt %d in %s, want Cancelled", attemptID, attemptState)
+		t.Fatalf("local cancellation left attempt %d in %s, want Cancelled", attemptID, attemptState)
 	}
 	if runState != "CompletedWithWarnings" {
-		t.Fatalf("observation cancel ack left the run in %s, want CompletedWithWarnings with an honest cancelled gap", runState)
+		t.Fatalf("local cancellation left the run in %s, want CompletedWithWarnings with an honest cancelled gap", runState)
 	}
 	var gapReason string
 	mustQuery(t, db, `SELECT gap_reason FROM observation_run_objects WHERE attempt_id=?`, &gapReason, attemptID)
 	if gapReason != "cancelled" {
 		t.Fatalf("object gap reason is %q, want cancelled", gapReason)
 	}
+	if frames := sent(); len(frames) != 0 {
+		t.Fatalf("local cancellation sent %d control frames, want none", len(frames))
+	}
 }
 
-func TestReconnectRedispatchRebuildsObservationInputThroughObservationAuthority(t *testing.T) {
-	_, service, sent, attemptID := newSourceObservationRecoveryFixture(t)
-	boot := "plinth-boot"
+// TestReconnectSkipsLocallyBoundObservationChildren proves the Plinth
+// reconnect reconciliation ignores locally-bound children (they are owned by
+// the local executor and the lease sweeper) and converges a legacy
+// plinth-bound Assigned child as loss instead of dispatching it.
+func TestReconnectSkipsLocallyBoundObservationChildren(t *testing.T) {
+	db, service, sent, attemptID := newSourceObservationRecoveryFixture(t)
+	localBoot := localExecutionBootID
 	epoch := int64(1)
-	view := attempt.View{ID: attemptID, AttemptType: "inspection_collection", ScopeType: "observation_run", ScopeID: 1, State: "Assigned", BootID: &boot, ConnectionEpoch: &epoch}
-	// Drive the real reconnect alignment: the runtime did not report the
-	// Assigned child, so the reconciler must re-dispatch it (RUNTIME-TASK-005).
-	service.alignReconcileReport(context.Background(), "plinth-boot", []attempt.View{view}, nil)
-	frames := sent()
-	if len(frames) != 1 {
-		t.Fatalf("redispatch sent %d frames, want 1", len(frames))
+	// A locally bound Running child must not be interrupted by a Plinth Hello.
+	if err := service.bindLocalAttempt(context.Background(), service.Observations.Attempts(), attemptID); err != nil {
+		t.Fatal(err)
 	}
-	dispatch := frames[0].GetDispatchAttempt()
-	if dispatch == nil {
-		t.Fatalf("redispatch sent %T, want DispatchAttempt", frames[0].Msg)
+	service.alignReconcileReport(context.Background(), "plinth-boot", []attempt.View{{
+		ID: attemptID, AttemptType: "inspection_collection", ScopeType: "observation_run", ScopeID: 1,
+		State: "Running", BootID: &localBoot, ConnectionEpoch: &epoch,
+	}}, nil)
+	var state string
+	mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=?`, &state, attemptID)
+	if state != "Running" {
+		t.Fatalf("reconcile disturbed a locally bound child (state %s), want Running", state)
 	}
-	if dispatch.GetScopeType() != runtimev1.ScopeType_SCOPE_TYPE_OBSERVATION_RUN {
-		t.Fatalf("redispatch scope type %s, want SCOPE_TYPE_OBSERVATION_RUN", dispatch.GetScopeType())
+	// A legacy plinth-bound Assigned child the runtime never reported converges
+	// as loss: nothing can execute it through the frame protocol anymore.
+	legacy := attempt.View{
+		ID: attemptID, AttemptType: "inspection_collection", ScopeType: "observation_run", ScopeID: 1,
+		State: "Assigned", BootID: ptr("plinth-boot"), ConnectionEpoch: ptrInt64(1),
 	}
-	if got := dispatch.GetInput().GetSchemaKind(); got != "source_observation_execution_v1" {
-		t.Fatalf("redispatch schema kind %q, want source_observation_execution_v1", got)
+	service.alignReconcileReport(context.Background(), "plinth-boot", []attempt.View{legacy}, nil)
+	mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=?`, &state, attemptID)
+	if state != "Interrupted" {
+		t.Fatalf("legacy unreported Assigned child is %s, want Interrupted loss convergence", state)
 	}
-	if dispatch.GetAttemptId() != attemptID {
-		t.Fatalf("redispatch attempt id %d, want %d", dispatch.GetAttemptId(), attemptID)
+	var runState string
+	mustQuery(t, db, `SELECT r.state FROM observation_runs r JOIN execution_attempts a ON a.scope_id=r.id WHERE a.id=?`, &runState, attemptID)
+	if runState != "CompletedWithWarnings" {
+		t.Fatalf("legacy child left the run in %s, want CompletedWithWarnings with an honest interrupted gap", runState)
+	}
+	if frames := sent(); len(frames) != 0 {
+		t.Fatalf("reconcile sent %d control frames, want none", len(frames))
 	}
 }
+
+func ptr(value string) *string { return &value }
+
+func ptrInt64(value int64) *int64 { return &value }
 
 // newSourceObservationRecoveryFixture seeds one Running observation run with
-// one Assigned discovery child (frozen snapshot, source grant, persisted
+// one Queued discovery child (frozen snapshot, source grant, persisted
 // correlation) over the frozen schema, and wires only the authorities the
-// envelope adjudicators need. It returns the runtime service, the outbound
+// local execution path needs. It returns the runtime service, the outbound
 // frame collector and the seeded attempt id.
 func newSourceObservationRecoveryFixture(t *testing.T) (*sql.DB, *RuntimeService, func() []*runtimev1.ControlEnvelope, int64) {
 	t.Helper()
@@ -131,7 +201,6 @@ func newSourceObservationRecoveryFixture(t *testing.T) (*sql.DB, *RuntimeService
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	lease := time.Now().UTC().Add(2 * time.Minute).Format(time.RFC3339Nano)
 	d64 := fmt.Sprintf("%064x", 1)
 	// The enabled-connection chain the source grant closure trigger verifies:
 	// root key binding → connection → revision → credential generation →
@@ -175,13 +244,11 @@ func newSourceObservationRecoveryFixture(t *testing.T) (*sql.DB, *RuntimeService
 	digest := sha256.Sum256(canonical)
 	mustExec(t, db, `INSERT INTO attempt_input_snapshots(id,attempt_id,schema_kind,renderer_version,content_digest,created_at) VALUES(1,1,'source_observation_execution_v1','v1',?,?)`, hex.EncodeToString(digest[:]), now)
 	mustExec(t, db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,connection_revision_id) VALUES(1,1,'connection_revision',?,1)`, d64)
-	mustExec(t, db, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='plinth-boot',connection_epoch=1,lease_until=?,runtime_release_version='p',row_version=row_version+1 WHERE id=1`, lease)
 
 	registry := plugins.NewRegistry()
-	if err := registry.RegisterDescriptor(plugins.Descriptor{
+	if err := registry.Register(plugins.Plugin{
 		ID: "prometheus", Version: "1", DisplayName: "Prometheus", Description: "metrics source",
-		Capabilities:   []plugins.Capability{plugins.CapabilityDiscover},
-		ConnectionKind: "prometheus",
+		ConnectionKind: "prometheus", DefaultEnabled: true,
 		DiscoverObjects: []plugins.DiscoverObject{
 			{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
 		},
@@ -200,8 +267,6 @@ func newSourceObservationRecoveryFixture(t *testing.T) (*sql.DB, *RuntimeService
 	if err := analyses.SetReader(fixtureReadOnlyPool(t, db)); err != nil {
 		t.Fatal(err)
 	}
-	// The cancel-ack adjudicator reads the attempt scope through the
-	// inspection service's reader before routing to the observation authority.
 	inspections := inspection.NewService(db)
 	if err := inspections.SetReader(fixtureReadOnlyPool(t, db)); err != nil {
 		t.Fatal(err)

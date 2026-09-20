@@ -236,14 +236,7 @@ export const domainHandlers = [
 				description: "自动观测监控目标并提供指标工具。",
 				enabled: true,
 				version: "1",
-				capabilities: [
-					"probe",
-					"discover",
-					"tools",
-					"execute_tool",
-					"inspection_templates",
-					"collect",
-				],
+				capabilities: ["discover", "inspection_templates", "tools"],
 			},
 			{
 				id: "thanos",
@@ -251,14 +244,7 @@ export const domainHandlers = [
 				description: "查询和观测授权范围内的指标。",
 				enabled: true,
 				version: "1",
-				capabilities: [
-					"probe",
-					"discover",
-					"tools",
-					"execute_tool",
-					"inspection_templates",
-					"collect",
-				],
+				capabilities: ["discover", "inspection_templates", "tools"],
 			},
 		]);
 	}),

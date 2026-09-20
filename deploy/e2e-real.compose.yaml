@@ -51,6 +51,7 @@ services:
     command: ["--config", "/etc/quoin/component.yaml"]
     volumes:
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/config/stele.yaml:/etc/quoin/component.yaml:ro
+      - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/stele-data:/var/lib/stele
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/runtime-ca.pem:/run/quoin-secrets/runtime-ca.pem:ro
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/stele-client.crt:/run/quoin-secrets/stele-client.crt:ro
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/secrets/stele-client.key:/run/quoin-secrets/stele-client.key:ro

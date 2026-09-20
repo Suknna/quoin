@@ -688,60 +688,6 @@ func (GoAwayReason) EnumDescriptor() ([]byte, []int) {
 	return file_runtime_proto_rawDescGZIP(), []int{10}
 }
 
-// Stele Delivery 结果分类（RUNTIME-STELE-004；对应 HTTP 语义：ACCEPTED=204，
-// REJECTED=4xx 不重试，UNAVAILABLE=5xx 由 Alertmanager 重试）。
-type DeliveryStatus int32
-
-const (
-	DeliveryStatus_DELIVERY_STATUS_UNSPECIFIED DeliveryStatus = 0
-	DeliveryStatus_DELIVERY_STATUS_ACCEPTED    DeliveryStatus = 1
-	DeliveryStatus_DELIVERY_STATUS_REJECTED    DeliveryStatus = 2
-	DeliveryStatus_DELIVERY_STATUS_UNAVAILABLE DeliveryStatus = 3
-)
-
-// Enum value maps for DeliveryStatus.
-var (
-	DeliveryStatus_name = map[int32]string{
-		0: "DELIVERY_STATUS_UNSPECIFIED",
-		1: "DELIVERY_STATUS_ACCEPTED",
-		2: "DELIVERY_STATUS_REJECTED",
-		3: "DELIVERY_STATUS_UNAVAILABLE",
-	}
-	DeliveryStatus_value = map[string]int32{
-		"DELIVERY_STATUS_UNSPECIFIED": 0,
-		"DELIVERY_STATUS_ACCEPTED":    1,
-		"DELIVERY_STATUS_REJECTED":    2,
-		"DELIVERY_STATUS_UNAVAILABLE": 3,
-	}
-)
-
-func (x DeliveryStatus) Enum() *DeliveryStatus {
-	p := new(DeliveryStatus)
-	*p = x
-	return p
-}
-
-func (x DeliveryStatus) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (DeliveryStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[11].Descriptor()
-}
-
-func (DeliveryStatus) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[11]
-}
-
-func (x DeliveryStatus) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use DeliveryStatus.Descriptor instead.
-func (DeliveryStatus) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{11}
-}
-
 // 物理 Model Call 必须先落库再发 provider 请求。call_seq 是 Attempt 内逻辑模型步序；
 // provider 传输重试使用相同 call_seq、递增 retry_seq，且前一物理行必须已明确失败。
 type ModelOperation int32
@@ -777,11 +723,11 @@ func (x ModelOperation) String() string {
 }
 
 func (ModelOperation) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[12].Descriptor()
+	return file_runtime_proto_enumTypes[11].Descriptor()
 }
 
 func (ModelOperation) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[12]
+	return &file_runtime_proto_enumTypes[11]
 }
 
 func (x ModelOperation) Number() protoreflect.EnumNumber {
@@ -790,7 +736,7 @@ func (x ModelOperation) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelOperation.Descriptor instead.
 func (ModelOperation) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{12}
+	return file_runtime_proto_rawDescGZIP(), []int{11}
 }
 
 type ModelInputItemKind int32
@@ -847,11 +793,11 @@ func (x ModelInputItemKind) String() string {
 }
 
 func (ModelInputItemKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[13].Descriptor()
+	return file_runtime_proto_enumTypes[12].Descriptor()
 }
 
 func (ModelInputItemKind) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[13]
+	return &file_runtime_proto_enumTypes[12]
 }
 
 func (x ModelInputItemKind) Number() protoreflect.EnumNumber {
@@ -860,7 +806,7 @@ func (x ModelInputItemKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelInputItemKind.Descriptor instead.
 func (ModelInputItemKind) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{13}
+	return file_runtime_proto_rawDescGZIP(), []int{12}
 }
 
 type ModelInputRole int32
@@ -902,11 +848,11 @@ func (x ModelInputRole) String() string {
 }
 
 func (ModelInputRole) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[14].Descriptor()
+	return file_runtime_proto_enumTypes[13].Descriptor()
 }
 
 func (ModelInputRole) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[14]
+	return &file_runtime_proto_enumTypes[13]
 }
 
 func (x ModelInputRole) Number() protoreflect.EnumNumber {
@@ -915,7 +861,7 @@ func (x ModelInputRole) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelInputRole.Descriptor instead.
 func (ModelInputRole) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{14}
+	return file_runtime_proto_rawDescGZIP(), []int{13}
 }
 
 type ModelCallCompletionRejectReason int32
@@ -957,11 +903,11 @@ func (x ModelCallCompletionRejectReason) String() string {
 }
 
 func (ModelCallCompletionRejectReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[15].Descriptor()
+	return file_runtime_proto_enumTypes[14].Descriptor()
 }
 
 func (ModelCallCompletionRejectReason) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[15]
+	return &file_runtime_proto_enumTypes[14]
 }
 
 func (x ModelCallCompletionRejectReason) Number() protoreflect.EnumNumber {
@@ -970,7 +916,7 @@ func (x ModelCallCompletionRejectReason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelCallCompletionRejectReason.Descriptor instead.
 func (ModelCallCompletionRejectReason) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{15}
+	return file_runtime_proto_rawDescGZIP(), []int{14}
 }
 
 type ModelCallOutcome int32
@@ -1009,11 +955,11 @@ func (x ModelCallOutcome) String() string {
 }
 
 func (ModelCallOutcome) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[16].Descriptor()
+	return file_runtime_proto_enumTypes[15].Descriptor()
 }
 
 func (ModelCallOutcome) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[16]
+	return &file_runtime_proto_enumTypes[15]
 }
 
 func (x ModelCallOutcome) Number() protoreflect.EnumNumber {
@@ -1022,7 +968,7 @@ func (x ModelCallOutcome) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelCallOutcome.Descriptor instead.
 func (ModelCallOutcome) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{16}
+	return file_runtime_proto_rawDescGZIP(), []int{15}
 }
 
 type ModelCallFailureReason int32
@@ -1076,11 +1022,11 @@ func (x ModelCallFailureReason) String() string {
 }
 
 func (ModelCallFailureReason) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[17].Descriptor()
+	return file_runtime_proto_enumTypes[16].Descriptor()
 }
 
 func (ModelCallFailureReason) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[17]
+	return &file_runtime_proto_enumTypes[16]
 }
 
 func (x ModelCallFailureReason) Number() protoreflect.EnumNumber {
@@ -1089,15 +1035,15 @@ func (x ModelCallFailureReason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ModelCallFailureReason.Descriptor instead.
 func (ModelCallFailureReason) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{17}
+	return file_runtime_proto_rawDescGZIP(), []int{16}
 }
 
 type ToolExecutionMode int32
 
 const (
-	ToolExecutionMode_TOOL_EXECUTION_MODE_UNSPECIFIED      ToolExecutionMode = 0
-	ToolExecutionMode_TOOL_EXECUTION_MODE_WORKER_LOCAL     ToolExecutionMode = 1
-	ToolExecutionMode_TOOL_EXECUTION_MODE_SUPERVISOR_TYPED ToolExecutionMode = 2
+	ToolExecutionMode_TOOL_EXECUTION_MODE_UNSPECIFIED  ToolExecutionMode = 0
+	ToolExecutionMode_TOOL_EXECUTION_MODE_WORKER_LOCAL ToolExecutionMode = 1
+	ToolExecutionMode_TOOL_EXECUTION_MODE_QUOIN_ROUTED ToolExecutionMode = 4 // Quoin 权限/审计后经 Stele 网关执行（ADR-0011）
 )
 
 // Enum value maps for ToolExecutionMode.
@@ -1105,12 +1051,12 @@ var (
 	ToolExecutionMode_name = map[int32]string{
 		0: "TOOL_EXECUTION_MODE_UNSPECIFIED",
 		1: "TOOL_EXECUTION_MODE_WORKER_LOCAL",
-		2: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED",
+		4: "TOOL_EXECUTION_MODE_QUOIN_ROUTED",
 	}
 	ToolExecutionMode_value = map[string]int32{
-		"TOOL_EXECUTION_MODE_UNSPECIFIED":      0,
-		"TOOL_EXECUTION_MODE_WORKER_LOCAL":     1,
-		"TOOL_EXECUTION_MODE_SUPERVISOR_TYPED": 2,
+		"TOOL_EXECUTION_MODE_UNSPECIFIED":  0,
+		"TOOL_EXECUTION_MODE_WORKER_LOCAL": 1,
+		"TOOL_EXECUTION_MODE_QUOIN_ROUTED": 4,
 	}
 )
 
@@ -1125,11 +1071,11 @@ func (x ToolExecutionMode) String() string {
 }
 
 func (ToolExecutionMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[18].Descriptor()
+	return file_runtime_proto_enumTypes[17].Descriptor()
 }
 
 func (ToolExecutionMode) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[18]
+	return &file_runtime_proto_enumTypes[17]
 }
 
 func (x ToolExecutionMode) Number() protoreflect.EnumNumber {
@@ -1138,7 +1084,7 @@ func (x ToolExecutionMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ToolExecutionMode.Descriptor instead.
 func (ToolExecutionMode) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{18}
+	return file_runtime_proto_rawDescGZIP(), []int{17}
 }
 
 type ToolFailureMode int32
@@ -1174,11 +1120,11 @@ func (x ToolFailureMode) String() string {
 }
 
 func (ToolFailureMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[19].Descriptor()
+	return file_runtime_proto_enumTypes[18].Descriptor()
 }
 
 func (ToolFailureMode) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[19]
+	return &file_runtime_proto_enumTypes[18]
 }
 
 func (x ToolFailureMode) Number() protoreflect.EnumNumber {
@@ -1187,7 +1133,7 @@ func (x ToolFailureMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ToolFailureMode.Descriptor instead.
 func (ToolFailureMode) EnumDescriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{19}
+	return file_runtime_proto_rawDescGZIP(), []int{18}
 }
 
 type ToolCallOutcome int32
@@ -1226,11 +1172,11 @@ func (x ToolCallOutcome) String() string {
 }
 
 func (ToolCallOutcome) Descriptor() protoreflect.EnumDescriptor {
-	return file_runtime_proto_enumTypes[20].Descriptor()
+	return file_runtime_proto_enumTypes[19].Descriptor()
 }
 
 func (ToolCallOutcome) Type() protoreflect.EnumType {
-	return &file_runtime_proto_enumTypes[20]
+	return &file_runtime_proto_enumTypes[19]
 }
 
 func (x ToolCallOutcome) Number() protoreflect.EnumNumber {
@@ -1239,7 +1185,120 @@ func (x ToolCallOutcome) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ToolCallOutcome.Descriptor instead.
 func (ToolCallOutcome) EnumDescriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{19}
+}
+
+type PlatformCallStatus int32
+
+const (
+	PlatformCallStatus_PLATFORM_CALL_STATUS_UNSPECIFIED            PlatformCallStatus = 0
+	PlatformCallStatus_PLATFORM_CALL_STATUS_SUCCEEDED              PlatformCallStatus = 1 // 平台已响应（HTTP 状态由 Handler 解释）
+	PlatformCallStatus_PLATFORM_CALL_STATUS_RATE_LIMITED           PlatformCallStatus = 2 // Stele 侧配额拒绝
+	PlatformCallStatus_PLATFORM_CALL_STATUS_CREDENTIAL_UNAVAILABLE PlatformCallStatus = 3 // 连接材料不可用（未配置/吊销/Acquire 失败）
+	PlatformCallStatus_PLATFORM_CALL_STATUS_UNREACHABLE            PlatformCallStatus = 4 // 平台不通/超时
+	PlatformCallStatus_PLATFORM_CALL_STATUS_INTERNAL               PlatformCallStatus = 5 // 网关内部错误
+)
+
+// Enum value maps for PlatformCallStatus.
+var (
+	PlatformCallStatus_name = map[int32]string{
+		0: "PLATFORM_CALL_STATUS_UNSPECIFIED",
+		1: "PLATFORM_CALL_STATUS_SUCCEEDED",
+		2: "PLATFORM_CALL_STATUS_RATE_LIMITED",
+		3: "PLATFORM_CALL_STATUS_CREDENTIAL_UNAVAILABLE",
+		4: "PLATFORM_CALL_STATUS_UNREACHABLE",
+		5: "PLATFORM_CALL_STATUS_INTERNAL",
+	}
+	PlatformCallStatus_value = map[string]int32{
+		"PLATFORM_CALL_STATUS_UNSPECIFIED":            0,
+		"PLATFORM_CALL_STATUS_SUCCEEDED":              1,
+		"PLATFORM_CALL_STATUS_RATE_LIMITED":           2,
+		"PLATFORM_CALL_STATUS_CREDENTIAL_UNAVAILABLE": 3,
+		"PLATFORM_CALL_STATUS_UNREACHABLE":            4,
+		"PLATFORM_CALL_STATUS_INTERNAL":               5,
+	}
+)
+
+func (x PlatformCallStatus) Enum() *PlatformCallStatus {
+	p := new(PlatformCallStatus)
+	*p = x
+	return p
+}
+
+func (x PlatformCallStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PlatformCallStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_runtime_proto_enumTypes[20].Descriptor()
+}
+
+func (PlatformCallStatus) Type() protoreflect.EnumType {
+	return &file_runtime_proto_enumTypes[20]
+}
+
+func (x PlatformCallStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PlatformCallStatus.Descriptor instead.
+func (PlatformCallStatus) EnumDescriptor() ([]byte, []int) {
 	return file_runtime_proto_rawDescGZIP(), []int{20}
+}
+
+// 逐事件转交裁决（ADR-0011：入队即 ACK，业务拒绝发生在 ACK 之后）。ACCEPTED 含
+// 重复到达的幂等接受；REJECTED 为业务性永久拒绝（Stele 死信保留原文）；UNAVAILABLE
+// 为瞬时不可用（Stele 重试）。
+type EventDeliveryStatus int32
+
+const (
+	EventDeliveryStatus_EVENT_DELIVERY_STATUS_UNSPECIFIED EventDeliveryStatus = 0
+	EventDeliveryStatus_EVENT_DELIVERY_STATUS_ACCEPTED    EventDeliveryStatus = 1
+	EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED    EventDeliveryStatus = 2
+	EventDeliveryStatus_EVENT_DELIVERY_STATUS_UNAVAILABLE EventDeliveryStatus = 3
+)
+
+// Enum value maps for EventDeliveryStatus.
+var (
+	EventDeliveryStatus_name = map[int32]string{
+		0: "EVENT_DELIVERY_STATUS_UNSPECIFIED",
+		1: "EVENT_DELIVERY_STATUS_ACCEPTED",
+		2: "EVENT_DELIVERY_STATUS_REJECTED",
+		3: "EVENT_DELIVERY_STATUS_UNAVAILABLE",
+	}
+	EventDeliveryStatus_value = map[string]int32{
+		"EVENT_DELIVERY_STATUS_UNSPECIFIED": 0,
+		"EVENT_DELIVERY_STATUS_ACCEPTED":    1,
+		"EVENT_DELIVERY_STATUS_REJECTED":    2,
+		"EVENT_DELIVERY_STATUS_UNAVAILABLE": 3,
+	}
+)
+
+func (x EventDeliveryStatus) Enum() *EventDeliveryStatus {
+	p := new(EventDeliveryStatus)
+	*p = x
+	return p
+}
+
+func (x EventDeliveryStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EventDeliveryStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_runtime_proto_enumTypes[21].Descriptor()
+}
+
+func (EventDeliveryStatus) Type() protoreflect.EnumType {
+	return &file_runtime_proto_enumTypes[21]
+}
+
+func (x EventDeliveryStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EventDeliveryStatus.Descriptor instead.
+func (EventDeliveryStatus) EnumDescriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{21}
 }
 
 // 双向控制信封：所有消息（含 Hello）都携带 envelope 字段；领域载荷在 msg oneof。
@@ -1277,6 +1336,7 @@ type ControlEnvelope struct {
 	//	*ControlEnvelope_BeginToolCallAck
 	//	*ControlEnvelope_CompleteToolCall
 	//	*ControlEnvelope_CompleteToolCallAck
+	//	*ControlEnvelope_ExternalToolResult
 	Msg           isControlEnvelope_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1554,6 +1614,15 @@ func (x *ControlEnvelope) GetCompleteToolCallAck() *CompleteToolCallAck {
 	return nil
 }
 
+func (x *ControlEnvelope) GetExternalToolResult() *ExternalToolResult {
+	if x != nil {
+		if x, ok := x.Msg.(*ControlEnvelope_ExternalToolResult); ok {
+			return x.ExternalToolResult
+		}
+	}
+	return nil
+}
+
 type isControlEnvelope_Msg interface {
 	isControlEnvelope_Msg()
 }
@@ -1656,6 +1725,10 @@ type ControlEnvelope_CompleteToolCallAck struct {
 	CompleteToolCallAck *CompleteToolCallAck `protobuf:"bytes,37,opt,name=complete_tool_call_ack,json=completeToolCallAck,proto3,oneof"` // Quoin -> Plinth；提交裁决
 }
 
+type ControlEnvelope_ExternalToolResult struct {
+	ExternalToolResult *ExternalToolResult `protobuf:"bytes,56,opt,name=external_tool_result,json=externalToolResult,proto3,oneof"` // Quoin -> Plinth；QUOIN_ROUTED 工具经 Stele 执行后的封存结果（ADR-0011）
+}
+
 func (*ControlEnvelope_Hello) isControlEnvelope_Msg() {}
 
 func (*ControlEnvelope_HelloAck) isControlEnvelope_Msg() {}
@@ -1701,6 +1774,8 @@ func (*ControlEnvelope_BeginToolCallAck) isControlEnvelope_Msg() {}
 func (*ControlEnvelope_CompleteToolCall) isControlEnvelope_Msg() {}
 
 func (*ControlEnvelope_CompleteToolCallAck) isControlEnvelope_Msg() {}
+
+func (*ControlEnvelope_ExternalToolResult) isControlEnvelope_Msg() {}
 
 // 握手首帧：客户端证书已在 mTLS 握手中认证；本帧声明 slot/连接身份与完整 Proto
 // 权威契约指纹。
@@ -4126,6 +4201,110 @@ func (x *CompleteToolCallAck) GetDetail() string {
 	return ""
 }
 
+// QUOIN_ROUTED 工具的执行结果下发（ADR-0011）：Quoin 完成 BeginToolCall 授权后自行
+// 编排执行（Handler 构造请求 -> Stele 网关执行 -> 结果封存/Evidence 创建/长正文
+// Artifact 化），随后经本帧把已提交的规范结果推给 Plinth，supervisor 原样转发 worker
+// 作为 ToolResult。Quoin 已是权威封存方，本帧不产生新的提交裁决。
+type ExternalToolResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AttemptId     int64                  `protobuf:"varint,1,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
+	ToolCallId    int64                  `protobuf:"varint,2,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
+	Outcome       ToolCallOutcome        `protobuf:"varint,3,opt,name=outcome,proto3,enum=quoin.runtime.v1.ToolCallOutcome" json:"outcome,omitempty"`
+	Payload       *ResultPayload         `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"`                                    // succeeded 时必填（已封存的 committed payload）
+	ArtifactRef   *ArtifactRef           `protobuf:"bytes,5,opt,name=artifact_ref,json=artifactRef,proto3" json:"artifact_ref,omitempty"`         // 长正文溢出时携带
+	EvidenceIds   []int64                `protobuf:"varint,6,rep,packed,name=evidence_ids,json=evidenceIds,proto3" json:"evidence_ids,omitempty"` // Quoin 确定性创建的 Evidence
+	ErrorCode     string                 `protobuf:"bytes,7,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`               // failed/cancelled 时的稳定机器码
+	ErrorDetail   string                 `protobuf:"bytes,8,opt,name=error_detail,json=errorDetail,proto3" json:"error_detail,omitempty"`         // 非秘密、面向 Agent 的可操作说明
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExternalToolResult) Reset() {
+	*x = ExternalToolResult{}
+	mi := &file_runtime_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExternalToolResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExternalToolResult) ProtoMessage() {}
+
+func (x *ExternalToolResult) ProtoReflect() protoreflect.Message {
+	mi := &file_runtime_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExternalToolResult.ProtoReflect.Descriptor instead.
+func (*ExternalToolResult) Descriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *ExternalToolResult) GetAttemptId() int64 {
+	if x != nil {
+		return x.AttemptId
+	}
+	return 0
+}
+
+func (x *ExternalToolResult) GetToolCallId() int64 {
+	if x != nil {
+		return x.ToolCallId
+	}
+	return 0
+}
+
+func (x *ExternalToolResult) GetOutcome() ToolCallOutcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return ToolCallOutcome_TOOL_CALL_OUTCOME_UNSPECIFIED
+}
+
+func (x *ExternalToolResult) GetPayload() *ResultPayload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *ExternalToolResult) GetArtifactRef() *ArtifactRef {
+	if x != nil {
+		return x.ArtifactRef
+	}
+	return nil
+}
+
+func (x *ExternalToolResult) GetEvidenceIds() []int64 {
+	if x != nil {
+		return x.EvidenceIds
+	}
+	return nil
+}
+
+func (x *ExternalToolResult) GetErrorCode() string {
+	if x != nil {
+		return x.ErrorCode
+	}
+	return ""
+}
+
+func (x *ExternalToolResult) GetErrorDetail() string {
+	if x != nil {
+		return x.ErrorDetail
+	}
+	return ""
+}
+
 // grant 获取请求（supervisor-only，RUNTIME-GRANT-001..003）：必须携带派发时下发的
 // grant_id 与 Attempt/boot/epoch 上下文；Quoin 校验 Attempt Running 且绑定一致。
 type FetchCredentialGrantRequest struct {
@@ -4140,7 +4319,7 @@ type FetchCredentialGrantRequest struct {
 
 func (x *FetchCredentialGrantRequest) Reset() {
 	*x = FetchCredentialGrantRequest{}
-	mi := &file_runtime_proto_msgTypes[33]
+	mi := &file_runtime_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4152,7 +4331,7 @@ func (x *FetchCredentialGrantRequest) String() string {
 func (*FetchCredentialGrantRequest) ProtoMessage() {}
 
 func (x *FetchCredentialGrantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[33]
+	mi := &file_runtime_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4165,7 +4344,7 @@ func (x *FetchCredentialGrantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchCredentialGrantRequest.ProtoReflect.Descriptor instead.
 func (*FetchCredentialGrantRequest) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{33}
+	return file_runtime_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *FetchCredentialGrantRequest) GetGrantId() int64 {
@@ -4198,18 +4377,18 @@ func (x *FetchCredentialGrantRequest) GetConnectionEpoch() uint64 {
 
 // grant 响应：非秘密 revision 配置投影 + 解密后的类型化秘密。仅经 TLS 返回一次成功
 // 载荷；supervisor 只在 Attempt 内存中使用，完成即清除，不落盘、不进入日志/审计
-// （RUNTIME-GRANT-002/003）。secret oneof 按 connection_type 选择。
+// （RUNTIME-GRANT-002/003）。ADR-0011 后本 RPC 只服务 model_provider grant——
+// metrics 等外部平台凭据改由 Stele 经 SteleRelay.AcquireConnectionCredential 按需获取。
 type FetchCredentialGrantResponse struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
 	GrantId                int64                  `protobuf:"varint,1,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
 	AttemptId              int64                  `protobuf:"varint,2,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
 	ConnectionRevisionId   int64                  `protobuf:"varint,3,opt,name=connection_revision_id,json=connectionRevisionId,proto3" json:"connection_revision_id,omitempty"`       // connections.current_revision_id 绑定
 	CredentialGenerationId int64                  `protobuf:"varint,4,opt,name=credential_generation_id,json=credentialGenerationId,proto3" json:"credential_generation_id,omitempty"` // credential_generations.id 绑定
-	ConnectionType         string                 `protobuf:"bytes,5,opt,name=connection_type,json=connectionType,proto3" json:"connection_type,omitempty"`                            // "prometheus" | "thanos" | "model_provider"（connections.type）
-	RevisionConfigJson     []byte                 `protobuf:"bytes,6,opt,name=revision_config_json,json=revisionConfigJson,proto3" json:"revision_config_json,omitempty"`              // 非秘密类型化投影（ThanosConnectionNonSecret 等，DATA-CONN-005）
+	ConnectionType         string                 `protobuf:"bytes,5,opt,name=connection_type,json=connectionType,proto3" json:"connection_type,omitempty"`                            // "model_provider"（connections.type；ADR-0011 后仅此一类）
+	RevisionConfigJson     []byte                 `protobuf:"bytes,6,opt,name=revision_config_json,json=revisionConfigJson,proto3" json:"revision_config_json,omitempty"`              // 非秘密类型化投影（ModelConnectionNonSecret 等，DATA-CONN-005）
 	// Types that are valid to be assigned to Secret:
 	//
-	//	*FetchCredentialGrantResponse_Thanos
 	//	*FetchCredentialGrantResponse_ModelProvider
 	Secret        isFetchCredentialGrantResponse_Secret `protobuf_oneof:"secret"`
 	unknownFields protoimpl.UnknownFields
@@ -4218,7 +4397,7 @@ type FetchCredentialGrantResponse struct {
 
 func (x *FetchCredentialGrantResponse) Reset() {
 	*x = FetchCredentialGrantResponse{}
-	mi := &file_runtime_proto_msgTypes[34]
+	mi := &file_runtime_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4230,7 +4409,7 @@ func (x *FetchCredentialGrantResponse) String() string {
 func (*FetchCredentialGrantResponse) ProtoMessage() {}
 
 func (x *FetchCredentialGrantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[34]
+	mi := &file_runtime_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4243,7 +4422,7 @@ func (x *FetchCredentialGrantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchCredentialGrantResponse.ProtoReflect.Descriptor instead.
 func (*FetchCredentialGrantResponse) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{34}
+	return file_runtime_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *FetchCredentialGrantResponse) GetGrantId() int64 {
@@ -4295,15 +4474,6 @@ func (x *FetchCredentialGrantResponse) GetSecret() isFetchCredentialGrantRespons
 	return nil
 }
 
-func (x *FetchCredentialGrantResponse) GetThanos() *ThanosCredentialSecret {
-	if x != nil {
-		if x, ok := x.Secret.(*FetchCredentialGrantResponse_Thanos); ok {
-			return x.Thanos
-		}
-	}
-	return nil
-}
-
 func (x *FetchCredentialGrantResponse) GetModelProvider() *ModelProviderCredentialSecret {
 	if x != nil {
 		if x, ok := x.Secret.(*FetchCredentialGrantResponse_ModelProvider); ok {
@@ -4317,22 +4487,15 @@ type isFetchCredentialGrantResponse_Secret interface {
 	isFetchCredentialGrantResponse_Secret()
 }
 
-type FetchCredentialGrantResponse_Thanos struct {
-	Thanos *ThanosCredentialSecret `protobuf:"bytes,7,opt,name=thanos,proto3,oneof"`
-}
-
 type FetchCredentialGrantResponse_ModelProvider struct {
 	ModelProvider *ModelProviderCredentialSecret `protobuf:"bytes,9,opt,name=model_provider,json=modelProvider,proto3,oneof"`
 }
 
-func (*FetchCredentialGrantResponse_Thanos) isFetchCredentialGrantResponse_Secret() {}
-
 func (*FetchCredentialGrantResponse_ModelProvider) isFetchCredentialGrantResponse_Secret() {}
 
-// Prometheus-compatible connection credentials (Prometheus or Thanos) are
-// carried in the established `thanos` oneof slot; connection_type is the
-// authoritative product-type discriminator. Values exist only in supervisor
-// memory for the attempt and are never returned through the public API.
+// Prometheus-compatible connection credentials (Prometheus or Thanos). Used by
+// SteleRelay.AcquireConnectionCredential（ADR-0011）：Stele 只在本地缓存与出向执行中
+// 使用，绝不回传公开 API 或进入日志。
 type ThanosCredentialSecret struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Username      string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
@@ -4344,7 +4507,7 @@ type ThanosCredentialSecret struct {
 
 func (x *ThanosCredentialSecret) Reset() {
 	*x = ThanosCredentialSecret{}
-	mi := &file_runtime_proto_msgTypes[35]
+	mi := &file_runtime_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4356,7 +4519,7 @@ func (x *ThanosCredentialSecret) String() string {
 func (*ThanosCredentialSecret) ProtoMessage() {}
 
 func (x *ThanosCredentialSecret) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[35]
+	mi := &file_runtime_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4369,7 +4532,7 @@ func (x *ThanosCredentialSecret) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ThanosCredentialSecret.ProtoReflect.Descriptor instead.
 func (*ThanosCredentialSecret) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{35}
+	return file_runtime_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ThanosCredentialSecret) GetUsername() string {
@@ -4403,7 +4566,7 @@ type ModelProviderCredentialSecret struct {
 
 func (x *ModelProviderCredentialSecret) Reset() {
 	*x = ModelProviderCredentialSecret{}
-	mi := &file_runtime_proto_msgTypes[36]
+	mi := &file_runtime_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4415,7 +4578,7 @@ func (x *ModelProviderCredentialSecret) String() string {
 func (*ModelProviderCredentialSecret) ProtoMessage() {}
 
 func (x *ModelProviderCredentialSecret) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[36]
+	mi := &file_runtime_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4428,7 +4591,7 @@ func (x *ModelProviderCredentialSecret) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelProviderCredentialSecret.ProtoReflect.Descriptor instead.
 func (*ModelProviderCredentialSecret) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{36}
+	return file_runtime_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ModelProviderCredentialSecret) GetApiKey() string {
@@ -4454,7 +4617,7 @@ type ArtifactUploadFrame struct {
 
 func (x *ArtifactUploadFrame) Reset() {
 	*x = ArtifactUploadFrame{}
-	mi := &file_runtime_proto_msgTypes[37]
+	mi := &file_runtime_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4466,7 +4629,7 @@ func (x *ArtifactUploadFrame) String() string {
 func (*ArtifactUploadFrame) ProtoMessage() {}
 
 func (x *ArtifactUploadFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[37]
+	mi := &file_runtime_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4479,7 +4642,7 @@ func (x *ArtifactUploadFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactUploadFrame.ProtoReflect.Descriptor instead.
 func (*ArtifactUploadFrame) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{37}
+	return file_runtime_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ArtifactUploadFrame) GetFrame() isArtifactUploadFrame_Frame {
@@ -4560,7 +4723,7 @@ type ArtifactUploadHeader struct {
 
 func (x *ArtifactUploadHeader) Reset() {
 	*x = ArtifactUploadHeader{}
-	mi := &file_runtime_proto_msgTypes[38]
+	mi := &file_runtime_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4572,7 +4735,7 @@ func (x *ArtifactUploadHeader) String() string {
 func (*ArtifactUploadHeader) ProtoMessage() {}
 
 func (x *ArtifactUploadHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[38]
+	mi := &file_runtime_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4585,7 +4748,7 @@ func (x *ArtifactUploadHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactUploadHeader.ProtoReflect.Descriptor instead.
 func (*ArtifactUploadHeader) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{38}
+	return file_runtime_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ArtifactUploadHeader) GetUploadId() string {
@@ -4683,7 +4846,7 @@ type ArtifactUploadChunk struct {
 
 func (x *ArtifactUploadChunk) Reset() {
 	*x = ArtifactUploadChunk{}
-	mi := &file_runtime_proto_msgTypes[39]
+	mi := &file_runtime_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4695,7 +4858,7 @@ func (x *ArtifactUploadChunk) String() string {
 func (*ArtifactUploadChunk) ProtoMessage() {}
 
 func (x *ArtifactUploadChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[39]
+	mi := &file_runtime_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4708,7 +4871,7 @@ func (x *ArtifactUploadChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactUploadChunk.ProtoReflect.Descriptor instead.
 func (*ArtifactUploadChunk) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{39}
+	return file_runtime_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ArtifactUploadChunk) GetOffset() uint64 {
@@ -4735,7 +4898,7 @@ type ArtifactUploadEnd struct {
 
 func (x *ArtifactUploadEnd) Reset() {
 	*x = ArtifactUploadEnd{}
-	mi := &file_runtime_proto_msgTypes[40]
+	mi := &file_runtime_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4747,7 +4910,7 @@ func (x *ArtifactUploadEnd) String() string {
 func (*ArtifactUploadEnd) ProtoMessage() {}
 
 func (x *ArtifactUploadEnd) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[40]
+	mi := &file_runtime_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4760,7 +4923,7 @@ func (x *ArtifactUploadEnd) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactUploadEnd.ProtoReflect.Descriptor instead.
 func (*ArtifactUploadEnd) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{40}
+	return file_runtime_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ArtifactUploadEnd) GetUploadedSizeBytes() uint64 {
@@ -4783,7 +4946,7 @@ type ArtifactUploadResult struct {
 
 func (x *ArtifactUploadResult) Reset() {
 	*x = ArtifactUploadResult{}
-	mi := &file_runtime_proto_msgTypes[41]
+	mi := &file_runtime_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4795,7 +4958,7 @@ func (x *ArtifactUploadResult) String() string {
 func (*ArtifactUploadResult) ProtoMessage() {}
 
 func (x *ArtifactUploadResult) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[41]
+	mi := &file_runtime_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4808,7 +4971,7 @@ func (x *ArtifactUploadResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactUploadResult.ProtoReflect.Descriptor instead.
 func (*ArtifactUploadResult) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{41}
+	return file_runtime_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ArtifactUploadResult) GetUploadId() string {
@@ -4856,7 +5019,7 @@ type ArtifactReadTextRequest struct {
 
 func (x *ArtifactReadTextRequest) Reset() {
 	*x = ArtifactReadTextRequest{}
-	mi := &file_runtime_proto_msgTypes[42]
+	mi := &file_runtime_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4868,7 +5031,7 @@ func (x *ArtifactReadTextRequest) String() string {
 func (*ArtifactReadTextRequest) ProtoMessage() {}
 
 func (x *ArtifactReadTextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[42]
+	mi := &file_runtime_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4881,7 +5044,7 @@ func (x *ArtifactReadTextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactReadTextRequest.ProtoReflect.Descriptor instead.
 func (*ArtifactReadTextRequest) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{42}
+	return file_runtime_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *ArtifactReadTextRequest) GetAttemptId() int64 {
@@ -4943,7 +5106,7 @@ type ArtifactReadTextResponse struct {
 
 func (x *ArtifactReadTextResponse) Reset() {
 	*x = ArtifactReadTextResponse{}
-	mi := &file_runtime_proto_msgTypes[43]
+	mi := &file_runtime_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4955,7 +5118,7 @@ func (x *ArtifactReadTextResponse) String() string {
 func (*ArtifactReadTextResponse) ProtoMessage() {}
 
 func (x *ArtifactReadTextResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[43]
+	mi := &file_runtime_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4968,7 +5131,7 @@ func (x *ArtifactReadTextResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactReadTextResponse.ProtoReflect.Descriptor instead.
 func (*ArtifactReadTextResponse) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{43}
+	return file_runtime_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *ArtifactReadTextResponse) GetArtifactId() int64 {
@@ -5049,7 +5212,7 @@ type ArtifactGrepTextRequest struct {
 
 func (x *ArtifactGrepTextRequest) Reset() {
 	*x = ArtifactGrepTextRequest{}
-	mi := &file_runtime_proto_msgTypes[44]
+	mi := &file_runtime_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5061,7 +5224,7 @@ func (x *ArtifactGrepTextRequest) String() string {
 func (*ArtifactGrepTextRequest) ProtoMessage() {}
 
 func (x *ArtifactGrepTextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[44]
+	mi := &file_runtime_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5074,7 +5237,7 @@ func (x *ArtifactGrepTextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactGrepTextRequest.ProtoReflect.Descriptor instead.
 func (*ArtifactGrepTextRequest) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{44}
+	return file_runtime_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ArtifactGrepTextRequest) GetAttemptId() int64 {
@@ -5136,7 +5299,7 @@ type ArtifactTextMatch struct {
 
 func (x *ArtifactTextMatch) Reset() {
 	*x = ArtifactTextMatch{}
-	mi := &file_runtime_proto_msgTypes[45]
+	mi := &file_runtime_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5148,7 +5311,7 @@ func (x *ArtifactTextMatch) String() string {
 func (*ArtifactTextMatch) ProtoMessage() {}
 
 func (x *ArtifactTextMatch) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[45]
+	mi := &file_runtime_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5161,7 +5324,7 @@ func (x *ArtifactTextMatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactTextMatch.ProtoReflect.Descriptor instead.
 func (*ArtifactTextMatch) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{45}
+	return file_runtime_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *ArtifactTextMatch) GetLine() uint64 {
@@ -5193,7 +5356,7 @@ type ArtifactGrepTextResponse struct {
 
 func (x *ArtifactGrepTextResponse) Reset() {
 	*x = ArtifactGrepTextResponse{}
-	mi := &file_runtime_proto_msgTypes[46]
+	mi := &file_runtime_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5205,7 +5368,7 @@ func (x *ArtifactGrepTextResponse) String() string {
 func (*ArtifactGrepTextResponse) ProtoMessage() {}
 
 func (x *ArtifactGrepTextResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[46]
+	mi := &file_runtime_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5218,7 +5381,7 @@ func (x *ArtifactGrepTextResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactGrepTextResponse.ProtoReflect.Descriptor instead.
 func (*ArtifactGrepTextResponse) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{46}
+	return file_runtime_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *ArtifactGrepTextResponse) GetArtifactId() int64 {
@@ -5270,6 +5433,690 @@ func (x *ArtifactGrepTextResponse) GetMediaType() string {
 	return ""
 }
 
+// 网关双向信封。message_id 当前连接内按方向单调递增且唯一；correlation_id 关联
+// ExecutePlatformCall 请求-响应对（0 = 无）；boot_id 除 SteleHello 外必须等于接收流
+// 上下文。
+type SteleEnvelope struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MessageId     uint64                 `protobuf:"varint,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	CorrelationId uint64                 `protobuf:"varint,2,opt,name=correlation_id,json=correlationId,proto3" json:"correlation_id,omitempty"` // 请求-响应对关联；0 = 无
+	BootId        string                 `protobuf:"bytes,3,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`                       // 除 SteleHello 外必须等于接收流上下文
+	// Types that are valid to be assigned to Msg:
+	//
+	//	*SteleEnvelope_Hello
+	//	*SteleEnvelope_HelloAck
+	//	*SteleEnvelope_Heartbeat
+	//	*SteleEnvelope_Execute
+	//	*SteleEnvelope_ExecuteResult
+	//	*SteleEnvelope_GoAway
+	Msg           isSteleEnvelope_Msg `protobuf_oneof:"msg"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SteleEnvelope) Reset() {
+	*x = SteleEnvelope{}
+	mi := &file_runtime_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SteleEnvelope) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SteleEnvelope) ProtoMessage() {}
+
+func (x *SteleEnvelope) ProtoReflect() protoreflect.Message {
+	mi := &file_runtime_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SteleEnvelope.ProtoReflect.Descriptor instead.
+func (*SteleEnvelope) Descriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{48}
+}
+
+func (x *SteleEnvelope) GetMessageId() uint64 {
+	if x != nil {
+		return x.MessageId
+	}
+	return 0
+}
+
+func (x *SteleEnvelope) GetCorrelationId() uint64 {
+	if x != nil {
+		return x.CorrelationId
+	}
+	return 0
+}
+
+func (x *SteleEnvelope) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *SteleEnvelope) GetMsg() isSteleEnvelope_Msg {
+	if x != nil {
+		return x.Msg
+	}
+	return nil
+}
+
+func (x *SteleEnvelope) GetHello() *SteleHello {
+	if x != nil {
+		if x, ok := x.Msg.(*SteleEnvelope_Hello); ok {
+			return x.Hello
+		}
+	}
+	return nil
+}
+
+func (x *SteleEnvelope) GetHelloAck() *SteleHelloAck {
+	if x != nil {
+		if x, ok := x.Msg.(*SteleEnvelope_HelloAck); ok {
+			return x.HelloAck
+		}
+	}
+	return nil
+}
+
+func (x *SteleEnvelope) GetHeartbeat() *SteleHeartbeat {
+	if x != nil {
+		if x, ok := x.Msg.(*SteleEnvelope_Heartbeat); ok {
+			return x.Heartbeat
+		}
+	}
+	return nil
+}
+
+func (x *SteleEnvelope) GetExecute() *ExecutePlatformCall {
+	if x != nil {
+		if x, ok := x.Msg.(*SteleEnvelope_Execute); ok {
+			return x.Execute
+		}
+	}
+	return nil
+}
+
+func (x *SteleEnvelope) GetExecuteResult() *ExecutePlatformCallResult {
+	if x != nil {
+		if x, ok := x.Msg.(*SteleEnvelope_ExecuteResult); ok {
+			return x.ExecuteResult
+		}
+	}
+	return nil
+}
+
+func (x *SteleEnvelope) GetGoAway() *GoAway {
+	if x != nil {
+		if x, ok := x.Msg.(*SteleEnvelope_GoAway); ok {
+			return x.GoAway
+		}
+	}
+	return nil
+}
+
+type isSteleEnvelope_Msg interface {
+	isSteleEnvelope_Msg()
+}
+
+type SteleEnvelope_Hello struct {
+	Hello *SteleHello `protobuf:"bytes,10,opt,name=hello,proto3,oneof"` // Stele -> Quoin；首帧
+}
+
+type SteleEnvelope_HelloAck struct {
+	HelloAck *SteleHelloAck `protobuf:"bytes,11,opt,name=hello_ack,json=helloAck,proto3,oneof"` // Quoin -> Stele；握手裁决
+}
+
+type SteleEnvelope_Heartbeat struct {
+	Heartbeat *SteleHeartbeat `protobuf:"bytes,12,opt,name=heartbeat,proto3,oneof"` // 双向；只更新瞬时投影
+}
+
+type SteleEnvelope_Execute struct {
+	Execute *ExecutePlatformCall `protobuf:"bytes,13,opt,name=execute,proto3,oneof"` // Quoin -> Stele；出向平台执行请求
+}
+
+type SteleEnvelope_ExecuteResult struct {
+	ExecuteResult *ExecutePlatformCallResult `protobuf:"bytes,14,opt,name=execute_result,json=executeResult,proto3,oneof"` // Stele -> Quoin；执行结果
+}
+
+type SteleEnvelope_GoAway struct {
+	GoAway *GoAway `protobuf:"bytes,15,opt,name=go_away,json=goAway,proto3,oneof"` // Quoin -> Stele；尽力而为的停机通知
+}
+
+func (*SteleEnvelope_Hello) isSteleEnvelope_Msg() {}
+
+func (*SteleEnvelope_HelloAck) isSteleEnvelope_Msg() {}
+
+func (*SteleEnvelope_Heartbeat) isSteleEnvelope_Msg() {}
+
+func (*SteleEnvelope_Execute) isSteleEnvelope_Msg() {}
+
+func (*SteleEnvelope_ExecuteResult) isSteleEnvelope_Msg() {}
+
+func (*SteleEnvelope_GoAway) isSteleEnvelope_Msg() {}
+
+// 网关握手首帧：客户端证书已在 mTLS 握手中认证（CN=stele）。
+type SteleHello struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	BootId              string                 `protobuf:"bytes,1,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`                                        // 每次进程启动重新生成
+	ConnectionEpoch     uint64                 `protobuf:"varint,2,opt,name=connection_epoch,json=connectionEpoch,proto3" json:"connection_epoch,omitempty"`            // 每次连接递增，>= 1
+	ContractFingerprint string                 `protobuf:"bytes,3,opt,name=contract_fingerprint,json=contractFingerprint,proto3" json:"contract_fingerprint,omitempty"` // 完整权威集合 SHA-256，小写 hex
+	ReleaseVersion      string                 `protobuf:"bytes,4,opt,name=release_version,json=releaseVersion,proto3" json:"release_version,omitempty"`                // 展示与溯源
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *SteleHello) Reset() {
+	*x = SteleHello{}
+	mi := &file_runtime_proto_msgTypes[49]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SteleHello) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SteleHello) ProtoMessage() {}
+
+func (x *SteleHello) ProtoReflect() protoreflect.Message {
+	mi := &file_runtime_proto_msgTypes[49]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SteleHello.ProtoReflect.Descriptor instead.
+func (*SteleHello) Descriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{49}
+}
+
+func (x *SteleHello) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *SteleHello) GetConnectionEpoch() uint64 {
+	if x != nil {
+		return x.ConnectionEpoch
+	}
+	return 0
+}
+
+func (x *SteleHello) GetContractFingerprint() string {
+	if x != nil {
+		return x.ContractFingerprint
+	}
+	return ""
+}
+
+func (x *SteleHello) GetReleaseVersion() string {
+	if x != nil {
+		return x.ReleaseVersion
+	}
+	return ""
+}
+
+type SteleHelloAck struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	Detail        string                 `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"` // 拒绝时的非权威说明
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SteleHelloAck) Reset() {
+	*x = SteleHelloAck{}
+	mi := &file_runtime_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SteleHelloAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SteleHelloAck) ProtoMessage() {}
+
+func (x *SteleHelloAck) ProtoReflect() protoreflect.Message {
+	mi := &file_runtime_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SteleHelloAck.ProtoReflect.Descriptor instead.
+func (*SteleHelloAck) Descriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{50}
+}
+
+func (x *SteleHelloAck) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
+func (x *SteleHelloAck) GetDetail() string {
+	if x != nil {
+		return x.Detail
+	}
+	return ""
+}
+
+type SteleHeartbeat struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"` // 当前连接内单调递增
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SteleHeartbeat) Reset() {
+	*x = SteleHeartbeat{}
+	mi := &file_runtime_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SteleHeartbeat) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SteleHeartbeat) ProtoMessage() {}
+
+func (x *SteleHeartbeat) ProtoReflect() protoreflect.Message {
+	mi := &file_runtime_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SteleHeartbeat.ProtoReflect.Descriptor instead.
+func (*SteleHeartbeat) Descriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{51}
+}
+
+func (x *SteleHeartbeat) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+// 出向平台执行请求：Quoin 的 Tool Handler 构造协议请求（方法 + 相对路径 + 正文），
+// Stele 负责连接材料解析（endpoint + 凭证注入）、限流与传输执行。URL 由已配置连接的
+// endpoint 与相对路径拼装，本消息不承载 scheme/host（SSRF 面由此收敛）。call_id 用于
+// 流内配对；Quoin 在流断开后重发同一 call_id 不保证恰好一次——出向工具以幂等读为主，
+// 副作用语义由具体工具契约自行约束。
+type ExecutePlatformCall struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	CallId               string                 `protobuf:"bytes,1,opt,name=call_id,json=callId,proto3" json:"call_id,omitempty"`                                                               // Quoin 生成的请求标识；correlation_id 配对
+	ConnectionId         int64                  `protobuf:"varint,2,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`                                            // connections.id；Stele 据此解析连接材料
+	ConnectionRevisionId int64                  `protobuf:"varint,3,opt,name=connection_revision_id,json=connectionRevisionId,proto3" json:"connection_revision_id,omitempty"`                  // 冻结 grant 绑定的 revision；与 Stele 缓存不一致时重新 Acquire
+	Method               string                 `protobuf:"bytes,4,opt,name=method,proto3" json:"method,omitempty"`                                                                             // GET | POST（封闭）
+	Path                 string                 `protobuf:"bytes,5,opt,name=path,proto3" json:"path,omitempty"`                                                                                 // 相对路径（以 / 开始，不含 scheme/host）
+	Query                string                 `protobuf:"bytes,6,opt,name=query,proto3" json:"query,omitempty"`                                                                               // 原样 query string（可空）
+	Headers              map[string]string      `protobuf:"bytes,7,rep,name=headers,proto3" json:"headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // 附加非凭证头；认证头由 Stele 注入
+	Body                 []byte                 `protobuf:"bytes,8,opt,name=body,proto3" json:"body,omitempty"`                                                                                 // GET 必须为空
+	TimeoutMs            uint32                 `protobuf:"varint,9,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`                                                     // > 0，部署上限
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *ExecutePlatformCall) Reset() {
+	*x = ExecutePlatformCall{}
+	mi := &file_runtime_proto_msgTypes[52]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExecutePlatformCall) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExecutePlatformCall) ProtoMessage() {}
+
+func (x *ExecutePlatformCall) ProtoReflect() protoreflect.Message {
+	mi := &file_runtime_proto_msgTypes[52]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExecutePlatformCall.ProtoReflect.Descriptor instead.
+func (*ExecutePlatformCall) Descriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{52}
+}
+
+func (x *ExecutePlatformCall) GetCallId() string {
+	if x != nil {
+		return x.CallId
+	}
+	return ""
+}
+
+func (x *ExecutePlatformCall) GetConnectionId() int64 {
+	if x != nil {
+		return x.ConnectionId
+	}
+	return 0
+}
+
+func (x *ExecutePlatformCall) GetConnectionRevisionId() int64 {
+	if x != nil {
+		return x.ConnectionRevisionId
+	}
+	return 0
+}
+
+func (x *ExecutePlatformCall) GetMethod() string {
+	if x != nil {
+		return x.Method
+	}
+	return ""
+}
+
+func (x *ExecutePlatformCall) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ExecutePlatformCall) GetQuery() string {
+	if x != nil {
+		return x.Query
+	}
+	return ""
+}
+
+func (x *ExecutePlatformCall) GetHeaders() map[string]string {
+	if x != nil {
+		return x.Headers
+	}
+	return nil
+}
+
+func (x *ExecutePlatformCall) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *ExecutePlatformCall) GetTimeoutMs() uint32 {
+	if x != nil {
+		return x.TimeoutMs
+	}
+	return 0
+}
+
+// 执行结果。SUCCEEDED 表示平台返回了 HTTP 响应（含平台侧 4xx/5xx，语义由 Quoin 侧
+// Handler 解释）；非 SUCCEEDED 是 Stele 网关自身的判定：配额、凭证、连通性。
+type ExecutePlatformCallResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CallId        string                 `protobuf:"bytes,1,opt,name=call_id,json=callId,proto3" json:"call_id,omitempty"`
+	Status        PlatformCallStatus     `protobuf:"varint,2,opt,name=status,proto3,enum=quoin.runtime.v1.PlatformCallStatus" json:"status,omitempty"`
+	HttpStatus    int32                  `protobuf:"varint,3,opt,name=http_status,json=httpStatus,proto3" json:"http_status,omitempty"` // SUCCEEDED 时有效
+	Body          []byte                 `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`                                // 原始响应体（SUCCEEDED 时）
+	LatencyMs     uint64                 `protobuf:"varint,5,opt,name=latency_ms,json=latencyMs,proto3" json:"latency_ms,omitempty"`
+	ErrorCode     string                 `protobuf:"bytes,6,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`       // 非 SUCCEEDED 时的稳定机器码
+	ErrorDetail   string                 `protobuf:"bytes,7,opt,name=error_detail,json=errorDetail,proto3" json:"error_detail,omitempty"` // 非秘密说明
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExecutePlatformCallResult) Reset() {
+	*x = ExecutePlatformCallResult{}
+	mi := &file_runtime_proto_msgTypes[53]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExecutePlatformCallResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExecutePlatformCallResult) ProtoMessage() {}
+
+func (x *ExecutePlatformCallResult) ProtoReflect() protoreflect.Message {
+	mi := &file_runtime_proto_msgTypes[53]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExecutePlatformCallResult.ProtoReflect.Descriptor instead.
+func (*ExecutePlatformCallResult) Descriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{53}
+}
+
+func (x *ExecutePlatformCallResult) GetCallId() string {
+	if x != nil {
+		return x.CallId
+	}
+	return ""
+}
+
+func (x *ExecutePlatformCallResult) GetStatus() PlatformCallStatus {
+	if x != nil {
+		return x.Status
+	}
+	return PlatformCallStatus_PLATFORM_CALL_STATUS_UNSPECIFIED
+}
+
+func (x *ExecutePlatformCallResult) GetHttpStatus() int32 {
+	if x != nil {
+		return x.HttpStatus
+	}
+	return 0
+}
+
+func (x *ExecutePlatformCallResult) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *ExecutePlatformCallResult) GetLatencyMs() uint64 {
+	if x != nil {
+		return x.LatencyMs
+	}
+	return 0
+}
+
+func (x *ExecutePlatformCallResult) GetErrorCode() string {
+	if x != nil {
+		return x.ErrorCode
+	}
+	return ""
+}
+
+func (x *ExecutePlatformCallResult) GetErrorDetail() string {
+	if x != nil {
+		return x.ErrorDetail
+	}
+	return ""
+}
+
+type AcquireConnectionCredentialRequest struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	ConnectionId        int64                  `protobuf:"varint,1,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`
+	ContractFingerprint string                 `protobuf:"bytes,2,opt,name=contract_fingerprint,json=contractFingerprint,proto3" json:"contract_fingerprint,omitempty"` // 完整权威集合 SHA-256，小写 hex
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *AcquireConnectionCredentialRequest) Reset() {
+	*x = AcquireConnectionCredentialRequest{}
+	mi := &file_runtime_proto_msgTypes[54]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AcquireConnectionCredentialRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AcquireConnectionCredentialRequest) ProtoMessage() {}
+
+func (x *AcquireConnectionCredentialRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_runtime_proto_msgTypes[54]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AcquireConnectionCredentialRequest.ProtoReflect.Descriptor instead.
+func (*AcquireConnectionCredentialRequest) Descriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{54}
+}
+
+func (x *AcquireConnectionCredentialRequest) GetConnectionId() int64 {
+	if x != nil {
+		return x.ConnectionId
+	}
+	return 0
+}
+
+func (x *AcquireConnectionCredentialRequest) GetContractFingerprint() string {
+	if x != nil {
+		return x.ContractFingerprint
+	}
+	return ""
+}
+
+// 连接材料响应：非秘密配置投影（含 endpoint）+ 解密秘密。Quoin 只写不读（ADR-0011）：
+// 解密仅为按需投递，Quoin 自身不使用、不缓存。Stele 缓存于本地状态，动态凭证
+// （token 刷新等）生命周期管理归 Stele。
+type AcquireConnectionCredentialResponse struct {
+	state                  protoimpl.MessageState  `protogen:"open.v1"`
+	ConnectionId           int64                   `protobuf:"varint,1,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`
+	ConnectionRevisionId   int64                   `protobuf:"varint,2,opt,name=connection_revision_id,json=connectionRevisionId,proto3" json:"connection_revision_id,omitempty"`
+	CredentialGenerationId int64                   `protobuf:"varint,3,opt,name=credential_generation_id,json=credentialGenerationId,proto3" json:"credential_generation_id,omitempty"`
+	ConnectionType         string                  `protobuf:"bytes,4,opt,name=connection_type,json=connectionType,proto3" json:"connection_type,omitempty"`               // "prometheus" | "thanos"（connections.type）
+	RevisionConfigJson     []byte                  `protobuf:"bytes,5,opt,name=revision_config_json,json=revisionConfigJson,proto3" json:"revision_config_json,omitempty"` // 非秘密类型化投影（ThanosConnectionNonSecret，DATA-CONN-005）
+	Thanos                 *ThanosCredentialSecret `protobuf:"bytes,6,opt,name=thanos,proto3" json:"thanos,omitempty"`                                                     // prometheus/thanos 共用；connection_type 为权威判别
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *AcquireConnectionCredentialResponse) Reset() {
+	*x = AcquireConnectionCredentialResponse{}
+	mi := &file_runtime_proto_msgTypes[55]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AcquireConnectionCredentialResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AcquireConnectionCredentialResponse) ProtoMessage() {}
+
+func (x *AcquireConnectionCredentialResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_runtime_proto_msgTypes[55]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AcquireConnectionCredentialResponse.ProtoReflect.Descriptor instead.
+func (*AcquireConnectionCredentialResponse) Descriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{55}
+}
+
+func (x *AcquireConnectionCredentialResponse) GetConnectionId() int64 {
+	if x != nil {
+		return x.ConnectionId
+	}
+	return 0
+}
+
+func (x *AcquireConnectionCredentialResponse) GetConnectionRevisionId() int64 {
+	if x != nil {
+		return x.ConnectionRevisionId
+	}
+	return 0
+}
+
+func (x *AcquireConnectionCredentialResponse) GetCredentialGenerationId() int64 {
+	if x != nil {
+		return x.CredentialGenerationId
+	}
+	return 0
+}
+
+func (x *AcquireConnectionCredentialResponse) GetConnectionType() string {
+	if x != nil {
+		return x.ConnectionType
+	}
+	return ""
+}
+
+func (x *AcquireConnectionCredentialResponse) GetRevisionConfigJson() []byte {
+	if x != nil {
+		return x.RevisionConfigJson
+	}
+	return nil
+}
+
+func (x *AcquireConnectionCredentialResponse) GetThanos() *ThanosCredentialSecret {
+	if x != nil {
+		return x.Thanos
+	}
+	return nil
+}
+
 // 快照请求：contract_fingerprint 必须与 Quoin 的完整 Proto 权威契约相同。
 type GetCredentialSnapshotRequest struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
@@ -5280,7 +6127,7 @@ type GetCredentialSnapshotRequest struct {
 
 func (x *GetCredentialSnapshotRequest) Reset() {
 	*x = GetCredentialSnapshotRequest{}
-	mi := &file_runtime_proto_msgTypes[47]
+	mi := &file_runtime_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5292,7 +6139,7 @@ func (x *GetCredentialSnapshotRequest) String() string {
 func (*GetCredentialSnapshotRequest) ProtoMessage() {}
 
 func (x *GetCredentialSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[47]
+	mi := &file_runtime_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5305,7 +6152,7 @@ func (x *GetCredentialSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCredentialSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*GetCredentialSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{47}
+	return file_runtime_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *GetCredentialSnapshotRequest) GetContractFingerprint() string {
@@ -5315,11 +6162,11 @@ func (x *GetCredentialSnapshotRequest) GetContractFingerprint() string {
 	return ""
 }
 
-// 版本化只读快照：Stele 仅内存缓存；Deliver 必须回传 snapshot_version
+// 版本化只读快照：Stele 仅内存缓存；DeliverEvents 必须回传 snapshot_version
 // （DATA-ALERT-008）。contract_fingerprint 供 Stele 复核通信准入。
 type GetCredentialSnapshotResponse struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
-	SnapshotVersion     uint64                 `protobuf:"varint,1,opt,name=snapshot_version,json=snapshotVersion,proto3" json:"snapshot_version,omitempty"` // 单调递增；Deliver 回传
+	SnapshotVersion     uint64                 `protobuf:"varint,1,opt,name=snapshot_version,json=snapshotVersion,proto3" json:"snapshot_version,omitempty"` // 单调递增；DeliverEvents 回传
 	Sources             []*AlertSourceSnapshot `protobuf:"bytes,2,rep,name=sources,proto3" json:"sources,omitempty"`
 	ContractFingerprint string                 `protobuf:"bytes,3,opt,name=contract_fingerprint,json=contractFingerprint,proto3" json:"contract_fingerprint,omitempty"` // Quoin 当前完整 Proto 权威契约 SHA-256
 	unknownFields       protoimpl.UnknownFields
@@ -5328,7 +6175,7 @@ type GetCredentialSnapshotResponse struct {
 
 func (x *GetCredentialSnapshotResponse) Reset() {
 	*x = GetCredentialSnapshotResponse{}
-	mi := &file_runtime_proto_msgTypes[48]
+	mi := &file_runtime_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5340,7 +6187,7 @@ func (x *GetCredentialSnapshotResponse) String() string {
 func (*GetCredentialSnapshotResponse) ProtoMessage() {}
 
 func (x *GetCredentialSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[48]
+	mi := &file_runtime_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5353,7 +6200,7 @@ func (x *GetCredentialSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCredentialSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*GetCredentialSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{48}
+	return file_runtime_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *GetCredentialSnapshotResponse) GetSnapshotVersion() uint64 {
@@ -5382,7 +6229,7 @@ type AlertSourceSnapshot struct {
 	state         protoimpl.MessageState   `protogen:"open.v1"`
 	SourceId      int64                    `protobuf:"varint,1,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"` // alert_sources.id
 	SourceKey     string                   `protobuf:"bytes,2,opt,name=source_key,json=sourceKey,proto3" json:"source_key,omitempty"`
-	Protocol      string                   `protobuf:"bytes,3,opt,name=protocol,proto3" json:"protocol,omitempty"` // v1: alertmanager
+	Protocol      string                   `protobuf:"bytes,3,opt,name=protocol,proto3" json:"protocol,omitempty"` // v1: alertmanager（= EventSource.Kind()）
 	Enabled       bool                     `protobuf:"varint,4,opt,name=enabled,proto3" json:"enabled,omitempty"`
 	Credentials   []*CredentialDigestEntry `protobuf:"bytes,5,rep,name=credentials,proto3" json:"credentials,omitempty"` // 仅 active 凭据（<=2）
 	unknownFields protoimpl.UnknownFields
@@ -5391,7 +6238,7 @@ type AlertSourceSnapshot struct {
 
 func (x *AlertSourceSnapshot) Reset() {
 	*x = AlertSourceSnapshot{}
-	mi := &file_runtime_proto_msgTypes[49]
+	mi := &file_runtime_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5403,7 +6250,7 @@ func (x *AlertSourceSnapshot) String() string {
 func (*AlertSourceSnapshot) ProtoMessage() {}
 
 func (x *AlertSourceSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[49]
+	mi := &file_runtime_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5416,7 +6263,7 @@ func (x *AlertSourceSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AlertSourceSnapshot.ProtoReflect.Descriptor instead.
 func (*AlertSourceSnapshot) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{49}
+	return file_runtime_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *AlertSourceSnapshot) GetSourceId() int64 {
@@ -5454,7 +6301,7 @@ func (x *AlertSourceSnapshot) GetCredentials() []*CredentialDigestEntry {
 	return nil
 }
 
-// active 凭据 digest 条目：Stele 提交 Delivery 时回传 credential_id 与快照版本。
+// active 凭据 digest 条目：Stele 提交事件时回传 credential_id 与快照版本。
 type CredentialDigestEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	CredentialId  int64                  `protobuf:"varint,1,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"` // alert_source_credentials.id
@@ -5465,7 +6312,7 @@ type CredentialDigestEntry struct {
 
 func (x *CredentialDigestEntry) Reset() {
 	*x = CredentialDigestEntry{}
-	mi := &file_runtime_proto_msgTypes[50]
+	mi := &file_runtime_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5477,7 +6324,7 @@ func (x *CredentialDigestEntry) String() string {
 func (*CredentialDigestEntry) ProtoMessage() {}
 
 func (x *CredentialDigestEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[50]
+	mi := &file_runtime_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5490,7 +6337,7 @@ func (x *CredentialDigestEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CredentialDigestEntry.ProtoReflect.Descriptor instead.
 func (*CredentialDigestEntry) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{50}
+	return file_runtime_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *CredentialDigestEntry) GetCredentialId() int64 {
@@ -5507,37 +6354,31 @@ func (x *CredentialDigestEntry) GetDigest() []byte {
 	return nil
 }
 
-// Delivery 转交：精确原始 body；relay_id 幂等；contract_fingerprint 必填且必须与
-// Quoin 的完整 Proto 权威契约相同（CONTEXT「Stele」、RUNTIME-STELE-003/005）。
-type DeliveryRelayRequest struct {
-	state                     protoimpl.MessageState `protogen:"open.v1"`
-	RelayId                   string                 `protobuf:"bytes,1,opt,name=relay_id,json=relayId,proto3" json:"relay_id,omitempty"` // Stele 每次外部请求生成；内部重试复用
-	SourceId                  int64                  `protobuf:"varint,2,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
-	CredentialId              int64                  `protobuf:"varint,3,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"`                                          // 必填（DATA-ALERT-008）
-	CredentialSnapshotVersion uint64                 `protobuf:"varint,4,opt,name=credential_snapshot_version,json=credentialSnapshotVersion,proto3" json:"credential_snapshot_version,omitempty"` // 必填，>= 1（DATA-ALERT-008）
-	Protocol                  string                 `protobuf:"bytes,5,opt,name=protocol,proto3" json:"protocol,omitempty"`                                                                       // v1: alertmanager
-	Body                      []byte                 `protobuf:"bytes,6,opt,name=body,proto3" json:"body,omitempty"`                                                                               // 精确原始请求体（可能非 UTF-8）
-	ReceivedAt                *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=received_at,json=receivedAt,proto3" json:"received_at,omitempty"`                                                 // Stele 收到外部请求的时间
-	ContractFingerprint       string                 `protobuf:"bytes,8,opt,name=contract_fingerprint,json=contractFingerprint,proto3" json:"contract_fingerprint,omitempty"`                      // 完整权威集合 SHA-256，小写 hex
-	unknownFields             protoimpl.UnknownFields
-	sizeCache                 protoimpl.SizeCache
+// 事件批量转交：Stele 本地队列的转发循环调用。event_id 幂等；结果逐事件裁决，
+// ACCEPTED/REJECTED 后 Stele 删除本地队列条目，UNAVAILABLE 稍后重试、超限入死信。
+type DeliverEventsRequest struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	ContractFingerprint string                 `protobuf:"bytes,1,opt,name=contract_fingerprint,json=contractFingerprint,proto3" json:"contract_fingerprint,omitempty"` // 完整权威集合 SHA-256，小写 hex
+	Events              []*RelayEvent          `protobuf:"bytes,2,rep,name=events,proto3" json:"events,omitempty"`                                                      // 逐事件独立事务裁决
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
-func (x *DeliveryRelayRequest) Reset() {
-	*x = DeliveryRelayRequest{}
-	mi := &file_runtime_proto_msgTypes[51]
+func (x *DeliverEventsRequest) Reset() {
+	*x = DeliverEventsRequest{}
+	mi := &file_runtime_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *DeliveryRelayRequest) String() string {
+func (x *DeliverEventsRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*DeliveryRelayRequest) ProtoMessage() {}
+func (*DeliverEventsRequest) ProtoMessage() {}
 
-func (x *DeliveryRelayRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[51]
+func (x *DeliverEventsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_runtime_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5548,92 +6389,56 @@ func (x *DeliveryRelayRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use DeliveryRelayRequest.ProtoReflect.Descriptor instead.
-func (*DeliveryRelayRequest) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{51}
+// Deprecated: Use DeliverEventsRequest.ProtoReflect.Descriptor instead.
+func (*DeliverEventsRequest) Descriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{60}
 }
 
-func (x *DeliveryRelayRequest) GetRelayId() string {
-	if x != nil {
-		return x.RelayId
-	}
-	return ""
-}
-
-func (x *DeliveryRelayRequest) GetSourceId() int64 {
-	if x != nil {
-		return x.SourceId
-	}
-	return 0
-}
-
-func (x *DeliveryRelayRequest) GetCredentialId() int64 {
-	if x != nil {
-		return x.CredentialId
-	}
-	return 0
-}
-
-func (x *DeliveryRelayRequest) GetCredentialSnapshotVersion() uint64 {
-	if x != nil {
-		return x.CredentialSnapshotVersion
-	}
-	return 0
-}
-
-func (x *DeliveryRelayRequest) GetProtocol() string {
-	if x != nil {
-		return x.Protocol
-	}
-	return ""
-}
-
-func (x *DeliveryRelayRequest) GetBody() []byte {
-	if x != nil {
-		return x.Body
-	}
-	return nil
-}
-
-func (x *DeliveryRelayRequest) GetReceivedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.ReceivedAt
-	}
-	return nil
-}
-
-func (x *DeliveryRelayRequest) GetContractFingerprint() string {
+func (x *DeliverEventsRequest) GetContractFingerprint() string {
 	if x != nil {
 		return x.ContractFingerprint
 	}
 	return ""
 }
 
-// Delivery 结果：ACCEPTED=204；REJECTED=4xx 不重试；UNAVAILABLE=5xx 重试
-// （RUNTIME-STELE-004）。
-type DeliveryRelayResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Status        DeliveryStatus         `protobuf:"varint,1,opt,name=status,proto3,enum=quoin.runtime.v1.DeliveryStatus" json:"status,omitempty"`
-	Detail        string                 `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"` // 面向 Stele 日志的非权威说明
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+func (x *DeliverEventsRequest) GetEvents() []*RelayEvent {
+	if x != nil {
+		return x.Events
+	}
+	return nil
 }
 
-func (x *DeliveryRelayResponse) Reset() {
-	*x = DeliveryRelayResponse{}
-	mi := &file_runtime_proto_msgTypes[52]
+// 归一化事件：EventSource 插件 VerifyAndParse 的产物信封。payload 是该 source_kind
+// 的归一化事件 JSON（协议语义已在边缘解析，Quoin 只解释业务语义）。
+type RelayEvent struct {
+	state                     protoimpl.MessageState `protogen:"open.v1"`
+	EventId                   string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`                 // Stele 生成；全局唯一；幂等键
+	SourceKind                string                 `protobuf:"bytes,2,opt,name=source_kind,json=sourceKind,proto3" json:"source_kind,omitempty"`        // EventSource.Kind()（= AlertSourceSnapshot.protocol）
+	SourceId                  int64                  `protobuf:"varint,3,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`             // 匹配的 alert_sources.id
+	CredentialId              int64                  `protobuf:"varint,4,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"` // 命中的凭据
+	CredentialSnapshotVersion uint64                 `protobuf:"varint,5,opt,name=credential_snapshot_version,json=credentialSnapshotVersion,proto3" json:"credential_snapshot_version,omitempty"`
+	EventType                 string                 `protobuf:"bytes,6,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`    // 归一化事件类型（如 "alerts.batch"）
+	ReceivedAt                *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=received_at,json=receivedAt,proto3" json:"received_at,omitempty"` // Stele 收到外部请求的时间
+	Payload                   []byte                 `protobuf:"bytes,8,opt,name=payload,proto3" json:"payload,omitempty"`                         // 归一化事件 JSON
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
+}
+
+func (x *RelayEvent) Reset() {
+	*x = RelayEvent{}
+	mi := &file_runtime_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *DeliveryRelayResponse) String() string {
+func (x *RelayEvent) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*DeliveryRelayResponse) ProtoMessage() {}
+func (*RelayEvent) ProtoMessage() {}
 
-func (x *DeliveryRelayResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_runtime_proto_msgTypes[52]
+func (x *RelayEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_runtime_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5644,30 +6449,116 @@ func (x *DeliveryRelayResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use DeliveryRelayResponse.ProtoReflect.Descriptor instead.
-func (*DeliveryRelayResponse) Descriptor() ([]byte, []int) {
-	return file_runtime_proto_rawDescGZIP(), []int{52}
+// Deprecated: Use RelayEvent.ProtoReflect.Descriptor instead.
+func (*RelayEvent) Descriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{61}
 }
 
-func (x *DeliveryRelayResponse) GetStatus() DeliveryStatus {
+func (x *RelayEvent) GetEventId() string {
 	if x != nil {
-		return x.Status
-	}
-	return DeliveryStatus_DELIVERY_STATUS_UNSPECIFIED
-}
-
-func (x *DeliveryRelayResponse) GetDetail() string {
-	if x != nil {
-		return x.Detail
+		return x.EventId
 	}
 	return ""
+}
+
+func (x *RelayEvent) GetSourceKind() string {
+	if x != nil {
+		return x.SourceKind
+	}
+	return ""
+}
+
+func (x *RelayEvent) GetSourceId() int64 {
+	if x != nil {
+		return x.SourceId
+	}
+	return 0
+}
+
+func (x *RelayEvent) GetCredentialId() int64 {
+	if x != nil {
+		return x.CredentialId
+	}
+	return 0
+}
+
+func (x *RelayEvent) GetCredentialSnapshotVersion() uint64 {
+	if x != nil {
+		return x.CredentialSnapshotVersion
+	}
+	return 0
+}
+
+func (x *RelayEvent) GetEventType() string {
+	if x != nil {
+		return x.EventType
+	}
+	return ""
+}
+
+func (x *RelayEvent) GetReceivedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ReceivedAt
+	}
+	return nil
+}
+
+func (x *RelayEvent) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+type DeliverEventsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Results       []EventDeliveryStatus  `protobuf:"varint,1,rep,packed,name=results,proto3,enum=quoin.runtime.v1.EventDeliveryStatus" json:"results,omitempty"` // 与请求 events 顺序一一对应
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeliverEventsResponse) Reset() {
+	*x = DeliverEventsResponse{}
+	mi := &file_runtime_proto_msgTypes[62]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeliverEventsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeliverEventsResponse) ProtoMessage() {}
+
+func (x *DeliverEventsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_runtime_proto_msgTypes[62]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeliverEventsResponse.ProtoReflect.Descriptor instead.
+func (*DeliverEventsResponse) Descriptor() ([]byte, []int) {
+	return file_runtime_proto_rawDescGZIP(), []int{62}
+}
+
+func (x *DeliverEventsResponse) GetResults() []EventDeliveryStatus {
+	if x != nil {
+		return x.Results
+	}
+	return nil
 }
 
 var File_runtime_proto protoreflect.FileDescriptor
 
 const file_runtime_proto_rawDesc = "" +
 	"\n" +
-	"\rruntime.proto\x12\x10quoin.runtime.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x89\x0f\n" +
+	"\rruntime.proto\x12\x10quoin.runtime.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe3\x0f\n" +
 	"\x0fControlEnvelope\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\x04R\tmessageId\x12)\n" +
@@ -5699,7 +6590,8 @@ const file_runtime_proto_rawDesc = "" +
 	"\x0fbegin_tool_call\x18\" \x01(\v2\x1f.quoin.runtime.v1.BeginToolCallH\x00R\rbeginToolCall\x12S\n" +
 	"\x13begin_tool_call_ack\x18# \x01(\v2\".quoin.runtime.v1.BeginToolCallAckH\x00R\x10beginToolCallAck\x12R\n" +
 	"\x12complete_tool_call\x18$ \x01(\v2\".quoin.runtime.v1.CompleteToolCallH\x00R\x10completeToolCall\x12\\\n" +
-	"\x16complete_tool_call_ack\x18% \x01(\v2%.quoin.runtime.v1.CompleteToolCallAckH\x00R\x13completeToolCallAckB\x05\n" +
+	"\x16complete_tool_call_ack\x18% \x01(\v2%.quoin.runtime.v1.CompleteToolCallAckH\x00R\x13completeToolCallAck\x12X\n" +
+	"\x14external_tool_result\x188 \x01(\v2$.quoin.runtime.v1.ExternalToolResultH\x00R\x12externalToolResultB\x05\n" +
 	"\x03msgJ\x04\b\x17\x10\x18J\x04\b\x18\x10\x19J\x04\b\x19\x10\x1cJ\x04\b&\x10'J\x04\b'\x108\"\xa1\x02\n" +
 	"\x05Hello\x121\n" +
 	"\x04slot\x18\x01 \x01(\x0e2\x1d.quoin.runtime.v1.RuntimeSlotR\x04slot\x12\x17\n" +
@@ -5926,13 +6818,25 @@ const file_runtime_proto_rawDesc = "" +
 	"\fevidence_ids\x18\x04 \x03(\x03R\vevidenceIds\x12L\n" +
 	"\x11committed_payload\x18\x05 \x01(\v2\x1f.quoin.runtime.v1.ResultPayloadR\x10committedPayload\x12@\n" +
 	"\fartifact_ref\x18\x06 \x01(\v2\x1d.quoin.runtime.v1.ArtifactRefR\vartifactRef\x12\x16\n" +
-	"\x06detail\x18\a \x01(\tR\x06detail\"\x9b\x01\n" +
+	"\x06detail\x18\a \x01(\tR\x06detail\"\xf4\x02\n" +
+	"\x12ExternalToolResult\x12\x1d\n" +
+	"\n" +
+	"attempt_id\x18\x01 \x01(\x03R\tattemptId\x12 \n" +
+	"\ftool_call_id\x18\x02 \x01(\x03R\n" +
+	"toolCallId\x12;\n" +
+	"\aoutcome\x18\x03 \x01(\x0e2!.quoin.runtime.v1.ToolCallOutcomeR\aoutcome\x129\n" +
+	"\apayload\x18\x04 \x01(\v2\x1f.quoin.runtime.v1.ResultPayloadR\apayload\x12@\n" +
+	"\fartifact_ref\x18\x05 \x01(\v2\x1d.quoin.runtime.v1.ArtifactRefR\vartifactRef\x12!\n" +
+	"\fevidence_ids\x18\x06 \x03(\x03R\vevidenceIds\x12\x1d\n" +
+	"\n" +
+	"error_code\x18\a \x01(\tR\terrorCode\x12!\n" +
+	"\ferror_detail\x18\b \x01(\tR\verrorDetail\"\x9b\x01\n" +
 	"\x1bFetchCredentialGrantRequest\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\x03R\agrantId\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x02 \x01(\x03R\tattemptId\x12\x17\n" +
 	"\aboot_id\x18\x03 \x01(\tR\x06bootId\x12)\n" +
-	"\x10connection_epoch\x18\x04 \x01(\x04R\x0fconnectionEpoch\"\xd1\x03\n" +
+	"\x10connection_epoch\x18\x04 \x01(\x04R\x0fconnectionEpoch\"\x93\x03\n" +
 	"\x1cFetchCredentialGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\x03R\agrantId\x12\x1d\n" +
 	"\n" +
@@ -5940,10 +6844,9 @@ const file_runtime_proto_rawDesc = "" +
 	"\x16connection_revision_id\x18\x03 \x01(\x03R\x14connectionRevisionId\x128\n" +
 	"\x18credential_generation_id\x18\x04 \x01(\x03R\x16credentialGenerationId\x12'\n" +
 	"\x0fconnection_type\x18\x05 \x01(\tR\x0econnectionType\x120\n" +
-	"\x14revision_config_json\x18\x06 \x01(\fR\x12revisionConfigJson\x12B\n" +
-	"\x06thanos\x18\a \x01(\v2(.quoin.runtime.v1.ThanosCredentialSecretH\x00R\x06thanos\x12X\n" +
+	"\x14revision_config_json\x18\x06 \x01(\fR\x12revisionConfigJson\x12X\n" +
 	"\x0emodel_provider\x18\t \x01(\v2/.quoin.runtime.v1.ModelProviderCredentialSecretH\x00R\rmodelProviderB\b\n" +
-	"\x06secretJ\x04\b\b\x10\t\"s\n" +
+	"\x06secretJ\x04\b\a\x10\bJ\x04\b\b\x10\t\"s\n" +
 	"\x16ThanosCredentialSecret\x12\x1a\n" +
 	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12!\n" +
@@ -6033,7 +6936,66 @@ const file_runtime_proto_rawDesc = "" +
 	"totalLines\x12\x16\n" +
 	"\x06sha256\x18\x06 \x01(\fR\x06sha256\x12\x1d\n" +
 	"\n" +
-	"media_type\x18\a \x01(\tR\tmediaType\"Q\n" +
+	"media_type\x18\a \x01(\tR\tmediaType\"\xfb\x03\n" +
+	"\rSteleEnvelope\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x01 \x01(\x04R\tmessageId\x12%\n" +
+	"\x0ecorrelation_id\x18\x02 \x01(\x04R\rcorrelationId\x12\x17\n" +
+	"\aboot_id\x18\x03 \x01(\tR\x06bootId\x124\n" +
+	"\x05hello\x18\n" +
+	" \x01(\v2\x1c.quoin.runtime.v1.SteleHelloH\x00R\x05hello\x12>\n" +
+	"\thello_ack\x18\v \x01(\v2\x1f.quoin.runtime.v1.SteleHelloAckH\x00R\bhelloAck\x12@\n" +
+	"\theartbeat\x18\f \x01(\v2 .quoin.runtime.v1.SteleHeartbeatH\x00R\theartbeat\x12A\n" +
+	"\aexecute\x18\r \x01(\v2%.quoin.runtime.v1.ExecutePlatformCallH\x00R\aexecute\x12T\n" +
+	"\x0eexecute_result\x18\x0e \x01(\v2+.quoin.runtime.v1.ExecutePlatformCallResultH\x00R\rexecuteResult\x123\n" +
+	"\ago_away\x18\x0f \x01(\v2\x18.quoin.runtime.v1.GoAwayH\x00R\x06goAwayB\x05\n" +
+	"\x03msg\"\xac\x01\n" +
+	"\n" +
+	"SteleHello\x12\x17\n" +
+	"\aboot_id\x18\x01 \x01(\tR\x06bootId\x12)\n" +
+	"\x10connection_epoch\x18\x02 \x01(\x04R\x0fconnectionEpoch\x121\n" +
+	"\x14contract_fingerprint\x18\x03 \x01(\tR\x13contractFingerprint\x12'\n" +
+	"\x0frelease_version\x18\x04 \x01(\tR\x0ereleaseVersion\"C\n" +
+	"\rSteleHelloAck\x12\x1a\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x16\n" +
+	"\x06detail\x18\x02 \x01(\tR\x06detail\"\"\n" +
+	"\x0eSteleHeartbeat\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\x04R\x03seq\"\x88\x03\n" +
+	"\x13ExecutePlatformCall\x12\x17\n" +
+	"\acall_id\x18\x01 \x01(\tR\x06callId\x12#\n" +
+	"\rconnection_id\x18\x02 \x01(\x03R\fconnectionId\x124\n" +
+	"\x16connection_revision_id\x18\x03 \x01(\x03R\x14connectionRevisionId\x12\x16\n" +
+	"\x06method\x18\x04 \x01(\tR\x06method\x12\x12\n" +
+	"\x04path\x18\x05 \x01(\tR\x04path\x12\x14\n" +
+	"\x05query\x18\x06 \x01(\tR\x05query\x12L\n" +
+	"\aheaders\x18\a \x03(\v22.quoin.runtime.v1.ExecutePlatformCall.HeadersEntryR\aheaders\x12\x12\n" +
+	"\x04body\x18\b \x01(\fR\x04body\x12\x1d\n" +
+	"\n" +
+	"timeout_ms\x18\t \x01(\rR\ttimeoutMs\x1a:\n" +
+	"\fHeadersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x88\x02\n" +
+	"\x19ExecutePlatformCallResult\x12\x17\n" +
+	"\acall_id\x18\x01 \x01(\tR\x06callId\x12<\n" +
+	"\x06status\x18\x02 \x01(\x0e2$.quoin.runtime.v1.PlatformCallStatusR\x06status\x12\x1f\n" +
+	"\vhttp_status\x18\x03 \x01(\x05R\n" +
+	"httpStatus\x12\x12\n" +
+	"\x04body\x18\x04 \x01(\fR\x04body\x12\x1d\n" +
+	"\n" +
+	"latency_ms\x18\x05 \x01(\x04R\tlatencyMs\x12\x1d\n" +
+	"\n" +
+	"error_code\x18\x06 \x01(\tR\terrorCode\x12!\n" +
+	"\ferror_detail\x18\a \x01(\tR\verrorDetail\"|\n" +
+	"\"AcquireConnectionCredentialRequest\x12#\n" +
+	"\rconnection_id\x18\x01 \x01(\x03R\fconnectionId\x121\n" +
+	"\x14contract_fingerprint\x18\x02 \x01(\tR\x13contractFingerprint\"\xd7\x02\n" +
+	"#AcquireConnectionCredentialResponse\x12#\n" +
+	"\rconnection_id\x18\x01 \x01(\x03R\fconnectionId\x124\n" +
+	"\x16connection_revision_id\x18\x02 \x01(\x03R\x14connectionRevisionId\x128\n" +
+	"\x18credential_generation_id\x18\x03 \x01(\x03R\x16credentialGenerationId\x12'\n" +
+	"\x0fconnection_type\x18\x04 \x01(\tR\x0econnectionType\x120\n" +
+	"\x14revision_config_json\x18\x05 \x01(\fR\x12revisionConfigJson\x12@\n" +
+	"\x06thanos\x18\x06 \x01(\v2(.quoin.runtime.v1.ThanosCredentialSecretR\x06thanos\"Q\n" +
 	"\x1cGetCredentialSnapshotRequest\x121\n" +
 	"\x14contract_fingerprint\x18\x01 \x01(\tR\x13contractFingerprint\"\xbe\x01\n" +
 	"\x1dGetCredentialSnapshotResponse\x12)\n" +
@@ -6049,20 +7011,25 @@ const file_runtime_proto_rawDesc = "" +
 	"\vcredentials\x18\x05 \x03(\v2'.quoin.runtime.v1.CredentialDigestEntryR\vcredentials\"T\n" +
 	"\x15CredentialDigestEntry\x12#\n" +
 	"\rcredential_id\x18\x01 \x01(\x03R\fcredentialId\x12\x16\n" +
-	"\x06digest\x18\x02 \x01(\fR\x06digest\"\xd3\x02\n" +
-	"\x14DeliveryRelayRequest\x12\x19\n" +
-	"\brelay_id\x18\x01 \x01(\tR\arelayId\x12\x1b\n" +
-	"\tsource_id\x18\x02 \x01(\x03R\bsourceId\x12#\n" +
-	"\rcredential_id\x18\x03 \x01(\x03R\fcredentialId\x12>\n" +
-	"\x1bcredential_snapshot_version\x18\x04 \x01(\x04R\x19credentialSnapshotVersion\x12\x1a\n" +
-	"\bprotocol\x18\x05 \x01(\tR\bprotocol\x12\x12\n" +
-	"\x04body\x18\x06 \x01(\fR\x04body\x12;\n" +
+	"\x06digest\x18\x02 \x01(\fR\x06digest\"\x7f\n" +
+	"\x14DeliverEventsRequest\x121\n" +
+	"\x14contract_fingerprint\x18\x01 \x01(\tR\x13contractFingerprint\x124\n" +
+	"\x06events\x18\x02 \x03(\v2\x1c.quoin.runtime.v1.RelayEventR\x06events\"\xc0\x02\n" +
+	"\n" +
+	"RelayEvent\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x1f\n" +
+	"\vsource_kind\x18\x02 \x01(\tR\n" +
+	"sourceKind\x12\x1b\n" +
+	"\tsource_id\x18\x03 \x01(\x03R\bsourceId\x12#\n" +
+	"\rcredential_id\x18\x04 \x01(\x03R\fcredentialId\x12>\n" +
+	"\x1bcredential_snapshot_version\x18\x05 \x01(\x04R\x19credentialSnapshotVersion\x12\x1d\n" +
+	"\n" +
+	"event_type\x18\x06 \x01(\tR\teventType\x12;\n" +
 	"\vreceived_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"receivedAt\x121\n" +
-	"\x14contract_fingerprint\x18\b \x01(\tR\x13contractFingerprint\"i\n" +
-	"\x15DeliveryRelayResponse\x128\n" +
-	"\x06status\x18\x01 \x01(\x0e2 .quoin.runtime.v1.DeliveryStatusR\x06status\x12\x16\n" +
-	"\x06detail\x18\x02 \x01(\tR\x06detail*J\n" +
+	"receivedAt\x12\x18\n" +
+	"\apayload\x18\b \x01(\fR\apayload\"X\n" +
+	"\x15DeliverEventsResponse\x12?\n" +
+	"\aresults\x18\x01 \x03(\x0e2%.quoin.runtime.v1.EventDeliveryStatusR\aresults*J\n" +
 	"\vRuntimeSlot\x12\x1c\n" +
 	"\x18RUNTIME_SLOT_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13RUNTIME_SLOT_PLINTH\x10\x01\"\x04\b\x02\x10\x02*\xa8\x02\n" +
@@ -6139,12 +7106,7 @@ const file_runtime_proto_rawDesc = "" +
 	"\fGoAwayReason\x12\x1e\n" +
 	"\x1aGO_AWAY_REASON_UNSPECIFIED\x10\x00\x12 \n" +
 	"\x1cGO_AWAY_REASON_SHUTTING_DOWN\x10\x01\x12$\n" +
-	" GO_AWAY_REASON_CONTRACT_MISMATCH\x10\x02\"\x04\b\x03\x10\x03\"\x04\b\x04\x10\x04\"\x04\b\x05\x10\x05*\x8e\x01\n" +
-	"\x0eDeliveryStatus\x12\x1f\n" +
-	"\x1bDELIVERY_STATUS_UNSPECIFIED\x10\x00\x12\x1c\n" +
-	"\x18DELIVERY_STATUS_ACCEPTED\x10\x01\x12\x1c\n" +
-	"\x18DELIVERY_STATUS_REJECTED\x10\x02\x12\x1f\n" +
-	"\x1bDELIVERY_STATUS_UNAVAILABLE\x10\x03*j\n" +
+	" GO_AWAY_REASON_CONTRACT_MISMATCH\x10\x02\"\x04\b\x03\x10\x03\"\x04\b\x04\x10\x04\"\x04\b\x05\x10\x05*j\n" +
 	"\x0eModelOperation\x12\x1f\n" +
 	"\x1bMODEL_OPERATION_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14MODEL_OPERATION_CHAT\x10\x01\x12\x1d\n" +
@@ -6186,11 +7148,11 @@ const file_runtime_proto_rawDesc = "" +
 	"*MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE\x10\x05\x12'\n" +
 	"#MODEL_CALL_FAILURE_REASON_CANCELLED\x10\x06\x124\n" +
 	"0MODEL_CALL_FAILURE_REASON_ARTIFACT_COMMIT_FAILED\x10\a\x12-\n" +
-	")MODEL_CALL_FAILURE_REASON_TRANSPORT_ERROR\x10\b*\x8e\x01\n" +
+	")MODEL_CALL_FAILURE_REASON_TRANSPORT_ERROR\x10\b*\x90\x01\n" +
 	"\x11ToolExecutionMode\x12#\n" +
 	"\x1fTOOL_EXECUTION_MODE_UNSPECIFIED\x10\x00\x12$\n" +
-	" TOOL_EXECUTION_MODE_WORKER_LOCAL\x10\x01\x12(\n" +
-	"$TOOL_EXECUTION_MODE_SUPERVISOR_TYPED\x10\x02\"\x04\b\x03\x10\x03*\x7f\n" +
+	" TOOL_EXECUTION_MODE_WORKER_LOCAL\x10\x01\x12$\n" +
+	" TOOL_EXECUTION_MODE_QUOIN_ROUTED\x10\x04\"\x04\b\x02\x10\x02\"\x04\b\x03\x10\x03*\x7f\n" +
 	"\x0fToolFailureMode\x12!\n" +
 	"\x1dTOOL_FAILURE_MODE_UNSPECIFIED\x10\x00\x12%\n" +
 	"!TOOL_FAILURE_MODE_RETURN_TO_MODEL\x10\x01\x12\"\n" +
@@ -6199,18 +7161,32 @@ const file_runtime_proto_rawDesc = "" +
 	"\x1dTOOL_CALL_OUTCOME_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bTOOL_CALL_OUTCOME_SUCCEEDED\x10\x01\x12\x1c\n" +
 	"\x18TOOL_CALL_OUTCOME_FAILED\x10\x02\x12\x1f\n" +
-	"\x1bTOOL_CALL_OUTCOME_CANCELLED\x10\x032\xdc\x01\n" +
+	"\x1bTOOL_CALL_OUTCOME_CANCELLED\x10\x03*\xff\x01\n" +
+	"\x12PlatformCallStatus\x12$\n" +
+	" PLATFORM_CALL_STATUS_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1ePLATFORM_CALL_STATUS_SUCCEEDED\x10\x01\x12%\n" +
+	"!PLATFORM_CALL_STATUS_RATE_LIMITED\x10\x02\x12/\n" +
+	"+PLATFORM_CALL_STATUS_CREDENTIAL_UNAVAILABLE\x10\x03\x12$\n" +
+	" PLATFORM_CALL_STATUS_UNREACHABLE\x10\x04\x12!\n" +
+	"\x1dPLATFORM_CALL_STATUS_INTERNAL\x10\x05*\xab\x01\n" +
+	"\x13EventDeliveryStatus\x12%\n" +
+	"!EVENT_DELIVERY_STATUS_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1eEVENT_DELIVERY_STATUS_ACCEPTED\x10\x01\x12\"\n" +
+	"\x1eEVENT_DELIVERY_STATUS_REJECTED\x10\x02\x12%\n" +
+	"!EVENT_DELIVERY_STATUS_UNAVAILABLE\x10\x032\xdc\x01\n" +
 	"\x0eRuntimeControl\x12S\n" +
 	"\aConnect\x12!.quoin.runtime.v1.ControlEnvelope\x1a!.quoin.runtime.v1.ControlEnvelope(\x010\x01\x12u\n" +
 	"\x14FetchCredentialGrant\x12-.quoin.runtime.v1.FetchCredentialGrantRequest\x1a..quoin.runtime.v1.FetchCredentialGrantResponse2\xb2\x02\n" +
 	"\x0fArtifactService\x12Y\n" +
 	"\x06Upload\x12%.quoin.runtime.v1.ArtifactUploadFrame\x1a&.quoin.runtime.v1.ArtifactUploadResult(\x01\x12a\n" +
 	"\bReadText\x12).quoin.runtime.v1.ArtifactReadTextRequest\x1a*.quoin.runtime.v1.ArtifactReadTextResponse\x12a\n" +
-	"\bGrepText\x12).quoin.runtime.v1.ArtifactGrepTextRequest\x1a*.quoin.runtime.v1.ArtifactGrepTextResponse2\xe2\x01\n" +
+	"\bGrepText\x12).quoin.runtime.v1.ArtifactGrepTextRequest\x1a*.quoin.runtime.v1.ArtifactGrepTextResponse2\xc6\x03\n" +
 	"\n" +
-	"SteleRelay\x12x\n" +
-	"\x15GetCredentialSnapshot\x12..quoin.runtime.v1.GetCredentialSnapshotRequest\x1a/.quoin.runtime.v1.GetCredentialSnapshotResponse\x12Z\n" +
-	"\aDeliver\x12&.quoin.runtime.v1.DeliveryRelayRequest\x1a'.quoin.runtime.v1.DeliveryRelayResponseBAZ?github.com/Suknna/quoin/internal/gen/proto/runtime/v1;runtimev1b\x06proto3"
+	"SteleRelay\x12O\n" +
+	"\aConnect\x12\x1f.quoin.runtime.v1.SteleEnvelope\x1a\x1f.quoin.runtime.v1.SteleEnvelope(\x010\x01\x12x\n" +
+	"\x15GetCredentialSnapshot\x12..quoin.runtime.v1.GetCredentialSnapshotRequest\x1a/.quoin.runtime.v1.GetCredentialSnapshotResponse\x12`\n" +
+	"\rDeliverEvents\x12&.quoin.runtime.v1.DeliverEventsRequest\x1a'.quoin.runtime.v1.DeliverEventsResponse\x12\x8a\x01\n" +
+	"\x1bAcquireConnectionCredential\x124.quoin.runtime.v1.AcquireConnectionCredentialRequest\x1a5.quoin.runtime.v1.AcquireConnectionCredentialResponseBAZ?github.com/Suknna/quoin/internal/gen/proto/runtime/v1;runtimev1b\x06proto3"
 
 var (
 	file_runtime_proto_rawDescOnce sync.Once
@@ -6224,172 +7200,201 @@ func file_runtime_proto_rawDescGZIP() []byte {
 	return file_runtime_proto_rawDescData
 }
 
-var file_runtime_proto_enumTypes = make([]protoimpl.EnumInfo, 21)
-var file_runtime_proto_msgTypes = make([]protoimpl.MessageInfo, 53)
+var file_runtime_proto_enumTypes = make([]protoimpl.EnumInfo, 22)
+var file_runtime_proto_msgTypes = make([]protoimpl.MessageInfo, 64)
 var file_runtime_proto_goTypes = []any{
-	(RuntimeSlot)(0),                      // 0: quoin.runtime.v1.RuntimeSlot
-	(AttemptType)(0),                      // 1: quoin.runtime.v1.AttemptType
-	(ScopeType)(0),                        // 2: quoin.runtime.v1.ScopeType
-	(TerminationReason)(0),                // 3: quoin.runtime.v1.TerminationReason
-	(AttemptOutcome)(0),                   // 4: quoin.runtime.v1.AttemptOutcome
-	(HelloRejectReason)(0),                // 5: quoin.runtime.v1.HelloRejectReason
-	(AttemptRejectReason)(0),              // 6: quoin.runtime.v1.AttemptRejectReason
-	(ArtifactKind)(0),                     // 7: quoin.runtime.v1.ArtifactKind
-	(RetentionKind)(0),                    // 8: quoin.runtime.v1.RetentionKind
-	(UploadRejectReason)(0),               // 9: quoin.runtime.v1.UploadRejectReason
-	(GoAwayReason)(0),                     // 10: quoin.runtime.v1.GoAwayReason
-	(DeliveryStatus)(0),                   // 11: quoin.runtime.v1.DeliveryStatus
-	(ModelOperation)(0),                   // 12: quoin.runtime.v1.ModelOperation
-	(ModelInputItemKind)(0),               // 13: quoin.runtime.v1.ModelInputItemKind
-	(ModelInputRole)(0),                   // 14: quoin.runtime.v1.ModelInputRole
-	(ModelCallCompletionRejectReason)(0),  // 15: quoin.runtime.v1.ModelCallCompletionRejectReason
-	(ModelCallOutcome)(0),                 // 16: quoin.runtime.v1.ModelCallOutcome
-	(ModelCallFailureReason)(0),           // 17: quoin.runtime.v1.ModelCallFailureReason
-	(ToolExecutionMode)(0),                // 18: quoin.runtime.v1.ToolExecutionMode
-	(ToolFailureMode)(0),                  // 19: quoin.runtime.v1.ToolFailureMode
-	(ToolCallOutcome)(0),                  // 20: quoin.runtime.v1.ToolCallOutcome
-	(*ControlEnvelope)(nil),               // 21: quoin.runtime.v1.ControlEnvelope
-	(*Hello)(nil),                         // 22: quoin.runtime.v1.Hello
-	(*HelloAck)(nil),                      // 23: quoin.runtime.v1.HelloAck
-	(*Heartbeat)(nil),                     // 24: quoin.runtime.v1.Heartbeat
-	(*Capacity)(nil),                      // 25: quoin.runtime.v1.Capacity
-	(*DispatchAttempt)(nil),               // 26: quoin.runtime.v1.DispatchAttempt
-	(*AttemptInputSnapshot)(nil),          // 27: quoin.runtime.v1.AttemptInputSnapshot
-	(*ArtifactRef)(nil),                   // 28: quoin.runtime.v1.ArtifactRef
-	(*ConnectionGrant)(nil),               // 29: quoin.runtime.v1.ConnectionGrant
-	(*AttemptAccept)(nil),                 // 30: quoin.runtime.v1.AttemptAccept
-	(*AttemptReject)(nil),                 // 31: quoin.runtime.v1.AttemptReject
-	(*AttemptProgress)(nil),               // 32: quoin.runtime.v1.AttemptProgress
-	(*ReconcileRequest)(nil),              // 33: quoin.runtime.v1.ReconcileRequest
-	(*ReconcileReport)(nil),               // 34: quoin.runtime.v1.ReconcileReport
-	(*ResultProposal)(nil),                // 35: quoin.runtime.v1.ResultProposal
-	(*ResultPayload)(nil),                 // 36: quoin.runtime.v1.ResultPayload
-	(*ResultAck)(nil),                     // 37: quoin.runtime.v1.ResultAck
-	(*CancelAttempt)(nil),                 // 38: quoin.runtime.v1.CancelAttempt
-	(*CancelAck)(nil),                     // 39: quoin.runtime.v1.CancelAck
-	(*GoAway)(nil),                        // 40: quoin.runtime.v1.GoAway
-	(*BeginModelCall)(nil),                // 41: quoin.runtime.v1.BeginModelCall
-	(*ModelInputItem)(nil),                // 42: quoin.runtime.v1.ModelInputItem
-	(*BeginModelCallAck)(nil),             // 43: quoin.runtime.v1.BeginModelCallAck
-	(*ModelTokenDelta)(nil),               // 44: quoin.runtime.v1.ModelTokenDelta
-	(*CompleteModelCall)(nil),             // 45: quoin.runtime.v1.CompleteModelCall
-	(*EmbeddingVector)(nil),               // 46: quoin.runtime.v1.EmbeddingVector
-	(*ProposedToolCall)(nil),              // 47: quoin.runtime.v1.ProposedToolCall
-	(*ToolCallAuthorization)(nil),         // 48: quoin.runtime.v1.ToolCallAuthorization
-	(*CompleteModelCallAck)(nil),          // 49: quoin.runtime.v1.CompleteModelCallAck
-	(*BeginToolCall)(nil),                 // 50: quoin.runtime.v1.BeginToolCall
-	(*BeginToolCallAck)(nil),              // 51: quoin.runtime.v1.BeginToolCallAck
-	(*CompleteToolCall)(nil),              // 52: quoin.runtime.v1.CompleteToolCall
-	(*CompleteToolCallAck)(nil),           // 53: quoin.runtime.v1.CompleteToolCallAck
-	(*FetchCredentialGrantRequest)(nil),   // 54: quoin.runtime.v1.FetchCredentialGrantRequest
-	(*FetchCredentialGrantResponse)(nil),  // 55: quoin.runtime.v1.FetchCredentialGrantResponse
-	(*ThanosCredentialSecret)(nil),        // 56: quoin.runtime.v1.ThanosCredentialSecret
-	(*ModelProviderCredentialSecret)(nil), // 57: quoin.runtime.v1.ModelProviderCredentialSecret
-	(*ArtifactUploadFrame)(nil),           // 58: quoin.runtime.v1.ArtifactUploadFrame
-	(*ArtifactUploadHeader)(nil),          // 59: quoin.runtime.v1.ArtifactUploadHeader
-	(*ArtifactUploadChunk)(nil),           // 60: quoin.runtime.v1.ArtifactUploadChunk
-	(*ArtifactUploadEnd)(nil),             // 61: quoin.runtime.v1.ArtifactUploadEnd
-	(*ArtifactUploadResult)(nil),          // 62: quoin.runtime.v1.ArtifactUploadResult
-	(*ArtifactReadTextRequest)(nil),       // 63: quoin.runtime.v1.ArtifactReadTextRequest
-	(*ArtifactReadTextResponse)(nil),      // 64: quoin.runtime.v1.ArtifactReadTextResponse
-	(*ArtifactGrepTextRequest)(nil),       // 65: quoin.runtime.v1.ArtifactGrepTextRequest
-	(*ArtifactTextMatch)(nil),             // 66: quoin.runtime.v1.ArtifactTextMatch
-	(*ArtifactGrepTextResponse)(nil),      // 67: quoin.runtime.v1.ArtifactGrepTextResponse
-	(*GetCredentialSnapshotRequest)(nil),  // 68: quoin.runtime.v1.GetCredentialSnapshotRequest
-	(*GetCredentialSnapshotResponse)(nil), // 69: quoin.runtime.v1.GetCredentialSnapshotResponse
-	(*AlertSourceSnapshot)(nil),           // 70: quoin.runtime.v1.AlertSourceSnapshot
-	(*CredentialDigestEntry)(nil),         // 71: quoin.runtime.v1.CredentialDigestEntry
-	(*DeliveryRelayRequest)(nil),          // 72: quoin.runtime.v1.DeliveryRelayRequest
-	(*DeliveryRelayResponse)(nil),         // 73: quoin.runtime.v1.DeliveryRelayResponse
-	(*timestamppb.Timestamp)(nil),         // 74: google.protobuf.Timestamp
+	(RuntimeSlot)(0),                            // 0: quoin.runtime.v1.RuntimeSlot
+	(AttemptType)(0),                            // 1: quoin.runtime.v1.AttemptType
+	(ScopeType)(0),                              // 2: quoin.runtime.v1.ScopeType
+	(TerminationReason)(0),                      // 3: quoin.runtime.v1.TerminationReason
+	(AttemptOutcome)(0),                         // 4: quoin.runtime.v1.AttemptOutcome
+	(HelloRejectReason)(0),                      // 5: quoin.runtime.v1.HelloRejectReason
+	(AttemptRejectReason)(0),                    // 6: quoin.runtime.v1.AttemptRejectReason
+	(ArtifactKind)(0),                           // 7: quoin.runtime.v1.ArtifactKind
+	(RetentionKind)(0),                          // 8: quoin.runtime.v1.RetentionKind
+	(UploadRejectReason)(0),                     // 9: quoin.runtime.v1.UploadRejectReason
+	(GoAwayReason)(0),                           // 10: quoin.runtime.v1.GoAwayReason
+	(ModelOperation)(0),                         // 11: quoin.runtime.v1.ModelOperation
+	(ModelInputItemKind)(0),                     // 12: quoin.runtime.v1.ModelInputItemKind
+	(ModelInputRole)(0),                         // 13: quoin.runtime.v1.ModelInputRole
+	(ModelCallCompletionRejectReason)(0),        // 14: quoin.runtime.v1.ModelCallCompletionRejectReason
+	(ModelCallOutcome)(0),                       // 15: quoin.runtime.v1.ModelCallOutcome
+	(ModelCallFailureReason)(0),                 // 16: quoin.runtime.v1.ModelCallFailureReason
+	(ToolExecutionMode)(0),                      // 17: quoin.runtime.v1.ToolExecutionMode
+	(ToolFailureMode)(0),                        // 18: quoin.runtime.v1.ToolFailureMode
+	(ToolCallOutcome)(0),                        // 19: quoin.runtime.v1.ToolCallOutcome
+	(PlatformCallStatus)(0),                     // 20: quoin.runtime.v1.PlatformCallStatus
+	(EventDeliveryStatus)(0),                    // 21: quoin.runtime.v1.EventDeliveryStatus
+	(*ControlEnvelope)(nil),                     // 22: quoin.runtime.v1.ControlEnvelope
+	(*Hello)(nil),                               // 23: quoin.runtime.v1.Hello
+	(*HelloAck)(nil),                            // 24: quoin.runtime.v1.HelloAck
+	(*Heartbeat)(nil),                           // 25: quoin.runtime.v1.Heartbeat
+	(*Capacity)(nil),                            // 26: quoin.runtime.v1.Capacity
+	(*DispatchAttempt)(nil),                     // 27: quoin.runtime.v1.DispatchAttempt
+	(*AttemptInputSnapshot)(nil),                // 28: quoin.runtime.v1.AttemptInputSnapshot
+	(*ArtifactRef)(nil),                         // 29: quoin.runtime.v1.ArtifactRef
+	(*ConnectionGrant)(nil),                     // 30: quoin.runtime.v1.ConnectionGrant
+	(*AttemptAccept)(nil),                       // 31: quoin.runtime.v1.AttemptAccept
+	(*AttemptReject)(nil),                       // 32: quoin.runtime.v1.AttemptReject
+	(*AttemptProgress)(nil),                     // 33: quoin.runtime.v1.AttemptProgress
+	(*ReconcileRequest)(nil),                    // 34: quoin.runtime.v1.ReconcileRequest
+	(*ReconcileReport)(nil),                     // 35: quoin.runtime.v1.ReconcileReport
+	(*ResultProposal)(nil),                      // 36: quoin.runtime.v1.ResultProposal
+	(*ResultPayload)(nil),                       // 37: quoin.runtime.v1.ResultPayload
+	(*ResultAck)(nil),                           // 38: quoin.runtime.v1.ResultAck
+	(*CancelAttempt)(nil),                       // 39: quoin.runtime.v1.CancelAttempt
+	(*CancelAck)(nil),                           // 40: quoin.runtime.v1.CancelAck
+	(*GoAway)(nil),                              // 41: quoin.runtime.v1.GoAway
+	(*BeginModelCall)(nil),                      // 42: quoin.runtime.v1.BeginModelCall
+	(*ModelInputItem)(nil),                      // 43: quoin.runtime.v1.ModelInputItem
+	(*BeginModelCallAck)(nil),                   // 44: quoin.runtime.v1.BeginModelCallAck
+	(*ModelTokenDelta)(nil),                     // 45: quoin.runtime.v1.ModelTokenDelta
+	(*CompleteModelCall)(nil),                   // 46: quoin.runtime.v1.CompleteModelCall
+	(*EmbeddingVector)(nil),                     // 47: quoin.runtime.v1.EmbeddingVector
+	(*ProposedToolCall)(nil),                    // 48: quoin.runtime.v1.ProposedToolCall
+	(*ToolCallAuthorization)(nil),               // 49: quoin.runtime.v1.ToolCallAuthorization
+	(*CompleteModelCallAck)(nil),                // 50: quoin.runtime.v1.CompleteModelCallAck
+	(*BeginToolCall)(nil),                       // 51: quoin.runtime.v1.BeginToolCall
+	(*BeginToolCallAck)(nil),                    // 52: quoin.runtime.v1.BeginToolCallAck
+	(*CompleteToolCall)(nil),                    // 53: quoin.runtime.v1.CompleteToolCall
+	(*CompleteToolCallAck)(nil),                 // 54: quoin.runtime.v1.CompleteToolCallAck
+	(*ExternalToolResult)(nil),                  // 55: quoin.runtime.v1.ExternalToolResult
+	(*FetchCredentialGrantRequest)(nil),         // 56: quoin.runtime.v1.FetchCredentialGrantRequest
+	(*FetchCredentialGrantResponse)(nil),        // 57: quoin.runtime.v1.FetchCredentialGrantResponse
+	(*ThanosCredentialSecret)(nil),              // 58: quoin.runtime.v1.ThanosCredentialSecret
+	(*ModelProviderCredentialSecret)(nil),       // 59: quoin.runtime.v1.ModelProviderCredentialSecret
+	(*ArtifactUploadFrame)(nil),                 // 60: quoin.runtime.v1.ArtifactUploadFrame
+	(*ArtifactUploadHeader)(nil),                // 61: quoin.runtime.v1.ArtifactUploadHeader
+	(*ArtifactUploadChunk)(nil),                 // 62: quoin.runtime.v1.ArtifactUploadChunk
+	(*ArtifactUploadEnd)(nil),                   // 63: quoin.runtime.v1.ArtifactUploadEnd
+	(*ArtifactUploadResult)(nil),                // 64: quoin.runtime.v1.ArtifactUploadResult
+	(*ArtifactReadTextRequest)(nil),             // 65: quoin.runtime.v1.ArtifactReadTextRequest
+	(*ArtifactReadTextResponse)(nil),            // 66: quoin.runtime.v1.ArtifactReadTextResponse
+	(*ArtifactGrepTextRequest)(nil),             // 67: quoin.runtime.v1.ArtifactGrepTextRequest
+	(*ArtifactTextMatch)(nil),                   // 68: quoin.runtime.v1.ArtifactTextMatch
+	(*ArtifactGrepTextResponse)(nil),            // 69: quoin.runtime.v1.ArtifactGrepTextResponse
+	(*SteleEnvelope)(nil),                       // 70: quoin.runtime.v1.SteleEnvelope
+	(*SteleHello)(nil),                          // 71: quoin.runtime.v1.SteleHello
+	(*SteleHelloAck)(nil),                       // 72: quoin.runtime.v1.SteleHelloAck
+	(*SteleHeartbeat)(nil),                      // 73: quoin.runtime.v1.SteleHeartbeat
+	(*ExecutePlatformCall)(nil),                 // 74: quoin.runtime.v1.ExecutePlatformCall
+	(*ExecutePlatformCallResult)(nil),           // 75: quoin.runtime.v1.ExecutePlatformCallResult
+	(*AcquireConnectionCredentialRequest)(nil),  // 76: quoin.runtime.v1.AcquireConnectionCredentialRequest
+	(*AcquireConnectionCredentialResponse)(nil), // 77: quoin.runtime.v1.AcquireConnectionCredentialResponse
+	(*GetCredentialSnapshotRequest)(nil),        // 78: quoin.runtime.v1.GetCredentialSnapshotRequest
+	(*GetCredentialSnapshotResponse)(nil),       // 79: quoin.runtime.v1.GetCredentialSnapshotResponse
+	(*AlertSourceSnapshot)(nil),                 // 80: quoin.runtime.v1.AlertSourceSnapshot
+	(*CredentialDigestEntry)(nil),               // 81: quoin.runtime.v1.CredentialDigestEntry
+	(*DeliverEventsRequest)(nil),                // 82: quoin.runtime.v1.DeliverEventsRequest
+	(*RelayEvent)(nil),                          // 83: quoin.runtime.v1.RelayEvent
+	(*DeliverEventsResponse)(nil),               // 84: quoin.runtime.v1.DeliverEventsResponse
+	nil,                                         // 85: quoin.runtime.v1.ExecutePlatformCall.HeadersEntry
+	(*timestamppb.Timestamp)(nil),               // 86: google.protobuf.Timestamp
 }
 var file_runtime_proto_depIdxs = []int32{
-	22, // 0: quoin.runtime.v1.ControlEnvelope.hello:type_name -> quoin.runtime.v1.Hello
-	23, // 1: quoin.runtime.v1.ControlEnvelope.hello_ack:type_name -> quoin.runtime.v1.HelloAck
-	24, // 2: quoin.runtime.v1.ControlEnvelope.heartbeat:type_name -> quoin.runtime.v1.Heartbeat
-	26, // 3: quoin.runtime.v1.ControlEnvelope.dispatch_attempt:type_name -> quoin.runtime.v1.DispatchAttempt
-	30, // 4: quoin.runtime.v1.ControlEnvelope.attempt_accept:type_name -> quoin.runtime.v1.AttemptAccept
-	31, // 5: quoin.runtime.v1.ControlEnvelope.attempt_reject:type_name -> quoin.runtime.v1.AttemptReject
-	32, // 6: quoin.runtime.v1.ControlEnvelope.attempt_progress:type_name -> quoin.runtime.v1.AttemptProgress
-	33, // 7: quoin.runtime.v1.ControlEnvelope.reconcile_request:type_name -> quoin.runtime.v1.ReconcileRequest
-	34, // 8: quoin.runtime.v1.ControlEnvelope.reconcile_report:type_name -> quoin.runtime.v1.ReconcileReport
-	35, // 9: quoin.runtime.v1.ControlEnvelope.result_proposal:type_name -> quoin.runtime.v1.ResultProposal
-	37, // 10: quoin.runtime.v1.ControlEnvelope.result_ack:type_name -> quoin.runtime.v1.ResultAck
-	38, // 11: quoin.runtime.v1.ControlEnvelope.cancel_attempt:type_name -> quoin.runtime.v1.CancelAttempt
-	39, // 12: quoin.runtime.v1.ControlEnvelope.cancel_ack:type_name -> quoin.runtime.v1.CancelAck
-	40, // 13: quoin.runtime.v1.ControlEnvelope.go_away:type_name -> quoin.runtime.v1.GoAway
-	41, // 14: quoin.runtime.v1.ControlEnvelope.begin_model_call:type_name -> quoin.runtime.v1.BeginModelCall
-	43, // 15: quoin.runtime.v1.ControlEnvelope.begin_model_call_ack:type_name -> quoin.runtime.v1.BeginModelCallAck
-	44, // 16: quoin.runtime.v1.ControlEnvelope.model_token_delta:type_name -> quoin.runtime.v1.ModelTokenDelta
-	45, // 17: quoin.runtime.v1.ControlEnvelope.complete_model_call:type_name -> quoin.runtime.v1.CompleteModelCall
-	49, // 18: quoin.runtime.v1.ControlEnvelope.complete_model_call_ack:type_name -> quoin.runtime.v1.CompleteModelCallAck
-	50, // 19: quoin.runtime.v1.ControlEnvelope.begin_tool_call:type_name -> quoin.runtime.v1.BeginToolCall
-	51, // 20: quoin.runtime.v1.ControlEnvelope.begin_tool_call_ack:type_name -> quoin.runtime.v1.BeginToolCallAck
-	52, // 21: quoin.runtime.v1.ControlEnvelope.complete_tool_call:type_name -> quoin.runtime.v1.CompleteToolCall
-	53, // 22: quoin.runtime.v1.ControlEnvelope.complete_tool_call_ack:type_name -> quoin.runtime.v1.CompleteToolCallAck
-	0,  // 23: quoin.runtime.v1.Hello.slot:type_name -> quoin.runtime.v1.RuntimeSlot
-	5,  // 24: quoin.runtime.v1.HelloAck.reject_reason:type_name -> quoin.runtime.v1.HelloRejectReason
-	25, // 25: quoin.runtime.v1.Heartbeat.capacity:type_name -> quoin.runtime.v1.Capacity
-	1,  // 26: quoin.runtime.v1.DispatchAttempt.attempt_type:type_name -> quoin.runtime.v1.AttemptType
-	2,  // 27: quoin.runtime.v1.DispatchAttempt.scope_type:type_name -> quoin.runtime.v1.ScopeType
-	74, // 28: quoin.runtime.v1.DispatchAttempt.lease_deadline:type_name -> google.protobuf.Timestamp
-	27, // 29: quoin.runtime.v1.DispatchAttempt.input:type_name -> quoin.runtime.v1.AttemptInputSnapshot
-	28, // 30: quoin.runtime.v1.AttemptInputSnapshot.artifact_refs:type_name -> quoin.runtime.v1.ArtifactRef
-	29, // 31: quoin.runtime.v1.AttemptInputSnapshot.connection_grants:type_name -> quoin.runtime.v1.ConnectionGrant
-	6,  // 32: quoin.runtime.v1.AttemptReject.reason:type_name -> quoin.runtime.v1.AttemptRejectReason
-	4,  // 33: quoin.runtime.v1.ResultProposal.outcome:type_name -> quoin.runtime.v1.AttemptOutcome
-	3,  // 34: quoin.runtime.v1.ResultProposal.termination_reason:type_name -> quoin.runtime.v1.TerminationReason
-	36, // 35: quoin.runtime.v1.ResultProposal.payload:type_name -> quoin.runtime.v1.ResultPayload
-	10, // 36: quoin.runtime.v1.GoAway.reason:type_name -> quoin.runtime.v1.GoAwayReason
-	42, // 37: quoin.runtime.v1.BeginModelCall.input_items:type_name -> quoin.runtime.v1.ModelInputItem
-	12, // 38: quoin.runtime.v1.BeginModelCall.operation:type_name -> quoin.runtime.v1.ModelOperation
-	13, // 39: quoin.runtime.v1.ModelInputItem.item_kind:type_name -> quoin.runtime.v1.ModelInputItemKind
-	14, // 40: quoin.runtime.v1.ModelInputItem.role:type_name -> quoin.runtime.v1.ModelInputRole
-	29, // 41: quoin.runtime.v1.BeginModelCallAck.model_provider_grant:type_name -> quoin.runtime.v1.ConnectionGrant
-	16, // 42: quoin.runtime.v1.CompleteModelCall.outcome:type_name -> quoin.runtime.v1.ModelCallOutcome
-	17, // 43: quoin.runtime.v1.CompleteModelCall.failure_reason:type_name -> quoin.runtime.v1.ModelCallFailureReason
-	47, // 44: quoin.runtime.v1.CompleteModelCall.tool_calls:type_name -> quoin.runtime.v1.ProposedToolCall
-	46, // 45: quoin.runtime.v1.CompleteModelCall.embedding_vectors:type_name -> quoin.runtime.v1.EmbeddingVector
-	19, // 46: quoin.runtime.v1.ToolCallAuthorization.failure_mode:type_name -> quoin.runtime.v1.ToolFailureMode
-	29, // 47: quoin.runtime.v1.ToolCallAuthorization.connection_grants:type_name -> quoin.runtime.v1.ConnectionGrant
-	48, // 48: quoin.runtime.v1.CompleteModelCallAck.tool_calls:type_name -> quoin.runtime.v1.ToolCallAuthorization
-	15, // 49: quoin.runtime.v1.CompleteModelCallAck.reject_reason:type_name -> quoin.runtime.v1.ModelCallCompletionRejectReason
-	20, // 50: quoin.runtime.v1.CompleteToolCall.outcome:type_name -> quoin.runtime.v1.ToolCallOutcome
-	36, // 51: quoin.runtime.v1.CompleteToolCall.payload:type_name -> quoin.runtime.v1.ResultPayload
-	36, // 52: quoin.runtime.v1.CompleteToolCallAck.committed_payload:type_name -> quoin.runtime.v1.ResultPayload
-	28, // 53: quoin.runtime.v1.CompleteToolCallAck.artifact_ref:type_name -> quoin.runtime.v1.ArtifactRef
-	56, // 54: quoin.runtime.v1.FetchCredentialGrantResponse.thanos:type_name -> quoin.runtime.v1.ThanosCredentialSecret
-	57, // 55: quoin.runtime.v1.FetchCredentialGrantResponse.model_provider:type_name -> quoin.runtime.v1.ModelProviderCredentialSecret
-	59, // 56: quoin.runtime.v1.ArtifactUploadFrame.header:type_name -> quoin.runtime.v1.ArtifactUploadHeader
-	60, // 57: quoin.runtime.v1.ArtifactUploadFrame.chunk:type_name -> quoin.runtime.v1.ArtifactUploadChunk
-	61, // 58: quoin.runtime.v1.ArtifactUploadFrame.end:type_name -> quoin.runtime.v1.ArtifactUploadEnd
-	7,  // 59: quoin.runtime.v1.ArtifactUploadHeader.kind:type_name -> quoin.runtime.v1.ArtifactKind
-	8,  // 60: quoin.runtime.v1.ArtifactUploadHeader.retention_kind:type_name -> quoin.runtime.v1.RetentionKind
-	9,  // 61: quoin.runtime.v1.ArtifactUploadResult.reject_reason:type_name -> quoin.runtime.v1.UploadRejectReason
-	66, // 62: quoin.runtime.v1.ArtifactGrepTextResponse.matches:type_name -> quoin.runtime.v1.ArtifactTextMatch
-	70, // 63: quoin.runtime.v1.GetCredentialSnapshotResponse.sources:type_name -> quoin.runtime.v1.AlertSourceSnapshot
-	71, // 64: quoin.runtime.v1.AlertSourceSnapshot.credentials:type_name -> quoin.runtime.v1.CredentialDigestEntry
-	74, // 65: quoin.runtime.v1.DeliveryRelayRequest.received_at:type_name -> google.protobuf.Timestamp
-	11, // 66: quoin.runtime.v1.DeliveryRelayResponse.status:type_name -> quoin.runtime.v1.DeliveryStatus
-	21, // 67: quoin.runtime.v1.RuntimeControl.Connect:input_type -> quoin.runtime.v1.ControlEnvelope
-	54, // 68: quoin.runtime.v1.RuntimeControl.FetchCredentialGrant:input_type -> quoin.runtime.v1.FetchCredentialGrantRequest
-	58, // 69: quoin.runtime.v1.ArtifactService.Upload:input_type -> quoin.runtime.v1.ArtifactUploadFrame
-	63, // 70: quoin.runtime.v1.ArtifactService.ReadText:input_type -> quoin.runtime.v1.ArtifactReadTextRequest
-	65, // 71: quoin.runtime.v1.ArtifactService.GrepText:input_type -> quoin.runtime.v1.ArtifactGrepTextRequest
-	68, // 72: quoin.runtime.v1.SteleRelay.GetCredentialSnapshot:input_type -> quoin.runtime.v1.GetCredentialSnapshotRequest
-	72, // 73: quoin.runtime.v1.SteleRelay.Deliver:input_type -> quoin.runtime.v1.DeliveryRelayRequest
-	21, // 74: quoin.runtime.v1.RuntimeControl.Connect:output_type -> quoin.runtime.v1.ControlEnvelope
-	55, // 75: quoin.runtime.v1.RuntimeControl.FetchCredentialGrant:output_type -> quoin.runtime.v1.FetchCredentialGrantResponse
-	62, // 76: quoin.runtime.v1.ArtifactService.Upload:output_type -> quoin.runtime.v1.ArtifactUploadResult
-	64, // 77: quoin.runtime.v1.ArtifactService.ReadText:output_type -> quoin.runtime.v1.ArtifactReadTextResponse
-	67, // 78: quoin.runtime.v1.ArtifactService.GrepText:output_type -> quoin.runtime.v1.ArtifactGrepTextResponse
-	69, // 79: quoin.runtime.v1.SteleRelay.GetCredentialSnapshot:output_type -> quoin.runtime.v1.GetCredentialSnapshotResponse
-	73, // 80: quoin.runtime.v1.SteleRelay.Deliver:output_type -> quoin.runtime.v1.DeliveryRelayResponse
-	74, // [74:81] is the sub-list for method output_type
-	67, // [67:74] is the sub-list for method input_type
-	67, // [67:67] is the sub-list for extension type_name
-	67, // [67:67] is the sub-list for extension extendee
-	0,  // [0:67] is the sub-list for field type_name
+	23, // 0: quoin.runtime.v1.ControlEnvelope.hello:type_name -> quoin.runtime.v1.Hello
+	24, // 1: quoin.runtime.v1.ControlEnvelope.hello_ack:type_name -> quoin.runtime.v1.HelloAck
+	25, // 2: quoin.runtime.v1.ControlEnvelope.heartbeat:type_name -> quoin.runtime.v1.Heartbeat
+	27, // 3: quoin.runtime.v1.ControlEnvelope.dispatch_attempt:type_name -> quoin.runtime.v1.DispatchAttempt
+	31, // 4: quoin.runtime.v1.ControlEnvelope.attempt_accept:type_name -> quoin.runtime.v1.AttemptAccept
+	32, // 5: quoin.runtime.v1.ControlEnvelope.attempt_reject:type_name -> quoin.runtime.v1.AttemptReject
+	33, // 6: quoin.runtime.v1.ControlEnvelope.attempt_progress:type_name -> quoin.runtime.v1.AttemptProgress
+	34, // 7: quoin.runtime.v1.ControlEnvelope.reconcile_request:type_name -> quoin.runtime.v1.ReconcileRequest
+	35, // 8: quoin.runtime.v1.ControlEnvelope.reconcile_report:type_name -> quoin.runtime.v1.ReconcileReport
+	36, // 9: quoin.runtime.v1.ControlEnvelope.result_proposal:type_name -> quoin.runtime.v1.ResultProposal
+	38, // 10: quoin.runtime.v1.ControlEnvelope.result_ack:type_name -> quoin.runtime.v1.ResultAck
+	39, // 11: quoin.runtime.v1.ControlEnvelope.cancel_attempt:type_name -> quoin.runtime.v1.CancelAttempt
+	40, // 12: quoin.runtime.v1.ControlEnvelope.cancel_ack:type_name -> quoin.runtime.v1.CancelAck
+	41, // 13: quoin.runtime.v1.ControlEnvelope.go_away:type_name -> quoin.runtime.v1.GoAway
+	42, // 14: quoin.runtime.v1.ControlEnvelope.begin_model_call:type_name -> quoin.runtime.v1.BeginModelCall
+	44, // 15: quoin.runtime.v1.ControlEnvelope.begin_model_call_ack:type_name -> quoin.runtime.v1.BeginModelCallAck
+	45, // 16: quoin.runtime.v1.ControlEnvelope.model_token_delta:type_name -> quoin.runtime.v1.ModelTokenDelta
+	46, // 17: quoin.runtime.v1.ControlEnvelope.complete_model_call:type_name -> quoin.runtime.v1.CompleteModelCall
+	50, // 18: quoin.runtime.v1.ControlEnvelope.complete_model_call_ack:type_name -> quoin.runtime.v1.CompleteModelCallAck
+	51, // 19: quoin.runtime.v1.ControlEnvelope.begin_tool_call:type_name -> quoin.runtime.v1.BeginToolCall
+	52, // 20: quoin.runtime.v1.ControlEnvelope.begin_tool_call_ack:type_name -> quoin.runtime.v1.BeginToolCallAck
+	53, // 21: quoin.runtime.v1.ControlEnvelope.complete_tool_call:type_name -> quoin.runtime.v1.CompleteToolCall
+	54, // 22: quoin.runtime.v1.ControlEnvelope.complete_tool_call_ack:type_name -> quoin.runtime.v1.CompleteToolCallAck
+	55, // 23: quoin.runtime.v1.ControlEnvelope.external_tool_result:type_name -> quoin.runtime.v1.ExternalToolResult
+	0,  // 24: quoin.runtime.v1.Hello.slot:type_name -> quoin.runtime.v1.RuntimeSlot
+	5,  // 25: quoin.runtime.v1.HelloAck.reject_reason:type_name -> quoin.runtime.v1.HelloRejectReason
+	26, // 26: quoin.runtime.v1.Heartbeat.capacity:type_name -> quoin.runtime.v1.Capacity
+	1,  // 27: quoin.runtime.v1.DispatchAttempt.attempt_type:type_name -> quoin.runtime.v1.AttemptType
+	2,  // 28: quoin.runtime.v1.DispatchAttempt.scope_type:type_name -> quoin.runtime.v1.ScopeType
+	86, // 29: quoin.runtime.v1.DispatchAttempt.lease_deadline:type_name -> google.protobuf.Timestamp
+	28, // 30: quoin.runtime.v1.DispatchAttempt.input:type_name -> quoin.runtime.v1.AttemptInputSnapshot
+	29, // 31: quoin.runtime.v1.AttemptInputSnapshot.artifact_refs:type_name -> quoin.runtime.v1.ArtifactRef
+	30, // 32: quoin.runtime.v1.AttemptInputSnapshot.connection_grants:type_name -> quoin.runtime.v1.ConnectionGrant
+	6,  // 33: quoin.runtime.v1.AttemptReject.reason:type_name -> quoin.runtime.v1.AttemptRejectReason
+	4,  // 34: quoin.runtime.v1.ResultProposal.outcome:type_name -> quoin.runtime.v1.AttemptOutcome
+	3,  // 35: quoin.runtime.v1.ResultProposal.termination_reason:type_name -> quoin.runtime.v1.TerminationReason
+	37, // 36: quoin.runtime.v1.ResultProposal.payload:type_name -> quoin.runtime.v1.ResultPayload
+	10, // 37: quoin.runtime.v1.GoAway.reason:type_name -> quoin.runtime.v1.GoAwayReason
+	43, // 38: quoin.runtime.v1.BeginModelCall.input_items:type_name -> quoin.runtime.v1.ModelInputItem
+	11, // 39: quoin.runtime.v1.BeginModelCall.operation:type_name -> quoin.runtime.v1.ModelOperation
+	12, // 40: quoin.runtime.v1.ModelInputItem.item_kind:type_name -> quoin.runtime.v1.ModelInputItemKind
+	13, // 41: quoin.runtime.v1.ModelInputItem.role:type_name -> quoin.runtime.v1.ModelInputRole
+	30, // 42: quoin.runtime.v1.BeginModelCallAck.model_provider_grant:type_name -> quoin.runtime.v1.ConnectionGrant
+	15, // 43: quoin.runtime.v1.CompleteModelCall.outcome:type_name -> quoin.runtime.v1.ModelCallOutcome
+	16, // 44: quoin.runtime.v1.CompleteModelCall.failure_reason:type_name -> quoin.runtime.v1.ModelCallFailureReason
+	48, // 45: quoin.runtime.v1.CompleteModelCall.tool_calls:type_name -> quoin.runtime.v1.ProposedToolCall
+	47, // 46: quoin.runtime.v1.CompleteModelCall.embedding_vectors:type_name -> quoin.runtime.v1.EmbeddingVector
+	18, // 47: quoin.runtime.v1.ToolCallAuthorization.failure_mode:type_name -> quoin.runtime.v1.ToolFailureMode
+	30, // 48: quoin.runtime.v1.ToolCallAuthorization.connection_grants:type_name -> quoin.runtime.v1.ConnectionGrant
+	49, // 49: quoin.runtime.v1.CompleteModelCallAck.tool_calls:type_name -> quoin.runtime.v1.ToolCallAuthorization
+	14, // 50: quoin.runtime.v1.CompleteModelCallAck.reject_reason:type_name -> quoin.runtime.v1.ModelCallCompletionRejectReason
+	19, // 51: quoin.runtime.v1.CompleteToolCall.outcome:type_name -> quoin.runtime.v1.ToolCallOutcome
+	37, // 52: quoin.runtime.v1.CompleteToolCall.payload:type_name -> quoin.runtime.v1.ResultPayload
+	37, // 53: quoin.runtime.v1.CompleteToolCallAck.committed_payload:type_name -> quoin.runtime.v1.ResultPayload
+	29, // 54: quoin.runtime.v1.CompleteToolCallAck.artifact_ref:type_name -> quoin.runtime.v1.ArtifactRef
+	19, // 55: quoin.runtime.v1.ExternalToolResult.outcome:type_name -> quoin.runtime.v1.ToolCallOutcome
+	37, // 56: quoin.runtime.v1.ExternalToolResult.payload:type_name -> quoin.runtime.v1.ResultPayload
+	29, // 57: quoin.runtime.v1.ExternalToolResult.artifact_ref:type_name -> quoin.runtime.v1.ArtifactRef
+	59, // 58: quoin.runtime.v1.FetchCredentialGrantResponse.model_provider:type_name -> quoin.runtime.v1.ModelProviderCredentialSecret
+	61, // 59: quoin.runtime.v1.ArtifactUploadFrame.header:type_name -> quoin.runtime.v1.ArtifactUploadHeader
+	62, // 60: quoin.runtime.v1.ArtifactUploadFrame.chunk:type_name -> quoin.runtime.v1.ArtifactUploadChunk
+	63, // 61: quoin.runtime.v1.ArtifactUploadFrame.end:type_name -> quoin.runtime.v1.ArtifactUploadEnd
+	7,  // 62: quoin.runtime.v1.ArtifactUploadHeader.kind:type_name -> quoin.runtime.v1.ArtifactKind
+	8,  // 63: quoin.runtime.v1.ArtifactUploadHeader.retention_kind:type_name -> quoin.runtime.v1.RetentionKind
+	9,  // 64: quoin.runtime.v1.ArtifactUploadResult.reject_reason:type_name -> quoin.runtime.v1.UploadRejectReason
+	68, // 65: quoin.runtime.v1.ArtifactGrepTextResponse.matches:type_name -> quoin.runtime.v1.ArtifactTextMatch
+	71, // 66: quoin.runtime.v1.SteleEnvelope.hello:type_name -> quoin.runtime.v1.SteleHello
+	72, // 67: quoin.runtime.v1.SteleEnvelope.hello_ack:type_name -> quoin.runtime.v1.SteleHelloAck
+	73, // 68: quoin.runtime.v1.SteleEnvelope.heartbeat:type_name -> quoin.runtime.v1.SteleHeartbeat
+	74, // 69: quoin.runtime.v1.SteleEnvelope.execute:type_name -> quoin.runtime.v1.ExecutePlatformCall
+	75, // 70: quoin.runtime.v1.SteleEnvelope.execute_result:type_name -> quoin.runtime.v1.ExecutePlatformCallResult
+	41, // 71: quoin.runtime.v1.SteleEnvelope.go_away:type_name -> quoin.runtime.v1.GoAway
+	85, // 72: quoin.runtime.v1.ExecutePlatformCall.headers:type_name -> quoin.runtime.v1.ExecutePlatformCall.HeadersEntry
+	20, // 73: quoin.runtime.v1.ExecutePlatformCallResult.status:type_name -> quoin.runtime.v1.PlatformCallStatus
+	58, // 74: quoin.runtime.v1.AcquireConnectionCredentialResponse.thanos:type_name -> quoin.runtime.v1.ThanosCredentialSecret
+	80, // 75: quoin.runtime.v1.GetCredentialSnapshotResponse.sources:type_name -> quoin.runtime.v1.AlertSourceSnapshot
+	81, // 76: quoin.runtime.v1.AlertSourceSnapshot.credentials:type_name -> quoin.runtime.v1.CredentialDigestEntry
+	83, // 77: quoin.runtime.v1.DeliverEventsRequest.events:type_name -> quoin.runtime.v1.RelayEvent
+	86, // 78: quoin.runtime.v1.RelayEvent.received_at:type_name -> google.protobuf.Timestamp
+	21, // 79: quoin.runtime.v1.DeliverEventsResponse.results:type_name -> quoin.runtime.v1.EventDeliveryStatus
+	22, // 80: quoin.runtime.v1.RuntimeControl.Connect:input_type -> quoin.runtime.v1.ControlEnvelope
+	56, // 81: quoin.runtime.v1.RuntimeControl.FetchCredentialGrant:input_type -> quoin.runtime.v1.FetchCredentialGrantRequest
+	60, // 82: quoin.runtime.v1.ArtifactService.Upload:input_type -> quoin.runtime.v1.ArtifactUploadFrame
+	65, // 83: quoin.runtime.v1.ArtifactService.ReadText:input_type -> quoin.runtime.v1.ArtifactReadTextRequest
+	67, // 84: quoin.runtime.v1.ArtifactService.GrepText:input_type -> quoin.runtime.v1.ArtifactGrepTextRequest
+	70, // 85: quoin.runtime.v1.SteleRelay.Connect:input_type -> quoin.runtime.v1.SteleEnvelope
+	78, // 86: quoin.runtime.v1.SteleRelay.GetCredentialSnapshot:input_type -> quoin.runtime.v1.GetCredentialSnapshotRequest
+	82, // 87: quoin.runtime.v1.SteleRelay.DeliverEvents:input_type -> quoin.runtime.v1.DeliverEventsRequest
+	76, // 88: quoin.runtime.v1.SteleRelay.AcquireConnectionCredential:input_type -> quoin.runtime.v1.AcquireConnectionCredentialRequest
+	22, // 89: quoin.runtime.v1.RuntimeControl.Connect:output_type -> quoin.runtime.v1.ControlEnvelope
+	57, // 90: quoin.runtime.v1.RuntimeControl.FetchCredentialGrant:output_type -> quoin.runtime.v1.FetchCredentialGrantResponse
+	64, // 91: quoin.runtime.v1.ArtifactService.Upload:output_type -> quoin.runtime.v1.ArtifactUploadResult
+	66, // 92: quoin.runtime.v1.ArtifactService.ReadText:output_type -> quoin.runtime.v1.ArtifactReadTextResponse
+	69, // 93: quoin.runtime.v1.ArtifactService.GrepText:output_type -> quoin.runtime.v1.ArtifactGrepTextResponse
+	70, // 94: quoin.runtime.v1.SteleRelay.Connect:output_type -> quoin.runtime.v1.SteleEnvelope
+	79, // 95: quoin.runtime.v1.SteleRelay.GetCredentialSnapshot:output_type -> quoin.runtime.v1.GetCredentialSnapshotResponse
+	84, // 96: quoin.runtime.v1.SteleRelay.DeliverEvents:output_type -> quoin.runtime.v1.DeliverEventsResponse
+	77, // 97: quoin.runtime.v1.SteleRelay.AcquireConnectionCredential:output_type -> quoin.runtime.v1.AcquireConnectionCredentialResponse
+	89, // [89:98] is the sub-list for method output_type
+	80, // [80:89] is the sub-list for method input_type
+	80, // [80:80] is the sub-list for extension type_name
+	80, // [80:80] is the sub-list for extension extendee
+	0,  // [0:80] is the sub-list for field type_name
 }
 
 func init() { file_runtime_proto_init() }
@@ -6421,23 +7426,31 @@ func file_runtime_proto_init() {
 		(*ControlEnvelope_BeginToolCallAck)(nil),
 		(*ControlEnvelope_CompleteToolCall)(nil),
 		(*ControlEnvelope_CompleteToolCallAck)(nil),
+		(*ControlEnvelope_ExternalToolResult)(nil),
 	}
-	file_runtime_proto_msgTypes[34].OneofWrappers = []any{
-		(*FetchCredentialGrantResponse_Thanos)(nil),
+	file_runtime_proto_msgTypes[35].OneofWrappers = []any{
 		(*FetchCredentialGrantResponse_ModelProvider)(nil),
 	}
-	file_runtime_proto_msgTypes[37].OneofWrappers = []any{
+	file_runtime_proto_msgTypes[38].OneofWrappers = []any{
 		(*ArtifactUploadFrame_Header)(nil),
 		(*ArtifactUploadFrame_Chunk)(nil),
 		(*ArtifactUploadFrame_End)(nil),
+	}
+	file_runtime_proto_msgTypes[48].OneofWrappers = []any{
+		(*SteleEnvelope_Hello)(nil),
+		(*SteleEnvelope_HelloAck)(nil),
+		(*SteleEnvelope_Heartbeat)(nil),
+		(*SteleEnvelope_Execute)(nil),
+		(*SteleEnvelope_ExecuteResult)(nil),
+		(*SteleEnvelope_GoAway)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_runtime_proto_rawDesc), len(file_runtime_proto_rawDesc)),
-			NumEnums:      21,
-			NumMessages:   53,
+			NumEnums:      22,
+			NumMessages:   64,
 			NumExtensions: 0,
 			NumServices:   3,
 		},

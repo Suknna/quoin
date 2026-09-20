@@ -63,9 +63,9 @@ type apiServer struct {
 	auth        *auth.Service
 	// providers is the login-channel registry (ADR-0010); /api/v1/auth/config
 	// projects it and the login page renders from that projection.
-	providers     *auth.Registry
-	authnConfig   *contract.QuoinAuthenticationConfig
-	dataDirectory string
+	providers                    *auth.Registry
+	authnConfig                  *contract.QuoinAuthenticationConfig
+	dataDirectory                string
 	db                           *sql.DB
 	alerts                       *alerts.Service
 	platformFaults               *alerts.PlatformFaultReporter
@@ -88,7 +88,6 @@ type apiServer struct {
 	rootKey                      func() ([]byte, error)
 	backupCopy                   func(io.Writer, io.Reader) (int64, error)
 	backupAuthorize              func(context.Context, string, string) (auth.Session, error)
-	probeDispatchFunc            func(ctx context.Context, attemptID int64, summary connections.Summary, epoch uint64, bootID string, grantID int64, input []byte) error
 	cancelDispatchFunc           func(ctx context.Context, attemptID int64) error
 	analysisDispatchFunc         func(ctx context.Context, attemptID int64) error
 	knowledgeDispatchFunc        func(ctx context.Context, attemptID int64) error
@@ -371,7 +370,10 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	}
 	serverSet.relay = grpc.NewServer(grpc.KeepaliveEnforcementPolicy(runtimeRelayKeepalivePolicy()), grpc.Creds(runtimeTLSCreds))
 	serverSet.beforeShutdown = application.runtime.CloseAll
-	RegisterSteleRelay(serverSet.relay, NewSteleRelayServer(application.alerts))
+	// ADR-0011：Stele 网关流与出向编排。网关只持有自己的流投影（无发送
+	// 依赖），先构建再装配 relay 与控制服务。
+	steleGateway := NewSteleGateway()
+	RegisterSteleRelay(serverSet.relay, NewSteleRelayServer(application.alerts, application.connections, steleGateway))
 	artifactStore, err := artifact.NewStore(database.SQL, filepath.Join(config.DataDirectory, "artifacts"))
 	if err != nil {
 		return fmt.Errorf("open artifact store: %w", err)
@@ -464,7 +466,9 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	controlService.Investigations = application.investigations
 	controlService.Knowledge = application.knowledgeService
 	controlService.Artifacts = artifactStore
-	application.probeDispatchFunc = controlService.dispatchAttempt
+	// quoin_routed 工具编排依赖网关（平台调用下发）与进程内 Artifact 提交
+	// （Spill / artifact 工具执行），两者的装配都已完成。
+	controlService.SteleGateway = steleGateway
 	// The semantic search channel embeds the query through the same real
 	// dispatch path; the kick is best effort (failures leave the query
 	// attempt Queued for the reconnect sweep and an honestly empty page).
@@ -499,14 +503,20 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	RegisterRuntimeControl(serverSet.relay, controlService)
 	RegisterArtifactService(serverSet.relay, NewArtifactService(application.runtime, artifactStore))
 	// T12: the periodic lease sweeper converges attempts whose runtime
-	// disappeared without reconnecting (RUNTIME-TASK-006).
+	// disappeared without reconnecting (RUNTIME-TASK-006). It is also the
+	// crash backstop of locally-executed attempts (ADR-0011): a local lease
+	// that expired means the local executor died mid-run.
 	go controlService.RunLeaseSweeper(ctx)
 	go controlService.RunInspectionScheduler(ctx)
+	// ADR-0011: probes, source observation and inspection collection execute
+	// locally through the Stele gateway — the loop is the consumer that the
+	// Plinth dispatch kicks used to be.
+	go controlService.RunLocalExecutionLoop(ctx)
 	// Current published declarations are admitted immediately and thereafter by
 	// a process-owned poller. The domain command supplies durable interval,
 	// current-pointer, active-run, and command-key fences; maintenance returns
 	// above before this normal-runtime loop can start.
-	go NewSourceObservationScheduler(application.observations, controlService.dispatchQueuedSourceObservationAttempts).Run(ctx, func(err error) {
+	go NewSourceObservationScheduler(application.observations, controlService.kickLocalExecution).Run(ctx, func(err error) {
 		sharedops.LogEvent("quoin", "error", "source_observation.scheduler", err.Error())
 	})
 	application.upgradeGate = serverSet.upgradeGate

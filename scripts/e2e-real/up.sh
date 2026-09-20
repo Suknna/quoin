@@ -97,6 +97,7 @@ quoinRuntimeEndpoint: https://quoin:8443
 quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
 quoinRuntimeClientCertificateFile: /run/quoin-secrets/stele-client.crt
 quoinRuntimeClientPrivateKeyFile: /run/quoin-secrets/stele-client.key
+dataDirectory: /var/lib/stele
 EOF
 cat >"${runtime_root}/config/plinth.yaml" <<'EOF'
 component: plinth

@@ -1,38 +1,25 @@
 package worker
 
-// Real invocation-path tests for the thanos_query v3 supervisor executor
-// (ADR-0004): the model proposes query (+ optional sourceRef); the grant
-// frozen in the authorization transaction binds the source connection. The
-// preflight guards must seal their model-visible failure and RETURN — the
-// missing-return regression crashed the supervisor on meta.grants[0] — and
-// a valid source-mode call must reach the upstream exactly once.
+// QUOIN_ROUTED 工具的 supervisor 转发路径测试(ADR-0011):BeginToolCall
+// 围栏后 Plinth 不再本地执行,而是等待 Quoin 推送的 ExternalToolResult 并
+// 组装 worker 的 ToolResult;CompleteToolCall 不由 Plinth 发送(Quoin 已
+// 自行封存),失败形态按 error_code/error_detail 组装。
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 
+	workerv1 "github.com/Suknna/quoin/internal/gen/proto/plinth/worker/v1"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
-	plinthruntime "github.com/Suknna/quoin/internal/plinth/runtime"
-	"google.golang.org/grpc"
 )
 
-// thanosGrantRuntimeClient answers FetchCredentialGrant with a Thanos secret
-// whose baseUrl points at the test upstream, counting every fetch.
-type thanosGrantRuntimeClient struct {
-	fetches     atomic.Int64
-	baseURL     string
-	denyGrantID int64
-}
-
-// fakeToolCallChannel exercises the same BeginToolCall -> CompleteToolCall
-// control request sequence used by a live Runner, while retaining every
-// request for the assertions below.
+// fakeToolCallChannel exercises the BeginToolCall -> CompleteToolCall
+// control request sequence used by a live Runner, retaining every request
+// for the assertions below.
 type fakeToolCallChannel struct {
 	begins    []*runtimev1.BeginToolCall
 	completes []*runtimev1.CompleteToolCall
@@ -54,92 +41,171 @@ func (channel *fakeToolCallChannel) Request(_ context.Context, envelope *runtime
 	return nil, fmt.Errorf("unexpected control request %T", envelope.Msg)
 }
 
-func (*fakeToolCallChannel) BearerToken() (string, error) { return "test-runtime-token", nil }
-
-func (*thanosGrantRuntimeClient) Connect(context.Context, ...grpc.CallOption) (grpc.BidiStreamingClient[runtimev1.ControlEnvelope, runtimev1.ControlEnvelope], error) {
-	return nil, fmt.Errorf("Connect is not expected in typed tool execution")
+// fakeExternalResultChannel 立即投放一个预设的 ExternalToolResult,
+// 模拟 Quoin 在 BeginToolCallAck 之后推送封存结果。
+type fakeExternalResultChannel struct {
+	mu      sync.Mutex
+	waiting []int64
+	result  *runtimev1.ExternalToolResult
 }
 
-func (client *thanosGrantRuntimeClient) FetchCredentialGrant(_ context.Context, request *runtimev1.FetchCredentialGrantRequest, _ ...grpc.CallOption) (*runtimev1.FetchCredentialGrantResponse, error) {
-	client.fetches.Add(1)
-	if request.GetGrantId() == client.denyGrantID {
-		return nil, fmt.Errorf("grant denied")
+func (fake *fakeExternalResultChannel) AwaitExternalToolResult(ctx context.Context, toolCallID int64) (*runtimev1.ExternalToolResult, error) {
+	fake.mu.Lock()
+	fake.waiting = append(fake.waiting, toolCallID)
+	result := fake.result
+	fake.mu.Unlock()
+	if result == nil {
+		<-ctx.Done()
+		return nil, ctx.Err()
 	}
-	return &runtimev1.FetchCredentialGrantResponse{
-		RevisionConfigJson: []byte(fmt.Sprintf(`{"type":"thanos","baseUrl":%q}`, client.baseURL)),
-		Secret: &runtimev1.FetchCredentialGrantResponse_Thanos{Thanos: &runtimev1.ThanosCredentialSecret{
-			Username: "fixture", Password: "fixture",
-		}},
-	}, nil
+	return result, nil
 }
 
-func TestThanosQuerySourceModeSucceedsWithoutResourceRef(t *testing.T) {
-	assembleTestTypedExecutors(t)
-	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if !strings.HasPrefix(request.URL.Path, "/api/v1/query") {
-			http.NotFound(writer, request)
-			return
+func (fake *fakeExternalResultChannel) awaited() []int64 {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return append([]int64(nil), fake.waiting...)
+}
+
+// readWorkerToolResult 解码 writer 写出的全部 worker 帧,返回其中的
+// ToolResult(ToolCallStarted 之后到达)。
+func readWorkerToolResult(t *testing.T, buffer *bytes.Buffer) *workerv1.ToolResult {
+	t.Helper()
+	reader := NewFrameReader(bytes.NewReader(buffer.Bytes()))
+	var result *workerv1.ToolResult
+	for {
+		envelope, err := reader.Read()
+		if err != nil {
+			break
 		}
-		fmt.Fprint(writer, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"__name__":"up"},"value":[1757700000,"1"]}]}}`)
-	}))
-	defer upstream.Close()
+		if toolResult := envelope.GetToolResult(); toolResult != nil {
+			result = toolResult
+		}
+	}
+	if result == nil {
+		t.Fatalf("no ToolResult frame in %d bytes of worker output", buffer.Len())
+	}
+	return result
+}
 
+func TestQuoinRoutedToolForwardsSealedResult(t *testing.T) {
 	control := &fakeToolCallChannel{}
-	client := &thanosGrantRuntimeClient{baseURL: upstream.URL}
-	meta := toolMeta{
-		name: "thanos_query", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED",
-		arguments: map[string]any{"query": "up", "sourceRef": "prom-main"},
-		grants:    []*runtimev1.ConnectionGrant{{GrantId: 71}},
-	}
-	runner := &Runner{
-		Client: client, toolCalls: control,
-		Binding: plinthruntime.DispatchBinding{BootID: "boot-source", Epoch: 3},
-		Config:  RunnerConfig{WorkspaceRoot: t.TempDir()},
-		tools:   map[int64]toolMeta{73: meta},
-	}
-	if err := runner.executeTool(context.Background(), NewFrameWriter(&bytes.Buffer{}), 41, 73, meta); err != nil {
+	canonical := []byte(`{"success":true,"output":"ok"}`)
+	external := &fakeExternalResultChannel{result: &runtimev1.ExternalToolResult{
+		AttemptId: 41, ToolCallId: 73,
+		Outcome:     runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_SUCCEEDED,
+		Payload:     &runtimev1.ResultPayload{SchemaKind: "artifact_read_result_v1", CanonicalJson: canonical},
+		ArtifactRef: &runtimev1.ArtifactRef{ArtifactId: 901, MediaType: "text/plain", SizeBytes: 12},
+		EvidenceIds: []int64{501, 502},
+	}}
+	meta := toolMeta{name: "artifact_read", mode: "TOOL_EXECUTION_MODE_QUOIN_ROUTED"}
+	runner := &Runner{Client: nil, toolCalls: control, externalResults: external, tools: map[int64]toolMeta{73: meta}}
+	var buffer bytes.Buffer
+	if err := runner.executeTool(context.Background(), NewFrameWriter(&buffer), 41, 73, meta); err != nil {
 		t.Fatal(err)
 	}
-	if client.fetches.Load() != 1 {
-		t.Fatalf("FetchCredentialGrant calls=%d, want exactly 1", client.fetches.Load())
+	if len(control.begins) != 1 || control.begins[0].GetToolCallId() != 73 {
+		t.Fatalf("begins=%+v, want exactly one BeginToolCall for 73", control.begins)
 	}
-	if len(control.completes) != 1 {
-		t.Fatalf("completions=%d, want exactly one", len(control.completes))
+	// Quoin 已自行封存:Plinth 不得发送 CompleteToolCall。
+	if len(control.completes) != 0 {
+		t.Fatalf("completions=%d, want 0 (Quoin seals quoin_routed tools)", len(control.completes))
 	}
-	result := control.completes[0].GetPayload()
-	if result.GetSchemaKind() != "thanos_query_result_v1" {
-		t.Fatalf("schema kind = %q, want thanos_query_result_v1", result.GetSchemaKind())
+	if waited := external.awaited(); len(waited) != 1 || waited[0] != 73 {
+		t.Fatalf("external wait=%v, want [73]", waited)
 	}
-	payload := string(result.GetCanonicalJson())
-	if !strings.Contains(payload, `"success":true`) || !strings.Contains(payload, `"resultType":"vector"`) {
-		t.Fatalf("payload=%s, want a successful vector query result", payload)
+	result := readWorkerToolResult(t, &buffer)
+	if result.GetToolCallId() != 73 {
+		t.Fatalf("tool call id drifted: %d", result.GetToolCallId())
+	}
+	if !result.GetSuccess() || !bytes.Equal(result.GetResultJson(), canonical) {
+		t.Fatalf("result must forward the sealed payload verbatim: success=%t json=%s", result.GetSuccess(), result.GetResultJson())
+	}
+	if ref := result.GetArtifactRef(); ref == nil || ref.GetArtifactId() != 901 {
+		t.Fatalf("artifact ref must map through: %+v", result.GetArtifactRef())
+	}
+	if ids := result.GetEvidenceIds(); len(ids) != 2 || ids[0] != 501 || ids[1] != 502 {
+		t.Fatalf("evidence ids must forward: %v", ids)
 	}
 }
 
-// The missing-return regression: an ungrantable call must seal exactly one
-// grant_missing completion without fetching credentials and without
-// reaching meta.grants[0] (which panicked the supervisor).
-func TestThanosQueryWithoutGrantSealsOnceAndNeverFetches(t *testing.T) {
-	assembleTestTypedExecutors(t)
+func TestQuoinRoutedToolFailureShape(t *testing.T) {
 	control := &fakeToolCallChannel{}
-	client := &thanosGrantRuntimeClient{baseURL: "http://127.0.0.1:1", denyGrantID: -1}
-	meta := toolMeta{
-		name: "thanos_query", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED",
-		arguments: map[string]any{"query": "up"},
-	}
-	runner := &Runner{
-		Client: client, toolCalls: control,
-		Binding: plinthruntime.DispatchBinding{BootID: "boot-source", Epoch: 3},
-		Config:  RunnerConfig{WorkspaceRoot: t.TempDir()},
-		tools:   map[int64]toolMeta{73: meta},
-	}
-	if err := runner.executeTool(context.Background(), NewFrameWriter(&bytes.Buffer{}), 41, 73, meta); err != nil {
+	external := &fakeExternalResultChannel{result: &runtimev1.ExternalToolResult{
+		AttemptId: 41, ToolCallId: 74,
+		Outcome:     runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_FAILED,
+		ErrorCode:   "connection_unreachable",
+		ErrorDetail: "Stele 网关无法建立连接",
+	}}
+	meta := toolMeta{name: "thanos_query", mode: "TOOL_EXECUTION_MODE_QUOIN_ROUTED"}
+	runner := &Runner{toolCalls: control, externalResults: external, tools: map[int64]toolMeta{74: meta}}
+	var buffer bytes.Buffer
+	if err := runner.executeTool(context.Background(), NewFrameWriter(&buffer), 41, 74, meta); err != nil {
 		t.Fatal(err)
 	}
-	if client.fetches.Load() != 0 {
-		t.Fatalf("FetchCredentialGrant calls=%d, want 0", client.fetches.Load())
+	result := readWorkerToolResult(t, &buffer)
+	if result.GetSuccess() {
+		t.Fatal("failed outcome must compose a failure ToolResult")
 	}
-	if len(control.completes) != 1 || control.completes[0].GetErrorCode() != "grant_missing" {
-		t.Fatalf("completions=%+v, want exactly one grant_missing result", control.completes)
+	if result.GetErrorCode() != "connection_unreachable" || result.GetErrorDetail() != "Stele 网关无法建立连接" {
+		t.Fatalf("error fields drifted: %s / %s", result.GetErrorCode(), result.GetErrorDetail())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(result.GetResultJson(), &payload); err != nil {
+		t.Fatalf("synthesized failure payload must be valid JSON: %v", err)
+	}
+	if payload["success"] != false || payload["errorCode"] != "connection_unreachable" {
+		t.Fatalf("synthesized failure payload drifted: %s", result.GetResultJson())
+	}
+	if len(control.completes) != 0 {
+		t.Fatalf("completions=%d, want 0 (Quoin seals quoin_routed tools)", len(control.completes))
+	}
+}
+
+// attempt 取消时等待方必须让出:ctx 结束即返回错误,worker 不会被一个
+// 永不到来的 ToolResult 卡死。
+func TestQuoinRoutedToolAbandonsOnContextCancel(t *testing.T) {
+	control := &fakeToolCallChannel{}
+	external := &fakeExternalResultChannel{} // never delivers
+	meta := toolMeta{name: "artifact_read", mode: "TOOL_EXECUTION_MODE_QUOIN_ROUTED"}
+	runner := &Runner{toolCalls: control, externalResults: external, tools: map[int64]toolMeta{75: meta}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var buffer bytes.Buffer
+	if err := runner.executeTool(ctx, NewFrameWriter(&buffer), 41, 75, meta); err == nil {
+		t.Fatal("cancelled context must abort the quoin_routed wait")
+	}
+	if waited := external.awaited(); len(waited) != 1 || waited[0] != 75 {
+		t.Fatalf("external wait=%v, want [75]", waited)
+	}
+}
+
+// worker_local 工具在 ToolCallStarted 后即返回:执行权在 worker 沙箱,
+// supervisor 不等待任何外部结果。
+func TestWorkerLocalToolReturnsAfterStart(t *testing.T) {
+	control := &fakeToolCallChannel{}
+	external := &fakeExternalResultChannel{}
+	meta := toolMeta{name: "bash", mode: "TOOL_EXECUTION_MODE_WORKER_LOCAL"}
+	runner := &Runner{toolCalls: control, externalResults: external, tools: map[int64]toolMeta{76: meta}}
+	var buffer bytes.Buffer
+	if err := runner.executeTool(context.Background(), NewFrameWriter(&buffer), 41, 76, meta); err != nil {
+		t.Fatal(err)
+	}
+	if len(external.awaited()) != 0 {
+		t.Fatal("worker_local tool must not wait for an external result")
+	}
+	// ToolCallStarted 帧写出了;无 ToolResult(worker 随后自执行)。
+	if buffer.Len() == 0 {
+		t.Fatal("ToolCallStarted must be written")
+	}
+}
+
+// 词表外的执行模式必须 fail fast。
+func TestUnsupportedExecutionModeFailsFast(t *testing.T) {
+	control := &fakeToolCallChannel{}
+	meta := toolMeta{name: "odd", mode: "TOOL_EXECUTION_MODE_SUPERVISOR_TYPED"}
+	runner := &Runner{toolCalls: control, tools: map[int64]toolMeta{77: meta}}
+	if err := runner.executeTool(context.Background(), NewFrameWriter(&bytes.Buffer{}), 41, 77, meta); err == nil {
+		t.Fatal("retired execution mode must fail fast")
 	}
 }
