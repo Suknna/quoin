@@ -4,7 +4,7 @@ package auth_test
 // unique-admin design: ledger replay, row-version fences, the immutable
 // administrator, operator-only creation with admin-assigned contacts,
 // session revocation semantics and audit projections. Actors log in through
-// the full two-step flow — the direct login path is gone.
+// the single-step local channel (ADR-0010).
 
 import (
 	"context"
@@ -15,58 +15,33 @@ import (
 	"testing"
 
 	"github.com/Suknna/quoin/internal/quoin/auth"
-	"github.com/Suknna/quoin/internal/quoin/bootstrap"
-	"github.com/Suknna/quoin/test/support"
 )
 
-const fixtureAdminPassword = "Root admin passphrase 2026!"
+const (
+	fixtureOperatorTempPass = "Operator one passphrase 2026!"
+	fixtureOperatorEmail    = "op1@quoin.test"
+)
 
 type adminFixture struct {
 	service *auth.Service
 	db      *sql.DB
-	sender  *recordingSender
 	admin   auth.Session
 	t       *testing.T
 }
 
-func newAuthService(t *testing.T) (*auth.Service, *sql.DB) {
-	t.Helper()
-	config := testConfig(t)
-	if err := support.GenerateDeploymentSecrets(config); err != nil {
-		t.Fatalf("bootstrap secrets: %v", err)
-	}
-	database, err := bootstrap.OpenDatabase(context.Background(), config.DataDirectory, config.RootKeyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { database.Close() })
-	service, err := auth.NewService(database.SQL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Production installs the read-only pool before serving; the fixture
-	// wires its only handle so pure reads run through the same seam.
-	if err := service.SetReader(database.Reader); err != nil {
-		t.Fatal(err)
-	}
-	return service, database.SQL
-}
-
 // newAdminFixture boots one initialized administrator with an authenticated
-// session from the full two-step flow.
+// session from the single-step local login.
 func newAdminFixture(t *testing.T) *adminFixture {
 	t.Helper()
 	service, db := newAuthService(t)
-	sender := configureAuth(t, service)
-	bootstrapPendingAdmin(t, service)
-	initializeAdminDrive(t, service, sender)
-	_, session, _ := flowLogin(t, service, sender, "admin", fixtureAdminPassword)
-	return &adminFixture{service: service, db: db, sender: sender, admin: session, t: t}
+	_, _ = initializeAdminDrive(t, service)
+	_, session, _ := loginPassword(t, service, "admin", fixtureAdminPassword)
+	return &adminFixture{service: service, db: db, admin: session, t: t}
 }
 
 func (fixture *adminFixture) login(username, password string) (auth.User, auth.Session, string) {
 	fixture.t.Helper()
-	return flowLogin(fixture.t, fixture.service, fixture.sender, username, password)
+	return loginPassword(fixture.t, fixture.service, username, password)
 }
 
 func (fixture *adminFixture) createUser(username, displayName, role, password string) auth.User {
@@ -84,30 +59,14 @@ func (fixture *adminFixture) createUser(username, displayName, role, password st
 	return *result.User
 }
 
-// completeOperator drives the operator initialization flow to completion so
-// the formal password can run the two-step login.
+// completeOperator walks the operator's forced password change so the formal
+// password can log in.
 func (fixture *adminFixture) completeOperator(username, tempPassword, formalPassword string) {
 	fixture.t.Helper()
 	ctx := context.Background()
-	flow, _, err := fixture.service.StartOperatorInitialization(ctx, username, tempPassword)
-	if err != nil {
-		fixture.t.Fatalf("start operator initialization %s: %v", username, err)
-	}
-	if err := fixture.service.SetFlowPassword(ctx, flow.Bearer, formalPassword); err != nil {
-		fixture.t.Fatalf("set operator password: %v", err)
-	}
-	read, err := fixture.service.ReadFlow(ctx, flow.Bearer)
-	if err != nil {
-		fixture.t.Fatal(err)
-	}
-	if _, _, err := fixture.service.SendFlowChallenge(ctx, flow.Bearer, read.Contacts[0].Locator); err != nil {
-		fixture.t.Fatalf("send operator challenge: %v", err)
-	}
-	if err := fixture.service.VerifyFlowChallenge(ctx, flow.Bearer, fixture.sender.code()); err != nil {
-		fixture.t.Fatalf("verify operator challenge: %v", err)
-	}
-	if err := fixture.service.CompleteOperatorInitialization(ctx, flow.Bearer); err != nil {
-		fixture.t.Fatalf("complete operator initialization: %v", err)
+	_, session, _ := fixture.login(username, tempPassword)
+	if err := fixture.service.ChangePassword(ctx, session, tempPassword, formalPassword); err != nil {
+		fixture.t.Fatalf("operator forced password change %s: %v", username, err)
 	}
 }
 
@@ -391,16 +350,11 @@ func TestAdminResetPasswordAndSessionRejection(t *testing.T) {
 	fixture.completeOperator("op1", "Operator one passphrase 2026!", "Operator formal passphrase 2027!")
 	_, _, firstBearer := fixture.login("op1", "Operator formal passphrase 2027!")
 	_, _, secondBearer := fixture.login("op1", "Operator formal passphrase 2027!")
-	// A pending second-factor flow with an outstanding challenge must die
-	// with the credential: no flow may survive into the reset state.
-	pending, _, err := fixture.service.StartAuthentication(ctx, "op1", "Operator formal passphrase 2027!", "UA Chrome")
-	if err != nil || pending.Type != auth.FlowLogin {
-		t.Fatalf("pre-reset login flow: %v %+v", err, pending)
-	}
-	if _, _, err := fixture.service.SendFlowChallenge(ctx, pending.Bearer, pending.Contacts[0].Locator); err != nil {
-		t.Fatalf("pre-reset challenge: %v", err)
-	}
 	expectedRow := fixture.rowVersionOf("op1")
+	var preRevision int64
+	if err := fixture.db.QueryRowContext(ctx, `SELECT auth_revision FROM users WHERE username='op1'`).Scan(&preRevision); err != nil {
+		t.Fatal(err)
+	}
 	result, replayed, err := fixture.service.ResetUserPassword(ctx, fixture.admin, auth.ResetPasswordInput{
 		ClientCommandID: "cmd-reset-op", Digest: auth.DigestCommand("user.reset_password", map[string]any{
 			"userId": created.ID, "expectedRowVersion": expectedRow, "newPasswordPresent": true,
@@ -413,13 +367,13 @@ func TestAdminResetPasswordAndSessionRejection(t *testing.T) {
 	if replayed {
 		t.Fatal("the first reset must execute, not replay")
 	}
-	if *result.RevokedSessionCount != 2 {
-		t.Fatalf("both sessions must be revoked by the reset, got %d", *result.RevokedSessionCount)
+	if *result.RevokedSessionCount != 3 {
+		t.Fatalf("every live session must be revoked by the reset (the forced-change session included), got %d", *result.RevokedSessionCount)
 	}
 	if !result.User.PasswordChangeRequired || result.User.Initialized {
 		t.Fatalf("reset must return the operator to the uninitialized temporary state: %+v", result.User)
 	}
-	if result.User.AuthRevision != pending.User.AuthRevision+1 || result.User.RowVersion != expectedRow+1 {
+	if result.User.AuthRevision != preRevision+1 || result.User.RowVersion != expectedRow+1 {
 		t.Fatalf("reset must advance auth_revision and row_version exactly once: %+v", result.User)
 	}
 	var initialized, required, activeSessions int
@@ -440,7 +394,7 @@ func TestAdminResetPasswordAndSessionRejection(t *testing.T) {
 	if err != nil || !replayed {
 		t.Fatalf("reset replay: err=%v replayed=%v", err, replayed)
 	}
-	if *replay.RevokedSessionCount != 2 {
+	if *replay.RevokedSessionCount != 3 {
 		t.Fatalf("replay must return the original revocation count, got %d", *replay.RevokedSessionCount)
 	}
 	for name, bearer := range map[string]string{"first": firstBearer, "second": secondBearer} {
@@ -448,47 +402,20 @@ func TestAdminResetPasswordAndSessionRejection(t *testing.T) {
 			t.Fatalf("%s bearer must be rejected after reset: %v", name, err)
 		}
 	}
-	// The pending login flow is revoked with its outstanding challenge: the
-	// bearer no longer resolves and the code can never issue a session.
-	if _, err := fixture.service.ReadFlow(ctx, pending.Bearer); !errors.Is(err, auth.ErrFlowInvalid) {
-		t.Fatalf("the pre-reset flow must be revoked, got %v", err)
+	// The old formal password is dead with the credential it authenticated.
+	if _, err := fixture.service.LoginWithPassword(ctx, "op1", "Operator formal passphrase 2027!", "UA Chrome"); !errors.Is(err, auth.ErrUnauthenticated) {
+		t.Fatalf("the old formal password must stop verifying, got %v", err)
 	}
-	if _, err := fixture.service.CompleteLogin(ctx, pending.Bearer, fixture.sender.code()); !errors.Is(err, auth.ErrFlowInvalid) {
-		t.Fatalf("a revoked flow must never complete a login, got %v", err)
+	// The temporary credential logs into a restricted session; the forced
+	// change restores the operator, then the new formal password logs in.
+	tempUser, tempSession, _ := fixture.login("op1", "Replacement passphrase 2027!")
+	if !tempUser.PasswordChangeRequired || tempUser.Initialized {
+		t.Fatalf("the temporary credential must land in the restricted state: %+v", tempUser)
 	}
-	// The temporary credential routes into the operator initialization flow —
-	// never a login (no session exists before initialization completes).
-	if _, _, err := fixture.service.StartLogin(ctx, "op1", "Replacement passphrase 2027!", "UA Chrome"); !errors.Is(err, auth.ErrInitializationRequired) {
-		t.Fatalf("the temporary credential must not start a login, got %v", err)
+	if err := fixture.service.ChangePassword(ctx, tempSession, "Replacement passphrase 2027!", "Reinitialized passphrase 2028!"); err != nil {
+		t.Fatalf("re-initialization change: %v", err)
 	}
-	flow, _, err := fixture.service.StartAuthentication(ctx, "op1", "Replacement passphrase 2027!", "UA Chrome")
-	if err != nil {
-		t.Fatalf("temporary credential must start the initialization flow: %v", err)
-	}
-	if flow.Type != auth.FlowOperatorInitialize || flow.PasswordSet {
-		t.Fatalf("expected a fresh operator initialization flow: %+v", flow)
-	}
-	if !flow.User.PasswordChangeRequired || flow.User.Initialized {
-		t.Fatalf("the flow projection must show the uninitialized temporary state: %+v", flow.User)
-	}
-	if len(flow.Contacts) == 0 {
-		t.Fatal("the assigned factor must survive the reset")
-	}
-	// Re-initialization: formal password plus the verified assigned factor,
-	// then the two-step login with the new password.
-	if err := fixture.service.SetFlowPassword(ctx, flow.Bearer, "Reinitialized passphrase 2028!"); err != nil {
-		t.Fatalf("set flow password: %v", err)
-	}
-	if _, _, err := fixture.service.SendFlowChallenge(ctx, flow.Bearer, flow.Contacts[0].Locator); err != nil {
-		t.Fatalf("send re-initialization challenge: %v", err)
-	}
-	if err := fixture.service.VerifyFlowChallenge(ctx, flow.Bearer, fixture.sender.code()); err != nil {
-		t.Fatalf("verify re-initialization challenge: %v", err)
-	}
-	if err := fixture.service.CompleteOperatorInitialization(ctx, flow.Bearer); err != nil {
-		t.Fatalf("complete re-initialization: %v", err)
-	}
-	if _, _, err := fixture.service.StartAuthentication(ctx, "op1", "Replacement passphrase 2027!", "UA Chrome"); !errors.Is(err, auth.ErrUnauthenticated) {
+	if _, err := fixture.service.LoginWithPassword(ctx, "op1", "Replacement passphrase 2027!", "UA Chrome"); !errors.Is(err, auth.ErrUnauthenticated) {
 		t.Fatalf("the temporary credential must be gone, got %v", err)
 	}
 	opUser, session, bearer := fixture.login("op1", "Reinitialized passphrase 2028!")
@@ -521,8 +448,11 @@ func TestRevokeSessionsAndOwnSessionRules(t *testing.T) {
 			currentCount++
 		}
 	}
-	if len(sessions) != 2 || currentCount != 1 {
-		t.Fatalf("session list must show two sessions with exactly one current: %+v", sessions)
+	// The forced-change session survived its own password change (it rebinds),
+	// so the operator carries three live sessions: the initialized one plus
+	// the two fresh logins.
+	if len(sessions) != 3 || currentCount != 1 {
+		t.Fatalf("session list must show three sessions with exactly one current: %+v", sessions)
 	}
 	// revokeOwnSession refuses the current session and accepts another.
 	if _, _, err := fixture.service.RevokeUserSessions(ctx, secondSession, auth.RevokeSessionsInput{
@@ -553,8 +483,8 @@ func TestRevokeSessionsAndOwnSessionRules(t *testing.T) {
 	if err != nil || replayed {
 		t.Fatalf("admin revoke: err=%v replayed=%v", err, replayed)
 	}
-	if *adminResult.RevokedSessionCount != 1 {
-		t.Fatalf("only the still-active session counts, got %d", *adminResult.RevokedSessionCount)
+	if *adminResult.RevokedSessionCount != 2 {
+		t.Fatalf("only the still-active sessions count, got %d", *adminResult.RevokedSessionCount)
 	}
 	if _, err := fixture.service.Authenticate(ctx, secondBearer); !errors.Is(err, auth.ErrUnauthenticated) {
 		t.Fatal("admin revoke must invalidate the remaining session")

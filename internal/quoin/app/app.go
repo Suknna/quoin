@@ -58,9 +58,13 @@ type servers struct {
 }
 
 type apiServer struct {
-	reader                       execution.Reader
-	readerWired                  bool
-	auth                         *auth.Service
+	reader      execution.Reader
+	readerWired bool
+	auth        *auth.Service
+	// providers is the login-channel registry (ADR-0010); /api/v1/auth/config
+	// projects it and the login page renders from that projection.
+	providers                    *auth.Registry
+	dataDirectory                string
 	db                           *sql.DB
 	alerts                       *alerts.Service
 	platformFaults               *alerts.PlatformFaultReporter
@@ -289,7 +293,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	if config.Audit != nil {
 		retentionMonths = config.Audit.RetentionMonths
 	}
-	if err := prepareAuthenticationBootstrap(ctx, authService, database.SQL, config.DataDirectory, retentionMonths); err != nil {
+	if err := prepareAuthenticationBootstrap(ctx, authService, config.DataDirectory, retentionMonths); err != nil {
 		return fmt.Errorf("initialize authentication: %w", err)
 	}
 	var maintenanceActive int
@@ -302,11 +306,9 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		if err := application.configureReadOnly(database.Reader); err != nil {
 			return err
 		}
-		if err := application.configureAuthenticationDeployment(ctx, config); err != nil {
-			return fmt.Errorf("configure authentication deployment: %w", err)
-		}
-		if err := application.configureAuthentication(); err != nil {
-			return fmt.Errorf("configure authentication: %w", err)
+		application.dataDirectory = config.DataDirectory
+		if err := application.configureLoginProviders(config.Authentication); err != nil {
+			return fmt.Errorf("configure login providers: %w", err)
 		}
 		serverSet, err := newMaintenanceServers(application, config, maintenanceReason.String)
 		if err != nil {
@@ -333,11 +335,9 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	if err := application.configureReadOnly(database.Reader); err != nil {
 		return err
 	}
-	if err := application.configureAuthenticationDeployment(ctx, config); err != nil {
-		return fmt.Errorf("configure authentication deployment: %w", err)
-	}
-	if err := application.configureAuthentication(); err != nil {
-		return fmt.Errorf("configure authentication: %w", err)
+	application.dataDirectory = config.DataDirectory
+	if err := application.configureLoginProviders(config.Authentication); err != nil {
+		return fmt.Errorf("configure login providers: %w", err)
 	}
 	StartAuditCleanup(ctx, database.SQL)
 	application.ConfigureSourceObservation(config.EnabledPlugins)
@@ -559,7 +559,7 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	if err != nil {
 		return nil, err
 	}
-	admission, err := NewAccessAdmission(application, accessRegistry, nil, nil)
+	admission, err := NewAccessAdmission(application, accessRegistry, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -612,9 +612,8 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 
 func (application *apiServer) register(api huma.API) {
 	application.registerAuthenticationFlows(api)
-	application.registerAuthDeliveryRoutes(api)
+	application.registerAuthConfigRoutes(api)
 	application.registerAuthContactRoutes(api)
-	application.registerContactChangeRoutes(api)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/auth/me", OperationID: "getCurrentUser"}, application.me)
 	huma.Register(api, huma.Operation{Method: http.MethodPut, Path: "/api/v1/auth/password", OperationID: "changeOwnPassword", DefaultStatus: http.StatusNoContent}, application.changePassword)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/auth/logout", OperationID: "logout", DefaultStatus: http.StatusNoContent}, application.logout)
@@ -766,7 +765,7 @@ func (application *apiServer) logout(ctx context.Context, input *authInput) (*lo
 	if err := application.auth.Logout(ctx, session); err != nil {
 		return nil, huma.Error500InternalServerError("无法完成登出", err)
 	}
-	return &logoutOutput{SetCookie: []string{sessionCookie("", -time.Hour), flowCookie("", time.Unix(1, 0))}, ClearSiteData: `"cache", "cookies", "storage"`, CacheControl: "no-store", Pragma: "no-cache"}, nil
+	return &logoutOutput{SetCookie: []string{sessionCookie("", -time.Hour)}, ClearSiteData: `"cache", "cookies", "storage"`, CacheControl: "no-store", Pragma: "no-cache"}, nil
 }
 
 func dereferenceString(value *string) string {

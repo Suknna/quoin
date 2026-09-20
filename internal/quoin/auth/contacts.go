@@ -1,11 +1,9 @@
 package auth
 
-// Contact targets (docs/authentication-design.md §1): only the administrator
-// assigns receive targets; operators can never replace them during
-// initialization or login. At most one contact per channel
-// (user_contacts UNIQUE(user_id, channel)). Replacing a target clears its
-// verification and bumps its version, which invalidates every challenge bound
-// to the previous target version.
+// Contact targets (docs/authentication-design.md §1/§3): display-only since
+// the OTP retirement (ADR-0010) — the channel carries the OIDC email claim
+// or an administrator-assigned informational address. At most one contact
+// per channel (user_contacts UNIQUE(user_id, channel)).
 
 import (
 	"context"
@@ -13,7 +11,19 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
+
+// MaskedContact is the only contact shape ever exposed to clients.
+type MaskedContact struct {
+	Locator      string `json:"id"`
+	Channel      string `json:"channel"`
+	MaskedTarget string `json:"maskedTarget"`
+	Verified     bool   `json:"verified"`
+}
+
+type contactWriter = execution.Executor
 
 // Contact channels (user_contacts.channel CHECK).
 const (
@@ -136,10 +146,9 @@ func listMaskedContacts(ctx context.Context, reader interface {
 }
 
 // ListOwnContacts returns the masked projection of the session user's
-// receive targets. It backs the profile's contact section: every
-// authenticated user can read their own channels (masked); replacement stays
-// exclusive to the admin contact_change flow and admin-assigned operator
-// contacts.
+// contacts. It backs the profile's contact section: every authenticated user
+// can read their own channels (masked); assignment stays with the
+// administrator (and the OIDC claim snapshot at JIT provisioning).
 func (service *Service) ListOwnContacts(ctx context.Context, session Session) ([]MaskedContact, error) {
 	return listMaskedContacts(ctx, service.read(), session.User.ID)
 }
@@ -149,7 +158,7 @@ func (service *Service) ListOwnContacts(ctx context.Context, session Session) ([
 // every outstanding challenge for the old target stops verifying; a retired
 // channel coming back is re-activated (and unverified). Returns the stored
 // row and whether content changed.
-func upsertContact(ctx context.Context, writer flowWriter, userID int64, input ContactInput, now string) (contactRow, bool, error) {
+func upsertContact(ctx context.Context, writer contactWriter, userID int64, input ContactInput, now string) (contactRow, bool, error) {
 	existing, err := scanContact(writer.QueryRowContext(ctx, `SELECT `+contactColumns+` FROM user_contacts WHERE user_id=? AND channel=?`, userID, input.Channel))
 	switch {
 	case err == nil:
@@ -187,7 +196,7 @@ func upsertContact(ctx context.Context, writer flowWriter, userID int64, input C
 // every active channel absent from the desired set is retired — enabled=0,
 // unverified, version bumped — never deleted, so challenge and audit foreign
 // keys keep their history while the channel stops being usable immediately.
-func retireMissingContacts(ctx context.Context, writer flowWriter, userID int64, activeChannels map[string]bool, now string) (bool, error) {
+func retireMissingContacts(ctx context.Context, writer contactWriter, userID int64, activeChannels map[string]bool, now string) (bool, error) {
 	existing, err := listContactRows(ctx, writer, userID)
 	if err != nil {
 		return false, err

@@ -1,14 +1,13 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"sync"
 	"testing"
+	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/auth"
@@ -16,36 +15,11 @@ import (
 	"github.com/Suknna/quoin/test/support"
 )
 
-// stubSender captures OTP deliveries so tests can complete real flows.
-type stubSender struct {
-	mu       sync.Mutex
-	messages []auth.Message
-}
-
-func (s *stubSender) Send(_ context.Context, message auth.Message) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.messages = append(s.messages, message)
-	return nil
-}
-
-func (s *stubSender) lastCode() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.messages) == 0 {
-		return ""
-	}
-	return s.messages[len(s.messages)-1].Variables["code"]
-}
-
-const (
-	admissionAdminEmail = "admin@quoin.test"
-	admissionPassword   = "correct-horse-battery-staple"
-)
+const admissionPassword = "correct-horse-battery-staple"
 
 // newAdmissionTestServer builds a real apiServer on the applied contract
 // schema with an initialized administrator.
-func newAdmissionTestServer(t *testing.T) (*apiServer, *auth.Service, *stubSender) {
+func newAdmissionTestServer(t *testing.T) (*apiServer, *auth.Service) {
 	t.Helper()
 	ctx := context.Background()
 	root := t.TempDir()
@@ -76,61 +50,48 @@ func newAdmissionTestServer(t *testing.T) (*apiServer, *auth.Service, *stubSende
 	if err := service.SetReader(database.Reader); err != nil {
 		t.Fatal(err)
 	}
-	sender := &stubSender{}
-	if err := service.ConfigureAuth(auth.AuthConfig{OTPKey: bytes.Repeat([]byte{0x5A}, 32), Sender: sender}); err != nil {
+	initial, err := auth.GenerateInitialPassword()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.EnsureBootstrapAdmin(ctx); err != nil {
+	if _, err := service.EnsureBootstrapAdmin(ctx, initial, time.Now().UTC().Add(auth.InitialPasswordLifetime)); err != nil {
 		t.Fatal(err)
 	}
-	initializeAdmissionAdmin(t, service, sender)
+	initializeAdmissionAdmin(t, service, initial)
 	application := NewMaintenanceAPIServer(service, database.SQL, config.RootKeyFile)
 	if err := application.SetReadOnlyReader(database.Reader); err != nil {
 		t.Fatal(err)
 	}
-	return application, service, sender
+	if err := application.configureLoginProviders(nil); err != nil {
+		t.Fatal(err)
+	}
+	return application, service
 }
 
-// initializeAdmissionAdmin drives the real admin initialization flow.
-func initializeAdmissionAdmin(t *testing.T, service *auth.Service, sender *stubSender) {
+// initializeAdmissionAdmin unlocks the bootstrap administrator through the
+// real single-step path (initial random password + forced change).
+func initializeAdmissionAdmin(t *testing.T, service *auth.Service, initialPassword string) {
 	t.Helper()
 	ctx := context.Background()
-	flow, _, err := service.StartAdminInitialization(ctx, "admin", "admin")
+	result, err := service.LoginWithPassword(ctx, "admin", initialPassword, "Test on Linux")
 	if err != nil {
-		t.Fatalf("start admin initialization: %v", err)
+		t.Fatalf("bootstrap login: %v", err)
 	}
-	if err := service.SetFlowPassword(ctx, flow.Bearer, admissionPassword); err != nil {
-		t.Fatalf("set flow password: %v", err)
-	}
-	masked, err := service.RegisterFlowContact(ctx, flow.Bearer, "email", admissionAdminEmail)
+	session, err := service.Authenticate(ctx, result.Bearer)
 	if err != nil {
-		t.Fatalf("register flow contact: %v", err)
+		t.Fatal(err)
 	}
-	if _, _, err := service.SendFlowChallenge(ctx, flow.Bearer, masked.Locator); err != nil {
-		t.Fatalf("send flow challenge: %v", err)
-	}
-	if err := service.VerifyFlowChallenge(ctx, flow.Bearer, sender.lastCode()); err != nil {
-		t.Fatalf("verify flow challenge: %v", err)
-	}
-	if err := service.CompleteAdminInitialization(ctx, flow.Bearer); err != nil {
-		t.Fatalf("complete admin initialization: %v", err)
+	if err := service.ChangePassword(ctx, session, initialPassword, admissionPassword); err != nil {
+		t.Fatalf("forced password change: %v", err)
 	}
 }
 
-// admissionLogin performs the real two-step login and returns the session bearer.
-func admissionLogin(t *testing.T, service *auth.Service, sender *stubSender) string {
+// admissionLogin performs the real single-step login and returns the bearer.
+func admissionLogin(t *testing.T, service *auth.Service) string {
 	t.Helper()
-	ctx := context.Background()
-	flow, _, err := service.StartAuthentication(ctx, "admin", admissionPassword, "Mozilla/5.0 Chrome Linux")
+	result, err := service.LoginWithPassword(context.Background(), "admin", admissionPassword, "Mozilla/5.0 Chrome Linux")
 	if err != nil {
-		t.Fatalf("start authentication: %v", err)
-	}
-	if _, _, err := service.SendFlowChallenge(ctx, flow.Bearer, flow.Contacts[0].Locator); err != nil {
-		t.Fatalf("send login challenge: %v", err)
-	}
-	result, err := service.CompleteLogin(ctx, flow.Bearer, sender.lastCode())
-	if err != nil {
-		t.Fatalf("complete login: %v", err)
+		t.Fatalf("login: %v", err)
 	}
 	return result.Bearer
 }
@@ -140,7 +101,7 @@ func admissionLogin(t *testing.T, service *auth.Service, sender *stubSender) str
 // construction), so declaration drift fails here exactly as it would in main.
 
 func TestNewHandlerBuildsGuardedSurfaceWithoutPlannedDeclarations(t *testing.T) {
-	application, _, _ := newAdmissionTestServer(t)
+	application, _ := newAdmissionTestServer(t)
 	registry, err := NormalAccessRegistry()
 	if err != nil {
 		t.Fatal(err)
@@ -155,19 +116,19 @@ func TestNewHandlerBuildsGuardedSurfaceWithoutPlannedDeclarations(t *testing.T) 
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
-	// A flow operation without a credential is rejected before any handler.
-	response, err := server.Client().Get(server.URL + "/api/v1/auth/flow")
+	// A session operation without a credential is rejected before any handler.
+	response, err := server.Client().Get(server.URL + "/api/v1/auth/me")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("absent flow status = %d, want 401", response.StatusCode)
+		t.Fatalf("absent session status = %d, want 401", response.StatusCode)
 	}
 }
 
 func TestMaintenanceSurfacesBuildForEveryReason(t *testing.T) {
-	application, _, _ := newAdmissionTestServer(t)
+	application, _ := newAdmissionTestServer(t)
 	for _, reason := range []string{"RootKeyRebind", "Restore", "Upgrade"} {
 		registry, err := MaintenanceAccessRegistry(reason)
 		if err != nil {
@@ -183,7 +144,7 @@ func TestMaintenanceSurfacesBuildForEveryReason(t *testing.T) {
 }
 
 func TestGuardRecordsAccessFactThroughAuditSink(t *testing.T) {
-	application, service, sender := newAdmissionTestServer(t)
+	application, service := newAdmissionTestServer(t)
 	handler, err := NewHandler(application, "https://quoin.example.com")
 	if err != nil {
 		t.Fatal(err)
@@ -203,7 +164,7 @@ func TestGuardRecordsAccessFactThroughAuditSink(t *testing.T) {
 
 	// Admin session via the real two-step login: admitted, handler runs, the
 	// default sink persists the phase=access record.
-	bearer := admissionLogin(t, service, sender)
+	bearer := admissionLogin(t, service)
 	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/maintenance", nil)
 	request.Header.Set("Cookie", "__Host-quoin-session="+bearer)
 	response, err = server.Client().Do(request)
@@ -230,14 +191,14 @@ func TestGuardRecordsAccessFactThroughAuditSink(t *testing.T) {
 }
 
 func TestGuardEnforcesLevelsOnRealSurface(t *testing.T) {
-	application, service, sender := newAdmissionTestServer(t)
+	application, service := newAdmissionTestServer(t)
 	handler, err := NewHandler(application, "https://quoin.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	bearer := admissionLogin(t, service, sender)
+	bearer := admissionLogin(t, service)
 
 	// Session-level admits any valid session.
 	response, err := getWithCookie(server, "/api/v1/auth/me", bearer)
@@ -277,8 +238,8 @@ func getWithCookie(server *httptest.Server, path, bearer string) (*http.Response
 	return server.Client().Do(request)
 }
 
-func TestFlowRequestRecordsAccessRow(t *testing.T) {
-	application, service, _ := newAdmissionTestServer(t)
+func TestPublicConfigRequestIsServedWithoutASession(t *testing.T) {
+	application, _ := newAdmissionTestServer(t)
 	handler, err := NewHandler(application, "https://quoin.example.com")
 	if err != nil {
 		t.Fatal(err)
@@ -286,29 +247,26 @@ func TestFlowRequestRecordsAccessRow(t *testing.T) {
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
-	// An incomplete login flow still claims the administrator identity: the
-	// guard records the access fact with the flow's bound user and its stored
-	// correlation, regardless of what the handler does.
-	flow, _, err := service.StartAuthentication(context.Background(), "admin", admissionPassword, "Mozilla/5.0 Chrome Linux")
+	// The public login-channel projection answers anonymous requests; it is
+	// the login page's bootstrap endpoint and must never require a session.
+	response, err := server.Client().Get(server.URL + "/api/v1/auth/config")
 	if err != nil {
 		t.Fatal(err)
 	}
-	flowRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/auth/flow", nil)
-	flowRequest.Header.Set("Cookie", "__Host-quoin-flow="+flow.Bearer)
-	response, err := server.Client().Do(flowRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
+	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("flow status = %d, want 200", response.StatusCode)
+		t.Fatalf("auth config status = %d, want 200", response.StatusCode)
 	}
-	var action, correlation string
-	var actorID int64
-	if err := application.db.QueryRow(`SELECT action,actor_id,correlation_id FROM audit_events WHERE phase='access' AND action='readAuthenticationFlow' ORDER BY id DESC LIMIT 1`).Scan(&action, &actorID, &correlation); err != nil {
-		t.Fatalf("flow access row missing: %v", err)
+	var projection struct {
+		Local struct {
+			Enabled bool `json:"enabled"`
+			Visible bool `json:"visible"`
+		} `json:"local"`
 	}
-	if actorID <= 0 || correlation == "" {
-		t.Fatalf("flow access row = actor %d correlation %q", actorID, correlation)
+	if err := json.NewDecoder(response.Body).Decode(&projection); err != nil {
+		t.Fatal(err)
+	}
+	if !projection.Local.Enabled || !projection.Local.Visible {
+		t.Fatalf("default local channel projection = %+v", projection)
 	}
 }

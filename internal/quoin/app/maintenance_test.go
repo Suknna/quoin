@@ -38,7 +38,7 @@ func TestRootKeyRebindAllowsOwnPasswordChangeWithoutRestoreChecklist(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	cookie := scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", "original-password-123", sender)
+	cookie := scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", "original-password-123")
 	change := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", bytes.NewBufferString(`{"currentPassword":"original-password-123","newPassword":"root-rebind-password-789"}`))
 	change.Header.Set("Content-Type", "application/json")
 	change.Header.Set("Origin", config.PublicOrigin)
@@ -83,7 +83,7 @@ func TestMaintenanceHandlerExposesOnlyRecoverySafeRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cookie := scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", "original-password-123", sender)
+	cookie := scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", "original-password-123")
 	state := httptest.NewRequest(http.MethodGet, "/api/v1/maintenance", nil)
 	state.AddCookie(cookie)
 	stateResponse := httptest.NewRecorder()
@@ -112,7 +112,7 @@ func TestMaintenanceHandlerExposesOnlyRecoverySafeRoutes(t *testing.T) {
 	}
 	// The new password again only opens a flow: the second-factor login issues
 	// the session used for the remaining route checks.
-	cookie = scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", "replacement-password-456", sender)
+	cookie = scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", "replacement-password-456")
 	auditRequest := httptest.NewRequest(http.MethodGet, "/api/v1/audit-events", nil)
 	auditRequest.AddCookie(cookie)
 	auditResponse := httptest.NewRecorder()

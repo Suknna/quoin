@@ -60,7 +60,7 @@ func newMaintenanceHandler(application *apiServer, publicOrigin, maintenanceReas
 	if err != nil {
 		return nil, err
 	}
-	admission, err := NewAccessAdmission(application, accessRegistry, nil, nil)
+	admission, err := NewAccessAdmission(application, accessRegistry, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func newMaintenanceHandler(application *apiServer, publicOrigin, maintenanceReas
 	}
 	apiMux.Handle("/api/", unavailable)
 	application.registerAuthenticationFlows(api)
-	application.registerAuthDeliveryRoutes(api)
+	application.registerAuthConfigRoutes(api)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/auth/me", OperationID: "getCurrentUser"}, application.me)
 	huma.Register(api, huma.Operation{Method: http.MethodPut, Path: "/api/v1/auth/password", OperationID: "changeOwnPassword"}, application.maintenanceChangePassword)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/auth/logout", OperationID: "logout"}, application.maintenanceLogout)
@@ -212,7 +212,7 @@ func (application *apiServer) maintenanceLogout(ctx context.Context, input *auth
 	if err := application.auth.Logout(ctx, session); err != nil {
 		return nil, huma.Error500InternalServerError("无法完成登出", err)
 	}
-	return &logoutOutput{SetCookie: []string{sessionCookie("", -time.Hour), flowCookie("", time.Unix(1, 0))}, ClearSiteData: `"cache", "cookies", "storage"`, CacheControl: "no-store", Pragma: "no-cache"}, nil
+	return &logoutOutput{SetCookie: []string{sessionCookie("", -time.Hour)}, ClearSiteData: `"cache", "cookies", "storage"`, CacheControl: "no-store", Pragma: "no-cache"}, nil
 }
 
 func (application *apiServer) getMaintenanceState(ctx context.Context, input *authInput) (*maintenanceOutput, error) {

@@ -44,14 +44,11 @@ func TestReadsFailClosedWithoutReader(t *testing.T) {
 	if _, err := service.Authenticate(ctx, bearer); !errors.Is(err, auth.ErrReaderNotWired) {
 		t.Fatalf("Authenticate without a reader must fail closed with ErrReaderNotWired, got %v", err)
 	}
-	// StartLogin's classification read fails through the same dead gate: the
-	// gate's deterministic signature (canceled context on a zero-connection
-	// handle) surfaces untranslated here — still strictly fail-closed, never
-	// a writer read.
-	if _, _, err := service.StartLogin(ctx, "admin", "x", "UA"); err == nil {
-		t.Fatal("reads behind StartLogin must fail closed without a reader")
-	} else if !errors.Is(err, context.Canceled) {
-		t.Fatalf("unexpected failure class: %v", err)
+	// The single-step login reads the credential row inside the runner
+	// transaction, so an unwired service must fail closed there too rather
+	// than serve any writer fallback.
+	if _, err := service.LoginWithPassword(ctx, "admin", "x", "UA"); err == nil {
+		t.Fatal("login must fail closed without a reader")
 	}
 
 	// Wiring the pool turns the same reads live again — through the injected

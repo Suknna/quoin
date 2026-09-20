@@ -31,18 +31,6 @@ const (
 	// table (docs/audit-design.md §4: 匿名爆破与限速是有界安全日志/指标); the
 	// auth flow records its own bounded phase events.
 	LevelPublic Level = "public"
-	// LevelFlow marks operations that resume an existing authentication flow:
-	// a valid flow credential is required and is validated against the
-	// server-side flow record before the handler runs. Expired, absent or
-	// forged credentials are rejected with 401 at the guard. Flow steps stay
-	// on the flow's own bounded audit path; the guard records no business
-	// access facts for them.
-	LevelFlow Level = "flow"
-	// LevelFlowOrAdmin marks delivery-management operations reachable either
-	// with a normal admin session or with an initialization/recovery flow of
-	// an allowed type (never an arbitrary login flow — FlowIdentity.Type is
-	// checked against the explicit allowlist before dispatch).
-	LevelFlowOrAdmin Level = "flow-or-admin"
 	// LevelSession marks operations reachable with any valid session,
 	// including restricted (password-change-required) sessions — the password
 	// change and logout themselves must stay reachable while restricted.
@@ -90,12 +78,6 @@ type Declaration struct {
 	// presence check (they are not registered through huma.Register); Wrap
 	// itself fails wiring for unknown ids.
 	Raw bool
-	// FlowCorrelated marks a LevelAdmin operation that must run under the
-	// correlation of the authentication flow that started it (e.g. contact
-	// change): the stored flow credential is required and validated, and its
-	// persisted correlation replaces the fresh request correlation while the
-	// admin-session authorization and session reference are retained.
-	FlowCorrelated bool
 	// Planned marks a declaration reserved for an operation that is not (yet)
 	// registered on a live surface. Planned declarations do not fail the
 	// reverse coverage check but are still validated and, once their route
@@ -114,7 +96,7 @@ func (d Declaration) validate() error {
 		return fmt.Errorf("operations: declaration %q must declare an absolute path", d.ID)
 	}
 	switch d.Level {
-	case LevelPublic, LevelFlow, LevelFlowOrAdmin, LevelSession, LevelFull, LevelAdmin:
+	case LevelPublic, LevelSession, LevelFull, LevelAdmin:
 	default:
 		return fmt.Errorf("operations: declaration %q must declare a known level, got %q", d.ID, d.Level)
 	}
@@ -125,9 +107,6 @@ func (d Declaration) validate() error {
 	}
 	if d.Level == LevelPublic && d.Kind == KindSensitiveRead {
 		return fmt.Errorf("operations: declaration %q cannot release sensitive content on the public surface", d.ID)
-	}
-	if d.FlowCorrelated && d.Level != LevelAdmin {
-		return fmt.Errorf("operations: declaration %q resumes a flow correlation but is not an admin operation", d.ID)
 	}
 	if d.Method != "" {
 		switch d.Method {

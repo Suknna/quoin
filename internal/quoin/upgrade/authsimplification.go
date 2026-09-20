@@ -33,9 +33,10 @@ func verifyUnifiedAuthHistory(ctx context.Context, conn *sql.Conn, allowSimplifi
 		inspectionFreezeMigrationID:           allowSimplification,
 		alertViewAttributionMigrationID:       allowSimplification,
 		unifiedMTLSMigrationID:                allowSimplification,
-		verifyRetireMigrationID:                allowSimplification,
+		verifyRetireMigrationID:               allowSimplification,
 		taskChangeLogRetireMigrationID:        allowSimplification,
 		declaredDiscoveryRetireMigrationID:    allowSimplification,
+		oidcAuthRetireMigrationID:             allowSimplification,
 	}
 	for rows.Next() {
 		var id, digest string

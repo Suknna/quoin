@@ -1,10 +1,11 @@
 package main
 
-// `quoin admin recover` coverage: the strict argument handling, the attached
-// TTY requirement (fail-closed without any database write), and the two
-// operator-visible modes driven through a real PTY exactly like the
-// deployment helper runs them. All data stays in per-test temporary
-// directories; no live user store is touched.
+// `quoin admin recover` coverage: the attached-TTY requirement (fail-closed
+// without any database write), the initialized administrator's TTY password
+// reset, and the pending-bootstrap rearm that regenerates the initial
+// password file — all driven through a real PTY exactly like the deployment
+// helper runs them. All data stays in per-test temporary directories; no
+// live user store is touched.
 
 import (
 	"bytes"
@@ -32,21 +33,6 @@ const (
 	recoverCLIOldPassword = "Lost administrator passphrase 2026!"
 	recoverCLINewPassword = "Recovered administrator passphrase 2027!"
 )
-
-func TestRecoveryModeArgument(t *testing.T) {
-	mode, rest := recoveryModeArgument([]string{"--mode", "password", "--config", "/tmp/x.yaml"})
-	if mode != "password" || len(rest) != 2 || rest[0] != "--config" || rest[1] != "/tmp/x.yaml" {
-		t.Fatalf("unexpected split: mode=%q rest=%v", mode, rest)
-	}
-	mode, rest = recoveryModeArgument([]string{"--config", "/tmp/x.yaml", "--mode=factors"})
-	if mode != "factors" || len(rest) != 2 || rest[1] != "/tmp/x.yaml" {
-		t.Fatalf("unexpected inline split: mode=%q rest=%v", mode, rest)
-	}
-	mode, rest = recoveryModeArgument([]string{"--config", "/tmp/x.yaml"})
-	if mode != "" || len(rest) != 2 {
-		t.Fatalf("missing mode must pass through: mode=%q rest=%v", mode, rest)
-	}
-}
 
 // recoverCLIBinary builds the real quoin binary once for all subprocess tests.
 var (
@@ -83,7 +69,8 @@ func recoverCLIBinary(t *testing.T) string {
 // recoverCLIFixture prepares one deployment fixture: secrets, a fresh
 // canonical database with the seeded administrator, and the YAML config path.
 // The database handle is closed before the subprocess takes the exclusive
-// data-directory lock.
+// data-directory lock. A pending fixture seeds the bootstrap administrator
+// (initialized=0, forced change marker, expired initial-password deadline).
 func recoverCLIFixture(t *testing.T, initialized bool, password string) (configPath string, dataDirectory, rootKeyFile string) {
 	t.Helper()
 	root := t.TempDir()
@@ -120,20 +107,16 @@ func seedRecoverCLIAdmin(t *testing.T, db *sql.DB, initialized bool, password st
 	if err != nil {
 		t.Fatal(err)
 	}
-	initializedValue := 0
-	if initialized {
-		initializedValue = 1
-	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := db.ExecContext(context.Background(), `INSERT INTO users(username,display_name,role,enabled,initialized,password_phc,password_change_required,created_at,updated_at) VALUES('admin','Administrator','admin',1,?,?,0,?,?)`, initializedValue, phc, now, now)
-	if err != nil {
-		t.Fatal(err)
+	if initialized {
+		if _, err := db.ExecContext(context.Background(), `INSERT INTO users(username,display_name,role,enabled,initialized,password_phc,password_change_required,created_at,updated_at) VALUES('admin','Administrator','admin',1,1,?,0,?,?)`, phc, now, now); err != nil {
+			t.Fatal(err)
+		}
+		return
 	}
-	userID, err := result.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(context.Background(), `INSERT INTO user_contacts(user_id,channel,target,version,verified_at,created_at,updated_at) VALUES(?,'email','ops@quoin.test',1,?,?,?)`, userID, now, now, now); err != nil {
+	// The pending bootstrap shape: forced change marker with a deadline
+	// already in the past (the recover entry condition).
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO users(username,display_name,role,enabled,initialized,password_phc,password_change_required,password_change_required_at,initial_password_expires_at,created_at,updated_at) VALUES('admin','Administrator','admin',1,0,?,1,?,?,?,?)`, phc, now, now, now, now); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -175,10 +158,22 @@ func recoverCLIOpen(t *testing.T, dataDirectory, rootKeyFile string) *bootstrap.
 	return database
 }
 
+func recoverCLIService(t *testing.T, database *bootstrap.Database) *auth.Service {
+	t.Helper()
+	service, err := auth.NewService(database.SQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
 func TestAdminRecoverPasswordModeOnPTY(t *testing.T) {
 	binary := recoverCLIBinary(t)
 	configPath, dataDirectory, rootKeyFile := recoverCLIFixture(t, true, recoverCLIOldPassword)
-	output, waitErr := runRecoverOnPTY(t, binary, []string{"admin", "recover", "--config", configPath, "--mode", "password"},
+	output, waitErr := runRecoverOnPTY(t, binary, []string{"admin", "recover", "--config", configPath},
 		recoverCLINewPassword+"\n"+recoverCLINewPassword+"\n")
 	if waitErr != nil {
 		t.Fatalf("password recovery failed: %v\n%s", waitErr, output)
@@ -187,23 +182,15 @@ func TestAdminRecoverPasswordModeOnPTY(t *testing.T) {
 		t.Fatalf("unexpected output: %s", output)
 	}
 	database := recoverCLIOpen(t, dataDirectory, rootKeyFile)
-	service, err := auth.NewService(database.SQL)
+	service := recoverCLIService(t, database)
+	result, err := service.LoginWithPassword(context.Background(), "admin", recoverCLINewPassword, "test")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("temporary password must log in: %v", err)
 	}
-	// Production installs the read-only pool before serving; tests wire
-	// their only handle so pure reads run through the same seam.
-	if err := service.SetReader(database.Reader); err != nil {
-		t.Fatal(err)
+	if !result.User.PasswordChangeRequired || result.User.Initialized {
+		t.Fatalf("recovery must force the change: %+v", result.User)
 	}
-	flow, _, err := service.StartAuthentication(context.Background(), "admin", recoverCLINewPassword, "test")
-	if err != nil {
-		t.Fatalf("temporary password must start the unified initialization flow: %v", err)
-	}
-	if flow.Type != auth.FlowAdminInitialize || !flow.User.PasswordChangeRequired {
-		t.Fatalf("unexpected flow after CLI recovery: %+v", flow)
-	}
-	if _, _, err := service.StartAuthentication(context.Background(), "admin", recoverCLIOldPassword, "test"); !errors.Is(err, auth.ErrUnauthenticated) {
+	if _, err := service.LoginWithPassword(context.Background(), "admin", recoverCLIOldPassword, "test"); !errors.Is(err, auth.ErrUnauthenticated) {
 		t.Fatalf("old password must be rejected, got %v", err)
 	}
 }
@@ -211,32 +198,24 @@ func TestAdminRecoverPasswordModeOnPTY(t *testing.T) {
 func TestAdminRecoverPasswordMismatchNeverChanges(t *testing.T) {
 	binary := recoverCLIBinary(t)
 	configPath, dataDirectory, rootKeyFile := recoverCLIFixture(t, true, recoverCLIOldPassword)
-	output, waitErr := runRecoverOnPTY(t, binary, []string{"admin", "recover", "--config", configPath, "--mode", "password"},
+	output, waitErr := runRecoverOnPTY(t, binary, []string{"admin", "recover", "--config", configPath},
 		recoverCLINewPassword+"\nDifferent password 2027!\n")
 	if waitErr == nil || !strings.Contains(output, "do not match") {
 		t.Fatalf("mismatched input must fail the run: err=%v output=%s", waitErr, output)
 	}
 	database := recoverCLIOpen(t, dataDirectory, rootKeyFile)
-	service, err := auth.NewService(database.SQL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Production installs the read-only pool before serving; tests wire
-	// their only handle so pure reads run through the same seam.
-	if err := service.SetReader(database.Reader); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := service.StartAuthentication(context.Background(), "admin", recoverCLIOldPassword, "test"); err != nil {
+	service := recoverCLIService(t, database)
+	if _, err := service.LoginWithPassword(context.Background(), "admin", recoverCLIOldPassword, "test"); err != nil {
 		t.Fatalf("failed run must leave the old credential intact: %v", err)
 	}
 }
 
-func TestAdminRecoverFactorsModePrintsTokenOnceOnPTY(t *testing.T) {
+func TestAdminRecoverRearmsExpiredInitialPassword(t *testing.T) {
 	binary := recoverCLIBinary(t)
-	configPath, dataDirectory, rootKeyFile := recoverCLIFixture(t, true, recoverCLIOldPassword)
-	output, waitErr := runRecoverOnPTY(t, binary, []string{"admin", "recover", "--config", configPath, "--mode", "factors"}, "")
+	configPath, dataDirectory, rootKeyFile := recoverCLIFixture(t, false, recoverCLIOldPassword)
+	output, waitErr := runRecoverOnPTY(t, binary, []string{"admin", "recover", "--config", configPath}, "")
 	if waitErr != nil {
-		t.Fatalf("factors recovery failed: %v\n%s", waitErr, output)
+		t.Fatalf("bootstrap rearm failed: %v\n%s", waitErr, output)
 	}
 	// The PTY line discipline ends lines with \r\n.
 	output = strings.ReplaceAll(output, "\r\n", "\n")
@@ -254,51 +233,37 @@ func TestAdminRecoverFactorsModePrintsTokenOnceOnPTY(t *testing.T) {
 	if strings.Count(output, token) != 1 {
 		t.Fatal("the one-time credential must appear exactly once")
 	}
+	// The credential file in the data directory carries the same password and
+	// a fresh 24-hour deadline is stamped on the users row.
+	fileRaw, err := os.ReadFile(filepath.Join(dataDirectory, "initial-admin-password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileToken := strings.TrimSpace(string(fileRaw)); fileToken != token {
+		t.Fatalf("file credential %q differs from the printed one %q", fileToken, token)
+	}
 	database := recoverCLIOpen(t, dataDirectory, rootKeyFile)
-	service, err := auth.NewService(database.SQL)
+	service := recoverCLIService(t, database)
+	result, err := service.LoginWithPassword(context.Background(), "admin", token, "test")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("the re-armed credential must log in: %v", err)
 	}
-	// Production installs the read-only pool before serving; tests wire
-	// their only handle so pure reads run through the same seam.
-	if err := service.SetReader(database.Reader); err != nil {
-		t.Fatal(err)
-	}
-	var initialized int
-	if err := database.SQL.QueryRowContext(context.Background(), `SELECT initialized FROM users WHERE username='admin'`).Scan(&initialized); err != nil || initialized != 0 {
-		t.Fatalf("factors recovery must reset the initialized state: value=%d err=%v", initialized, err)
-	}
-	flow, _, err := service.StartAuthentication(context.Background(), "admin", token, "test")
-	if err != nil {
-		t.Fatalf("the printed temporary password must start the unified initialization flow: %v", err)
-	}
-	if flow.Type != auth.FlowAdminInitialize {
-		t.Fatalf("unexpected flow type %q", flow.Type)
+	if !result.User.PasswordChangeRequired {
+		t.Fatalf("the re-armed login must stay restricted: %+v", result.User)
 	}
 }
 
 func TestAdminRecoverWithoutTTYFailsClosed(t *testing.T) {
 	binary := recoverCLIBinary(t)
 	configPath, dataDirectory, rootKeyFile := recoverCLIFixture(t, true, recoverCLIOldPassword)
-	output, err := exec.Command(binary, "admin", "recover", "--config", configPath, "--mode", "factors").CombinedOutput()
+	output, err := exec.Command(binary, "admin", "recover", "--config", configPath).CombinedOutput()
 	if err == nil || !strings.Contains(string(output), "attached TTY") {
 		t.Fatalf("run without a TTY must fail with the TTY requirement: err=%v output=%s", err, output)
 	}
 	// The failed run must not have touched the database at all.
 	database := recoverCLIOpen(t, dataDirectory, rootKeyFile)
-	var initialized, pendingFlows int
+	var initialized int
 	if err := database.SQL.QueryRowContext(context.Background(), `SELECT initialized FROM users WHERE username='admin'`).Scan(&initialized); err != nil || initialized != 1 {
 		t.Fatalf("failed run must preserve the account state: value=%d err=%v", initialized, err)
-	}
-	if err := database.SQL.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM auth_flows WHERE status='pending'`).Scan(&pendingFlows); err != nil || pendingFlows != 0 {
-		t.Fatalf("failed run must not open flows: count=%d err=%v", pendingFlows, err)
-	}
-}
-
-func TestAdminRecoverRejectsUnknownMode(t *testing.T) {
-	binary := recoverCLIBinary(t)
-	output, err := exec.Command(binary, "admin", "recover", "--config", "/dev/null", "--mode", "rotate").CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "--mode must be password or factors") {
-		t.Fatalf("unknown mode must print the usage contract: err=%v output=%s", err, output)
 	}
 }

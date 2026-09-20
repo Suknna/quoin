@@ -236,275 +236,92 @@
       }
     },
     "quoinAuthentication": {
-      "description": "部署侧认证投递引导（统一认证设计第 8 节）。configuration 是管理员运行时投递设置的部署预设，仅当本 YAML 提供时才存在部署来源预设；secretsFile 指向只读的秘密引用映射文件（引用名→值，JSON 或 YAML）。整节可省略；省略时部署不预置投递设置，管理员运行时配置的秘密仍经根密钥加密保存，绝不写入本文件。",
+      "description": "登录通道声明（ADR-0010 统一认证设计第 4 节）。local 省略时启用且可见；visible=false 仅隐藏登录页本地表单，POST /api/v1/auth/login 与 /login?local=1 仍可用（应急通道）。oidc 省略或 enabled=false 时关闭；启用时 issuer/clientId/redirectUrl 必填，client_secret 只经 secretsFile 引用文件提供，绝不写入本文件。local.enabled 与 oidc.enabled 同时为 false 的配置在组件启动时被拒绝。",
       "type": "object",
       "additionalProperties": false,
       "minProperties": 1,
       "properties": {
-        "configuration": {
-          "$ref": "#/$defs/authDeliveryDeployment"
+        "local": {
+          "type": "object",
+          "description": "本地应急登录通道；省略整个键等价于 enabled=true, visible=true。",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "本地密码登录是否可用；默认 true。"
+            },
+            "visible": {
+              "type": "boolean",
+              "description": "登录页是否渲染本地表单；默认 true。仅控制展示，不关闭接口。"
+            }
+          }
+        },
+        "oidc": {
+          "type": "object",
+          "description": "通用 OIDC 授权码通道（ADR-0010）；enabled 默认 false。",
+          "additionalProperties": false,
+          "required": ["issuer", "clientId", "redirectUrl"],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "是否启用 OIDC 登录；默认 false。"
+            },
+            "issuer": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 512,
+              "description": "OIDC issuer；发现文档经 /.well-known/openid-configuration 自动获取。"
+            },
+            "clientId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "OIDC client id。"
+            },
+            "redirectUrl": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 512,
+              "description": "回调地址，通常为 <公共源>/api/v1/auth/oidc/callback。"
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "description": "SSO 按钮显示名；缺省用 issuer 主机名。"
+            },
+            "iconUrl": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "SSO 按钮图标 URL；可选。"
+            }
+          }
         },
         "secretsFile": {
-          "$ref": "#/$defs/absolutePath"
-        }
-      }
-    },
-    "authDeliveryDeployment": {
-      "description": "认证投递渠道映射，与 auth_delivery_settings.configuration_json 的机器形状一致：email 渠道为 SMTP 投递，sms 渠道必须是 webhook。",
-      "type": "object",
-      "additionalProperties": false,
-      "minProperties": 1,
-      "properties": {
-        "email": {
-          "$ref": "#/$defs/authDeliveryChannel"
-        },
-        "sms": {
-          "$ref": "#/$defs/authDeliveryChannel"
+          "$ref": "#/$defs/absolutePath",
+          "description": "只读秘密引用文件（引用名→值，JSON 或 YAML）；oidc client_secret 以引用名 oidcClientSecret 提供。"
         }
       },
       "allOf": [
         {
           "if": {
-            "required": [
-              "sms"
-            ]
-          },
-          "then": {
             "properties": {
-              "sms": {
+              "oidc": {
                 "properties": {
-                  "kind": {
-                    "const": "webhook"
+                  "enabled": {
+                    "const": true
                   }
                 }
               }
-            }
+            },
+            "required": ["oidc"]
+          },
+          "then": {
+            "required": ["secretsFile"]
           }
         }
       ]
-    },
-    "authDeliveryChannel": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind"
-      ],
-      "properties": {
-        "kind": {
-          "enum": [
-            "smtp",
-            "webhook"
-          ]
-        },
-        "host": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 253
-        },
-        "port": {
-          "$ref": "#/$defs/hostPort"
-        },
-        "from": {
-          "type": "string",
-          "minLength": 3,
-          "maxLength": 320,
-          "description": "SMTP 信封发件人与 From 头地址。"
-        },
-        "username": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "passwordRef": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "description": "SMTP 密码的秘密引用名；值只能来自 authentication.secretsFile 映射，不得内联。"
-        },
-        "tlsMode": {
-          "enum": [
-            "starttls",
-            "implicit"
-          ],
-          "default": "starttls",
-          "description": "TLS 必选；starttls 表示服务器必须提供 STARTTLS，implicit 表示从首字节即 TLS。无明文投递选项。"
-        },
-        "url": {
-          "type": "string",
-          "pattern": "^https://",
-          "minLength": 8,
-          "maxLength": 2048,
-          "description": "webhook 的唯一固定目标；必须 HTTPS，不得包含占位符或 userinfo。"
-        },
-        "headers": {
-          "$ref": "#/$defs/authDeliveryHeaders"
-        },
-        "secretHeaders": {
-          "$ref": "#/$defs/authDeliverySecretHeaders"
-        },
-        "encoding": {
-          "enum": [
-            "json",
-            "form"
-          ],
-          "default": "json"
-        },
-        "fields": {
-          "type": "object",
-          "maxProperties": 32,
-          "propertyNames": {
-            "minLength": 1,
-            "maxLength": 128
-          },
-          "additionalProperties": {
-            "type": "string",
-            "maxLength": 4096,
-            "description": "受限字段映射：值只能是字面量与固定占位符（{delivery_id} {channel} {recipient} {template} {code} {expires_in_seconds} {metadata.KEY}），不是可执行模板。"
-          }
-        },
-        "successField": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 256,
-          "description": "可选的 2xx 业务成功判定 JSON 字段路径（最多 4 层）。"
-        },
-        "successValue": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 256,
-          "description": "successField 的期望 JSON 字面量（字符串、数字或布尔）。"
-        },
-        "allowPrivateCIDRs": {
-          "type": "array",
-          "maxItems": 16,
-          "uniqueItems": true,
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64,
-            "pattern": "^[0-9a-fA-F.:]+/[0-9]{1,3}$"
-          },
-          "description": "显式允许的私网网段；link-local/元数据地址即使被列出也永远拒绝。"
-        },
-        "rootCaPem": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 65536,
-          "description": "PEM 编码的附加 CA，只追加到系统信任池，不替代公共校验。"
-        }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "kind": {
-                "const": "smtp"
-              }
-            },
-            "required": [
-              "kind"
-            ]
-          },
-          "then": {
-            "required": [
-              "host",
-              "port",
-              "from"
-            ]
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "kind": {
-                "const": "webhook"
-              }
-            },
-            "required": [
-              "kind"
-            ]
-          },
-          "then": {
-            "required": [
-              "url"
-            ]
-          }
-        },
-        {
-          "if": {
-            "required": [
-              "successField"
-            ]
-          },
-          "then": {
-            "required": [
-              "successValue"
-            ]
-          }
-        },
-        {
-          "if": {
-            "required": [
-              "successValue"
-            ]
-          },
-          "then": {
-            "required": [
-              "successField"
-            ]
-          }
-        },
-        {
-          "if": {
-            "required": [
-              "username"
-            ]
-          },
-          "then": {
-            "required": [
-              "passwordRef"
-            ]
-          }
-        },
-        {
-          "if": {
-            "required": [
-              "passwordRef"
-            ]
-          },
-          "then": {
-            "required": [
-              "username"
-            ]
-          }
-        }
-      ]
-    },
-    "authDeliveryHeaders": {
-      "type": "object",
-      "maxProperties": 32,
-      "propertyNames": {
-        "minLength": 1,
-        "maxLength": 128
-      },
-      "additionalProperties": {
-        "type": "string",
-        "maxLength": 4096
-      }
-    },
-    "authDeliverySecretHeaders": {
-      "type": "object",
-      "maxProperties": 32,
-      "propertyNames": {
-        "minLength": 1,
-        "maxLength": 128
-      },
-      "additionalProperties": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 128,
-        "description": "请求头名→秘密引用名；值来自 authentication.secretsFile 映射，不得内联。"
-      }
     },
     "quoinAudit": {
       "description": "审计保留期（ADR-0006）：默认且最低六个自然月，部署只能延长；省略整节保持默认。",

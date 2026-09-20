@@ -25,7 +25,7 @@ import (
 // The administrator is initialized through the real flow with the formal
 // password, so the fixture login is the real two-step login.
 
-func upgradeHTTPFixture(t *testing.T) (*apiServer, http.Handler, *contract.QuoinConfig, string, *stubSender) {
+func upgradeHTTPFixture(t *testing.T) (*apiServer, *upgradeGate, *contract.QuoinConfig, string) {
 	t.Helper()
 	root := t.TempDir()
 	config := &contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backups"), RootKeyFile: filepath.Join(root, "secrets", "root-key"), RuntimeTLSCertificateFile: filepath.Join(root, "secrets", "runtime.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(root, "secrets", "runtime.key"), RuntimeClientCAFile: filepath.Join(root, "secrets", "stele")}
@@ -53,16 +53,16 @@ func upgradeHTTPFixture(t *testing.T) (*apiServer, http.Handler, *contract.Quoin
 	application.setReadiness = func(sharedops.Readiness) {}
 	reconciler := upgrade.NewReconciler(database.SQL, upgradeTestingBackups{})
 	application.upgradeReconciler = reconciler
-	return application, gate, config, formal, sender
+	return application, gate, config, formal
 }
 
 type upgradeTestingBackups struct{}
 
 func (upgradeTestingBackups) RunUpgrade(ctx context.Context, id int64) error { return nil }
 
-func upgradeLogin(t *testing.T, handler http.Handler, config *contract.QuoinConfig, password string, sender *stubSender) *http.Cookie {
+func upgradeLogin(t *testing.T, handler http.Handler, config *contract.QuoinConfig, password string) *http.Cookie {
 	t.Helper()
-	return scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", password, sender)
+	return scenarioLoginCookie(t, handler, config.PublicOrigin, "admin", password)
 }
 
 func upgradeRequest(t *testing.T, handler http.Handler, config *contract.QuoinConfig, cookie *http.Cookie, method, path, body string) *httptest.ResponseRecorder {
@@ -83,8 +83,8 @@ func upgradeRequest(t *testing.T, handler http.Handler, config *contract.QuoinCo
 // operations answer 503 while the deterministic drain cancels stay open, and
 // exitMaintenance restores the normal surface.
 func TestUpgradeGateSwapsLiveSurfaceAndDrainsThroughAllowlist(t *testing.T) {
-	application, handler, config, password, sender := upgradeHTTPFixture(t)
-	cookie := upgradeLogin(t, handler, config, password, sender)
+	application, handler, config, password := upgradeHTTPFixture(t)
+	cookie := upgradeLogin(t, handler, config, password)
 	// One active investigation attempt is drainable work.
 	investigation, err := application.db.Exec(`INSERT INTO investigations(created_at) VALUES(?)`, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {

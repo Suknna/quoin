@@ -40,9 +40,10 @@ CREATE TABLE users (
   enabled                    INTEGER NOT NULL CHECK (enabled IN (0,1)),
   auth_revision              INTEGER NOT NULL DEFAULT 1 CHECK (auth_revision > 0),
   initialized                INTEGER NOT NULL DEFAULT 0 CHECK (initialized IN (0,1)),
-  password_phc               TEXT NOT NULL CHECK (length(password_phc) > 0), -- Argon2id PHC，格式见 security.md
-  password_change_required   INTEGER NOT NULL DEFAULT 0 CHECK (password_change_required IN (0,1)), -- 首次/强制改密（离线创建、Admin 重置、备份恢复置位）
+  password_phc               TEXT CHECK (password_phc IS NULL OR length(password_phc) > 0), -- Argon2id PHC，格式见 security.md；外部（OIDC）用户无本地密码，为 NULL（ADR-0010）
+  password_change_required   INTEGER NOT NULL DEFAULT 0 CHECK (password_change_required IN (0,1)), -- 首次/强制改密（初始随机密码、离线创建、Admin 重置、备份恢复置位）
   password_change_required_at TEXT,                        -- 置位时间；成功改密在同一事务清除标志（DATA-AUTH-001）
+  initial_password_expires_at TEXT,                        -- 初始随机密码 24 小时作废期限；成功改密清除；NULL=非初始密码（ADR-0010）
   row_version                INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 用户行并发前提；与 auth_revision 独立（DATA-AUTH-004）
   created_at                 TEXT NOT NULL,
   updated_at                 TEXT NOT NULL,
@@ -74,54 +75,15 @@ CREATE TABLE user_contacts (
 ) STRICT;
 CREATE INDEX idx_user_contacts_user ON user_contacts(user_id);
 
-CREATE TABLE auth_flows (
-  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  flow_type TEXT NOT NULL CHECK (flow_type IN ('admin_initialize','operator_initialize','login','contact_change')),
-  user_id INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  flow_token_digest BLOB NOT NULL UNIQUE CHECK (length(flow_token_digest) = 32),
-  correlation_id TEXT NOT NULL DEFAULT '',
-  auth_revision_at_issue INTEGER NOT NULL CHECK (auth_revision_at_issue > 0),
-  password_set INTEGER NOT NULL DEFAULT 0 CHECK (password_set IN (0,1)),
-  verified_contact_id INTEGER REFERENCES user_contacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  candidate_channel TEXT CHECK (candidate_channel IS NULL OR candidate_channel IN ('email','sms')),
-  candidate_target TEXT CHECK (candidate_target IS NULL OR length(candidate_target) BETWEEN 3 AND 320),
-  client_label TEXT NOT NULL DEFAULT 'Browser',
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','completed','failed','revoked')),
+CREATE TABLE identities (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  issuer     TEXT NOT NULL CHECK (length(issuer) BETWEEN 8 AND 512),  -- OIDC issuer，外部身份的组成键之一
+  subject    TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 320), -- OIDC sub；与 issuer 联合唯一（ADR-0010）
   created_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
-  completed_at TEXT,
-  failed_attempts INTEGER NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0)
+  UNIQUE (issuer, subject)
 ) STRICT;
-CREATE INDEX idx_auth_flows_user ON auth_flows(user_id,status);
-
-CREATE TABLE auth_challenges (
-  id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  flow_id INTEGER NOT NULL REFERENCES auth_flows(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  purpose TEXT NOT NULL CHECK (purpose IN ('second_factor','contact_verification')),
-  contact_id INTEGER NOT NULL REFERENCES user_contacts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  contact_version INTEGER NOT NULL CHECK (contact_version > 0),
-  auth_revision_at_issue INTEGER NOT NULL CHECK (auth_revision_at_issue > 0),
-  code_digest BLOB NOT NULL CHECK (length(code_digest) = 32),
-  delivery_id TEXT NOT NULL UNIQUE,
-  delivery_status TEXT NOT NULL DEFAULT 'pending' CHECK (delivery_status IN ('pending','accepted','failed','unknown')),
-  created_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
-  consumed_at TEXT
-) STRICT;
-CREATE INDEX idx_auth_challenges_flow ON auth_challenges(flow_id);
-
-CREATE TABLE auth_delivery_settings (
-  id INTEGER PRIMARY KEY CHECK (id=1),
-  source TEXT NOT NULL CHECK (source IN ('deployment','administrator')),
-  configuration_json TEXT NOT NULL CHECK (json_valid(configuration_json)),
-  secret_nonce BLOB CHECK (secret_nonce IS NULL OR length(secret_nonce)=12),
-  secret_ciphertext BLOB,
-  root_binding_revision INTEGER NOT NULL CHECK (root_binding_revision > 0),
-  row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version > 0),
-  updated_at TEXT NOT NULL,
-  CHECK ((secret_nonce IS NULL AND secret_ciphertext IS NULL) OR (secret_nonce IS NOT NULL AND length(secret_ciphertext)>=16))
-) STRICT;
+CREATE INDEX idx_identities_user ON identities(user_id);
 
 CREATE TABLE sessions (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),

@@ -1,7 +1,6 @@
 package app_test
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -12,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/app"
@@ -102,14 +102,14 @@ func TestAuthEndpointsOverRealServer(t *testing.T) {
 	if err := service.SetReader(database.Reader); err != nil {
 		t.Fatal(err)
 	}
-	sender := &recordingSender{}
-	if err := service.ConfigureAuth(auth.AuthConfig{OTPKey: bytes.Repeat([]byte{0x7E}, 32), Sender: sender}); err != nil {
+	// The deployment seeds only a pending bootstrap administrator whose
+	// initial password is randomly generated; the restricted first session
+	// forces the formal change (ADR-0010).
+	initial, err := auth.GenerateInitialPassword()
+	if err != nil {
 		t.Fatal(err)
 	}
-	// The deployment seeds only a pending bootstrap administrator whose initial
-	// password is the public default; the unified initialization wizard opens
-	// directly with it (the deployment network owns the access boundary).
-	if _, err := service.EnsureBootstrapAdmin(ctx); err != nil {
+	if _, err := service.EnsureBootstrapAdmin(ctx, initial, time.Now().UTC().Add(auth.InitialPasswordLifetime)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -118,24 +118,29 @@ func TestAuthEndpointsOverRealServer(t *testing.T) {
 
 	origin := map[string]string{"Origin": config.PublicOrigin, "Content-Type": "application/json"}
 
-	login := mustPost(t, server, origin, `/api/v1/auth/login`, `{"username":"admin","password":"admin"}`, http.StatusOK)
+	// The single-step login issues the session cookie directly; the bootstrap
+	// login stays restricted (passwordChangeRequired=true).
+	login := mustPost(t, server, origin, `/api/v1/auth/login`, `{"username":"admin","password":"`+initial+`"}`, http.StatusOK)
 	if strings.Contains(login.body, "$schema") {
 		t.Fatalf("response body must match the frozen OpenAPI schema, got %s", login.body)
 	}
-	if cookie := login.headers.Get("Set-Cookie"); !strings.HasPrefix(cookie, "__Host-quoin-flow=") {
-		t.Fatalf("expected flow cookie, got %q", cookie)
+	var loginBody struct {
+		Completed bool `json:"completed"`
+		User      struct {
+			PasswordChangeRequired bool `json:"passwordChangeRequired"`
+		} `json:"user"`
 	}
-	var flow struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal([]byte(login.body), &flow); err != nil {
+	if err := json.Unmarshal([]byte(login.body), &loginBody); err != nil {
 		t.Fatal(err)
 	}
-	if flow.Type != "admin_initialize" {
-		t.Fatalf("expected the admin initialization flow, got %s", login.body)
+	if !loginBody.Completed || !loginBody.User.PasswordChangeRequired {
+		t.Fatalf("bootstrap login must complete restricted: %s", login.body)
 	}
-	flowCookie := scenarioCookie(login.headers, "__Host-quoin-flow")
-	flowOrigin := merge(origin, map[string]string{"Cookie": flowCookie})
+	cookie := scenarioCookie(login.headers, "__Host-quoin-session")
+	if !strings.HasPrefix(cookie, "__Host-quoin-session=") {
+		t.Fatalf("expected session cookie, got %q", login.headers.Values("Set-Cookie"))
+	}
+	sessionOrigin := merge(origin, map[string]string{"Cookie": cookie})
 
 	// Huma validates request structure before a handler executes. It must still
 	// serialize the project-wide frozen ErrorModel and must not echo submitted
@@ -152,75 +157,29 @@ func TestAuthEndpointsOverRealServer(t *testing.T) {
 	unsupportedMedia := mustPost(t, server, merge(origin, map[string]string{"Content-Type": "text/plain"}), `/api/v1/auth/login`, `{"username":"admin","password":"irrelevant"}`, http.StatusUnsupportedMediaType)
 	assertFrozenProblem(t, unsupportedMedia, "unsupported_media")
 
-	// The wizard: formal password, then a verified OTP contact. The forced
-	// first-password change of the old direct login now lives in this flow's
-	// password step.
+	// The forced change rides the ordinary self-service endpoint and unlocks
+	// the full admission level in the same transaction.
 	password := "Correct horse battery staple 2026!"
-	mustDo(t, server, http.MethodPut, flowOrigin, `/api/v1/auth/flow/password`, `{"newPassword":"`+password+`"}`, http.StatusNoContent)
-	contact := mustPost(t, server, flowOrigin, `/api/v1/auth/flow/contacts`, `{"channel":"email","target":"admin@example.test"}`, http.StatusOK)
-	var masked struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal([]byte(contact.body), &masked); err != nil {
-		t.Fatal(err)
-	}
-	mustPost(t, server, flowOrigin, `/api/v1/auth/flow/challenge`, `{"contactId":"`+masked.ID+`"}`, http.StatusOK)
-	initialVerify := mustPost(t, server, flowOrigin, `/api/v1/auth/flow/verify`, `{"code":"`+sender.lastCode()+`"}`, http.StatusOK)
-	var verification struct {
-		Completed bool `json:"completed"`
-	}
-	if err := json.Unmarshal([]byte(initialVerify.body), &verification); err != nil {
-		t.Fatal(err)
-	}
-	if verification.Completed {
-		t.Fatalf("initialization verification must not create a session: %s", initialVerify.body)
-	}
-	mustPost(t, server, flowOrigin, `/api/v1/auth/flow/complete`, `{}`, http.StatusNoContent)
-	// A flow bearer can never authenticate: the flow cookie answers 401 on me.
-	mustRequest(t, server, map[string]string{"Cookie": flowCookie}, `/api/v1/auth/me`, http.StatusUnauthorized)
+	mustDo(t, server, http.MethodPut, sessionOrigin, `/api/v1/auth/password`, `{"currentPassword":"`+initial+`","newPassword":"`+password+`"}`, http.StatusNoContent)
 
-	// Second-factor login: the password starts a login flow, the consumed OTP
-	// code issues the session cookie.
-	flowLogin := mustPost(t, server, origin, `/api/v1/auth/login`, `{"username":"admin","password":"`+password+`"}`, http.StatusOK)
-	var secondFactor struct {
-		Type     string `json:"type"`
-		Contacts []struct {
-			ID string `json:"id"`
-		} `json:"contacts"`
-	}
-	if err := json.Unmarshal([]byte(flowLogin.body), &secondFactor); err != nil {
-		t.Fatal(err)
-	}
-	if secondFactor.Type != "login" || len(secondFactor.Contacts) == 0 {
-		t.Fatalf("expected the second-factor login flow, got %s", flowLogin.body)
-	}
-	loginOrigin := merge(origin, map[string]string{"Cookie": scenarioCookie(flowLogin.headers, "__Host-quoin-flow")})
-	mustPost(t, server, loginOrigin, `/api/v1/auth/flow/challenge`, `{"contactId":"`+secondFactor.Contacts[0].ID+`"}`, http.StatusOK)
-	verified := mustPost(t, server, loginOrigin, `/api/v1/auth/flow/verify`, `{"code":"`+sender.lastCode()+`"}`, http.StatusOK)
-	cookie := scenarioCookie(verified.headers, "__Host-quoin-session")
-	if !strings.HasPrefix(cookie, "__Host-quoin-session=") {
-		t.Fatalf("expected session cookie, got %q", verified.headers.Values("Set-Cookie"))
-	}
-
-	me := mustRequest(t, server, map[string]string{"Cookie": cookie}, `/api/v1/auth/me`, http.StatusOK)
-	t.Logf("me: %s", me)
-
-	change := mustDo(t, server, http.MethodPut, merge(origin, map[string]string{"Cookie": cookie}),
-		`/api/v1/auth/password`, `{"currentPassword":"`+password+`","newPassword":"A better personal passphrase 2027!"}`, http.StatusNoContent)
-	t.Logf("change headers: %v", change.headers)
-
-	after := mustRequest(t, server, map[string]string{"Cookie": cookie}, `/api/v1/auth/me`, http.StatusOK)
+	after := mustRequest(t, server, sessionOrigin, `/api/v1/auth/me`, http.StatusOK)
 	var updated struct {
-		PasswordChangeRequired bool `json:"passwordChangeRequired"`
-		AuthRevision           int  `json:"authRevision"`
+		PasswordChangeRequired bool   `json:"passwordChangeRequired"`
+		AuthRevision           int    `json:"authRevision"`
+		AuthSource             string `json:"authSource"`
 	}
 	if err := json.Unmarshal([]byte(after), &updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.PasswordChangeRequired || updated.AuthRevision != 3 {
-		// Revision chain: seed 1, initialization password step 2, own change 3.
+	// Revision chain: seed 1, forced change 2.
+	if updated.PasswordChangeRequired || updated.AuthRevision != 2 || updated.AuthSource != "local" {
 		t.Fatalf("password change did not take effect: %s", after)
 	}
+
+	// The formal password logs in with an unrestricted session.
+	formal := mustPost(t, server, origin, `/api/v1/auth/login`, `{"username":"admin","password":"`+password+`"}`, http.StatusOK)
+	formalCookie := scenarioCookie(formal.headers, "__Host-quoin-session")
+	mustRequest(t, server, map[string]string{"Cookie": formalCookie}, `/api/v1/auth/me`, http.StatusOK)
 }
 
 func assertFrozenProblem(t *testing.T, result httpResult, wantCode string) {

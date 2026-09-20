@@ -318,19 +318,13 @@ func (service *Service) ResetUserPassword(ctx context.Context, session Session, 
 				return UserCommandResult{}, execution.Changed, hashErr
 			}
 			now := service.timestamp()
-			// One atomic revocation set: sessions, pending authentication
-			// flows and outstanding challenges all die with the credential.
+			// The credential rotation revokes the target's sessions atomically;
+			// with the OTP retirement no flow or challenge rows exist anymore.
 			revocation, err := tx.ExecContext(ctx, `UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL`, now, target.ID)
 			if err != nil {
 				return UserCommandResult{}, execution.Changed, err
 			}
 			revokedCount, _ := revocation.RowsAffected()
-			if _, err := tx.ExecContext(ctx, `UPDATE auth_flows SET status='revoked' WHERE user_id=? AND status='pending'`, target.ID); err != nil {
-				return UserCommandResult{}, execution.Changed, err
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE auth_challenges SET consumed_at=? WHERE user_id=? AND consumed_at IS NULL`, now, target.ID); err != nil {
-				return UserCommandResult{}, execution.Changed, err
-			}
 			// The uninitialized flag is what re-routes the next credential
 			// verification into the initialization flow instead of login; the
 			// security fields move auth_revision exactly once (schema
@@ -363,17 +357,12 @@ type SetUserContactsInput struct {
 	Contacts        []ContactInput
 }
 
-// SetUserContacts rotates an operator's contact targets with full-set
-// semantics: channels absent from the input are retired (enabled=0,
-// unverified, version bumped) rather than deleted, preserving challenge and
-// audit foreign keys. Every applied change revokes the target's sessions and
-// pending authentication flows; a changed target clears its verification and
-// bumps its version so outstanding challenges stop verifying. When no
-// verified target remains the user reverts to uninitialized and must redo the
-// initialization flow (password_set semantics apply again on the fresh flow).
-// Administrators are rejected: their own channels change only through the
-// contact_change flow, which verifies the replacement before any existing
-// verified channel is lost.
+// SetUserContacts rotates a user's contact targets with full-set semantics:
+// channels absent from the input are retired (enabled=0, unverified, version
+// bumped) rather than deleted. Contacts are display-only since the OTP
+// retirement (ADR-0010) — they carry the OIDC email or an administrator's
+// informational address and no longer bind any verification, so a change no
+// longer revokes sessions or reverts initialization.
 func (service *Service) SetUserContacts(ctx context.Context, session Session, input SetUserContactsInput) (UserCommandResult, bool, error) {
 	return service.runUserCommand(ctx, session, service.ops.adminSetContacts, input.ClientCommandID, input.Digest,
 		func(tx *execution.Tx) (UserCommandResult, execution.Change, error) {
@@ -388,49 +377,20 @@ func (service *Service) SetUserContacts(ctx context.Context, session Session, in
 				}
 				return UserCommandResult{}, execution.Changed, err
 			}
-			if target.Role == "admin" {
-				return UserCommandResult{}, execution.Unchanged, conflictRejection(ConflictDetail{Code: "validation_failed", ObjectType: "user", ObjectID: target.Locator, Detail: "管理员的联系方式必须通过专用验证流程更换"})
-			}
 			if target.RowVersion != input.ExpectedRow {
 				return UserCommandResult{}, execution.Unchanged, conflictRejection(rowVersionConflict(target))
 			}
 			now := service.timestamp()
-			changed := false
 			activeChannels := map[string]bool{}
 			for _, contact := range contacts {
 				activeChannels[contact.Channel] = true
-				_, contactChanged, err := upsertContact(ctx, tx, target.ID, contact, now)
-				if err != nil {
+				if _, _, err := upsertContact(ctx, tx, target.ID, contact, now); err != nil {
 					return UserCommandResult{}, execution.Changed, err
 				}
-				changed = changed || contactChanged
 			}
 			// Full-set semantics: retire every channel the input omits.
-			retired, err := retireMissingContacts(ctx, tx, target.ID, activeChannels, now)
-			if err != nil {
+			if _, err := retireMissingContacts(ctx, tx, target.ID, activeChannels, now); err != nil {
 				return UserCommandResult{}, execution.Changed, err
-			}
-			changed = changed || retired
-			if changed {
-				// Contact changes are verification-binding changes: revoke
-				// sessions and pending flows immediately; challenges die
-				// through the bumped contact version (auth_revision is
-				// untouched — triggers only allow password-driven revisions).
-				if _, err := tx.ExecContext(ctx, `UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL`, now, target.ID); err != nil {
-					return UserCommandResult{}, execution.Changed, err
-				}
-				if _, err := tx.ExecContext(ctx, `UPDATE auth_flows SET status='revoked' WHERE user_id=? AND status='pending'`, target.ID); err != nil {
-					return UserCommandResult{}, execution.Changed, err
-				}
-				var verified int
-				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_contacts WHERE user_id=? AND enabled=1 AND verified_at IS NOT NULL`, target.ID).Scan(&verified); err != nil {
-					return UserCommandResult{}, execution.Changed, err
-				}
-				if verified == 0 {
-					if _, err := tx.ExecContext(ctx, `UPDATE users SET initialized=0,row_version=row_version+1,updated_at=? WHERE id=? AND initialized=1`, now, target.ID); err != nil {
-						return UserCommandResult{}, execution.Changed, err
-					}
-				}
 			}
 			updated, err := findUserByID(ctx, tx, target.ID)
 			if err != nil {

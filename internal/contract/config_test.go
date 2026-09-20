@@ -1,7 +1,6 @@
 package contract_test
 
 import (
-	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -169,92 +168,62 @@ func TestDecodePlinthEnabledPlugins(t *testing.T) {
 	}
 }
 
-const authDeliveryQuoin = validQuoin + `authentication:
-  secretsFile: /run/quoin-secrets/auth-delivery-secrets.yaml
-  configuration:
-    email:
-      kind: smtp
-      host: smtp.example.com
-      port: 587
-      from: noreply@quoin.example.com
-      username: quoin
-      passwordRef: smtp-password
-      tlsMode: starttls
-      allowPrivateCIDRs: [192.168.0.0/16]
-      rootCaPem: |
-        -----BEGIN CERTIFICATE-----
-        MIIB
-        -----END CERTIFICATE-----
-    sms:
-      kind: webhook
-      url: https://sms-gateway.example.com/send
-      headers:
-        X-Quoin-Env: production
-      secretHeaders:
-        X-Api-Key: sms-api-key
-      encoding: json
-      fields:
-        code: "{code}"
-      successField: accepted
-      successValue: "true"
+const authProvidersQuoin = validQuoin + `authentication:
+  local:
+    enabled: false
+    visible: false
+  oidc:
+    enabled: true
+    issuer: https://sso.example.com
+    clientId: quoin
+    redirectUrl: https://quoin.example.com/api/v1/auth/oidc/callback
+    label: 统一身份登录
+  secretsFile: /run/quoin-secrets/auth-secrets.yaml
 audit:
   retentionMonths: 6
 `
 
 func TestDecodeAcceptsAuthenticationAndAuditDeployment(t *testing.T) {
 	var config contract.QuoinConfig
-	if err := contract.Decode([]byte(authDeliveryQuoin), &config); err != nil {
+	if err := contract.Decode([]byte(authProvidersQuoin), &config); err != nil {
 		t.Fatal(err)
 	}
-	auth := config.Authentication
-	if auth == nil {
+	authn := config.Authentication
+	if authn == nil {
 		t.Fatal("authentication section was not decoded")
 	}
-	if auth.SecretsFile != "/run/quoin-secrets/auth-delivery-secrets.yaml" {
-		t.Fatalf("SecretsFile = %q", auth.SecretsFile)
+	if authn.SecretsFile != "/run/quoin-secrets/auth-secrets.yaml" {
+		t.Fatalf("SecretsFile = %q", authn.SecretsFile)
 	}
-	delivery := auth.Configuration
-	if delivery == nil || delivery.Email == nil || delivery.SMS == nil {
-		t.Fatalf("delivery channels were not decoded: %+v", delivery)
+	if authn.LocalEnabled() || authn.LocalVisible() {
+		t.Fatalf("local channel must resolve disabled and hidden: %+v", authn.Local)
 	}
-	email := delivery.Email
-	if email.Kind != "smtp" || email.Host != "smtp.example.com" || email.Port != 587 ||
-		email.From != "noreply@quoin.example.com" || email.Username != "quoin" ||
-		email.PasswordRef != "smtp-password" || email.TLSMode != "starttls" {
-		t.Fatalf("unexpected email channel: %+v", email)
+	oidc := authn.OIDC
+	if oidc == nil || !authn.OIDCEnabled() {
+		t.Fatalf("oidc channel was not decoded or not enabled: %+v", oidc)
 	}
-	if len(email.AllowPrivateCIDRs) != 1 || email.AllowPrivateCIDRs[0] != "192.168.0.0/16" {
-		t.Fatalf("AllowPrivateCIDRs = %v", email.AllowPrivateCIDRs)
-	}
-	if !strings.Contains(email.RootCAPEM, "BEGIN CERTIFICATE") {
-		t.Fatalf("RootCAPEM = %q", email.RootCAPEM)
-	}
-	sms := delivery.SMS
-	if sms.Kind != "webhook" || sms.URL != "https://sms-gateway.example.com/send" ||
-		sms.Encoding != "json" || sms.SuccessField != "accepted" || sms.SuccessValue != "true" {
-		t.Fatalf("unexpected sms channel: %+v", sms)
-	}
-	if sms.Headers["X-Quoin-Env"] != "production" || sms.SecretHeaders["X-Api-Key"] != "sms-api-key" {
-		t.Fatalf("unexpected sms headers: %+v %+v", sms.Headers, sms.SecretHeaders)
-	}
-	if sms.Fields["code"] != "{code}" {
-		t.Fatalf("unexpected sms fields: %+v", sms.Fields)
+	if oidc.Issuer != "https://sso.example.com" || oidc.ClientID != "quoin" ||
+		oidc.RedirectURL != "https://quoin.example.com/api/v1/auth/oidc/callback" || oidc.Label != "统一身份登录" {
+		t.Fatalf("unexpected oidc channel: %+v", oidc)
 	}
 	if config.Audit == nil || config.Audit.RetentionMonths != 6 {
 		t.Fatalf("unexpected audit section: %+v", config.Audit)
 	}
 }
 
-func TestDecodeAbsentAuthenticationAndAuditStayNil(t *testing.T) {
-	// The deploy-sourced preset exists only when the YAML supplies it; the
-	// decoder must preserve the distinction from runtime-administered
-	// settings and defaults.
+func TestDecodeDefaultsLocalChannelWhenAuthenticationAbsent(t *testing.T) {
 	var config contract.QuoinConfig
 	if err := contract.Decode([]byte(validQuoin), &config); err != nil {
 		t.Fatal(err)
 	}
 	if config.Authentication != nil {
 		t.Fatalf("absent authentication decoded as %+v", config.Authentication)
+	}
+	if !config.Authentication.LocalEnabled() || !config.Authentication.LocalVisible() {
+		t.Fatal("nil authentication must resolve the local channel enabled and visible")
+	}
+	if config.Authentication.OIDCEnabled() {
+		t.Fatal("nil authentication must resolve oidc disabled")
 	}
 	if config.Audit != nil {
 		t.Fatalf("absent audit decoded as %+v", config.Audit)
@@ -263,25 +232,15 @@ func TestDecodeAbsentAuthenticationAndAuditStayNil(t *testing.T) {
 
 func TestDecodeRejectsInvalidAuthentication(t *testing.T) {
 	cases := map[string]string{
-		"empty-section":           validQuoin + "authentication: {}\n",
-		"unknown-section-field":   validQuoin + "authentication:\n  debug: true\n",
-		"empty-configuration":     validQuoin + "authentication:\n  configuration: {}\n",
-		"unknown-channel-field":   authDeliveryQuoin + "  extra: 1\n",
-		"unknown-deployment-key":  validQuoin + "authentication:\n  configuration:\n    fax:\n      kind: webhook\n      url: https://gw.example.com\n",
-		"sms-requires-webhook":    validQuoin + "authentication:\n  configuration:\n    sms:\n      kind: smtp\n      host: smtp.example.com\n      port: 587\n      from: noreply@quoin.example.com\n",
-		"smtp-missing-port":       validQuoin + "authentication:\n  configuration:\n    email:\n      kind: smtp\n      host: smtp.example.com\n      from: noreply@quoin.example.com\n",
-		"smtp-missing-host":       validQuoin + "authentication:\n  configuration:\n    email:\n      kind: smtp\n      port: 587\n      from: noreply@quoin.example.com\n",
-		"webhook-missing-url":     validQuoin + "authentication:\n  configuration:\n    sms:\n      kind: webhook\n",
-		"missing-kind":            validQuoin + "authentication:\n  configuration:\n    email:\n      host: smtp.example.com\n",
-		"unknown-kind":            validQuoin + "authentication:\n  configuration:\n    email:\n      kind: ses\n      url: https://ses.example.com\n",
-		"bad-tls-mode":            validQuoin + "authentication:\n  configuration:\n    email:\n      kind: smtp\n      host: smtp.example.com\n      port: 587\n      from: noreply@quoin.example.com\n      tlsMode: none\n",
-		"bad-encoding":            validQuoin + "authentication:\n  configuration:\n    sms:\n      kind: webhook\n      url: https://gw.example.com\n      encoding: xml\n",
-		"http-url":                validQuoin + "authentication:\n  configuration:\n    sms:\n      kind: webhook\n      url: http://gw.example.com/send\n",
-		"relative-secrets-file":   validQuoin + "authentication:\n  secretsFile: secrets/auth.yaml\n",
-		"bad-cidr":                validQuoin + "authentication:\n  configuration:\n    email:\n      kind: smtp\n      host: smtp.example.com\n      port: 587\n      from: noreply@quoin.example.com\n      allowPrivateCIDRs: [192.168.0.0]\n",
-		"success-without-value":   validQuoin + "authentication:\n  configuration:\n    sms:\n      kind: webhook\n      url: https://gw.example.com\n      successField: ok\n",
-		"username-without-ref":    validQuoin + "authentication:\n  configuration:\n    email:\n      kind: smtp\n      host: smtp.example.com\n      port: 587\n      from: noreply@quoin.example.com\n      username: quoin\n",
-		"empty-secret-header-ref": validQuoin + "authentication:\n  configuration:\n    sms:\n      kind: webhook\n      url: https://gw.example.com\n      secretHeaders:\n        X-Api-Key: \"\"\n",
+		"empty-section":             validQuoin + "authentication: {}\n",
+		"unknown-section-field":     validQuoin + "authentication:\n  debug: true\n",
+		"unknown-local-field":       validQuoin + "authentication:\n  local:\n    enabled: true\n    fallback: true\n",
+		"oidc-missing-issuer":       validQuoin + "authentication:\n  oidc:\n    enabled: false\n    clientId: quoin\n    redirectUrl: https://quoin.example.com/cb\n",
+		"oidc-missing-redirect":     validQuoin + "authentication:\n  oidc:\n    issuer: https://sso.example.com\n    clientId: quoin\n",
+		"unknown-oidc-field":        authProvidersQuoin + "  adminGroups: []\n",
+		"oidc-enabled-without-file": validQuoin + "authentication:\n  oidc:\n    enabled: true\n    issuer: https://sso.example.com\n    clientId: quoin\n    redirectUrl: https://quoin.example.com/cb\n",
+		"relative-secrets-file":     validQuoin + "authentication:\n  secretsFile: secrets/auth.yaml\n",
+		"issuer-too-short":          validQuoin + "authentication:\n  oidc:\n    issuer: https://s\n    clientId: quoin\n    redirectUrl: https://quoin.example.com/cb\n",
 	}
 	for name, input := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -321,46 +280,6 @@ func TestDecodeAcceptsExtendedAuditRetention(t *testing.T) {
 	}
 }
 
-// TestAuthDeliveryDeploymentJSONShapeMatchesStoredSettings pins the contract
-// struct to the exact JSON field names of the stored
-// auth_delivery_settings.configuration_json document (currently decoded by
-// the app-private DTO): the deploy preset and runtime settings must stay
-// wire-compatible.
-func TestAuthDeliveryDeploymentJSONShapeMatchesStoredSettings(t *testing.T) {
-	const storedShape = `{
-	  "email": {"kind": "smtp", "host": "smtp.example.com", "port": 587,
-	            "from": "noreply@quoin.test", "username": "quoin",
-	            "passwordRef": "smtp-password", "tlsMode": "implicit",
-	            "allowPrivateCIDRs": ["127.0.0.0/8"], "rootCaPem": "PEM"},
-	  "sms": {"kind": "webhook", "url": "https://gw.example.com/send",
-	          "headers": {"X-Env": "e2e"}, "secretHeaders": {"X-Api-Key": "sms-key"},
-	          "encoding": "form", "fields": {"code": "{code}"},
-	          "successField": "ok", "successValue": "true"}
-	}`
-	var delivery contract.AuthDeliveryDeployment
-	if err := json.Unmarshal([]byte(storedShape), &delivery); err != nil {
-		t.Fatal(err)
-	}
-	email := delivery.Email
-	if email == nil || email.Kind != "smtp" || email.Host != "smtp.example.com" ||
-		email.Port != 587 || email.From != "noreply@quoin.test" ||
-		email.Username != "quoin" || email.PasswordRef != "smtp-password" ||
-		email.TLSMode != "implicit" || email.RootCAPEM != "PEM" ||
-		len(email.AllowPrivateCIDRs) != 1 || email.AllowPrivateCIDRs[0] != "127.0.0.0/8" {
-		t.Fatalf("email channel does not round-trip the stored JSON shape: %+v", email)
-	}
-	sms := delivery.SMS
-	if sms == nil || sms.Kind != "webhook" || sms.URL != "https://gw.example.com/send" ||
-		sms.Headers["X-Env"] != "e2e" || sms.SecretHeaders["X-Api-Key"] != "sms-key" ||
-		sms.Encoding != "form" || sms.Fields["code"] != "{code}" ||
-		sms.SuccessField != "ok" || sms.SuccessValue != "true" {
-		t.Fatalf("sms channel does not round-trip the stored JSON shape: %+v", sms)
-	}
-}
-
-// TestDeployConfigTemplateStaysContractValid protects the shipped default
-// component template: it must keep decoding against the current deployment
-// schema even as new sections land.
 func TestDeployConfigTemplateStaysContractValid(t *testing.T) {
 	var config contract.QuoinConfig
 	if err := contract.DecodeFile(filepath.Join("..", "..", "deploy", "config", "quoin.yaml"), &config); err != nil {

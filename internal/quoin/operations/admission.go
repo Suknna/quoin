@@ -47,32 +47,11 @@ func (s Subject) resolved() bool { return s.UserID > 0 }
 
 func (s Subject) full() bool { return s.Initialized && !s.PasswordChangeRequired }
 
-// FlowIdentity is the resolved authentication-flow identity: the flow's
-// stored correlation, its bound user (0 while the flow has no user yet) and
-// its type (e.g. "login", "admin_initialize", "operator_initialize").
-type FlowIdentity struct {
-	Type          string
-	CorrelationID string
-	UserID        int64
-}
-
 // SessionResolver resolves a session credential as a pure read. It returns
 // ErrUnauthenticated for clean rejections; infrastructure failures are
 // returned verbatim so admission can answer 503 instead of misattributing
 // them as anonymous traffic.
 type SessionResolver func(ctx context.Context, credential string) (Subject, error)
-
-// FlowResolver validates a flow credential against the server-side flow
-// record (the auth.ReadFlow seam) and returns its stored identity. Same error
-// contract as SessionResolver.
-type FlowResolver func(ctx context.Context, credential string) (FlowIdentity, error)
-
-// flowOrAdminFlowTypes is the explicit allowlist of flow types that satisfy a
-// LevelFlowOrAdmin operation. Arbitrary login flows never authorize delivery
-// management. CLI recovery uses this same administrator initialization type.
-var flowOrAdminFlowTypes = map[string]bool{
-	"admin_initialize": true,
-}
 
 // Outcome states the access fact recorded for one request.
 type Outcome string
@@ -132,7 +111,6 @@ type OnSinkError func(fact AccessFact, err error)
 type Admission struct {
 	registry *AccessRegistry
 	sessions SessionResolver
-	flows    FlowResolver
 	sink     Sink
 	onError  OnSinkError
 
@@ -151,9 +129,6 @@ type AdmissionDeps struct {
 	Registry *AccessRegistry
 	// Sessions resolves session credentials for enforcement and attribution.
 	Sessions SessionResolver
-	// Flows validates flow credentials. Required when the registry declares
-	// any LevelFlow or LevelFlowOrAdmin operation.
-	Flows FlowResolver
 	// Sink persists the access facts.
 	Sink Sink
 	// OnSinkError is optional; the zero hook drops the error.
@@ -171,19 +146,9 @@ func NewAdmission(deps AdmissionDeps) (*Admission, error) {
 	case deps.Sink == nil:
 		return nil, errors.New("operations: access sink is required")
 	}
-	needsFlows := false
-	deps.Registry.forEach(func(declaration Declaration) {
-		if declaration.Level == LevelFlow || declaration.Level == LevelFlowOrAdmin {
-			needsFlows = true
-		}
-	})
-	if needsFlows && deps.Flows == nil {
-		return nil, errors.New("operations: flow declarations are present but no flow resolver is wired")
-	}
 	return &Admission{
 		registry:   deps.Registry,
 		sessions:   deps.Sessions,
-		flows:      deps.Flows,
 		sink:       deps.Sink,
 		onError:    deps.OnSinkError,
 		rawWrapped: map[string]int{},
@@ -244,8 +209,7 @@ func (a *Admission) HumaMiddleware() func(ctx huma.Context, next func(huma.Conte
 			return
 		}
 		decision := a.admit(ctx.Context(), declaration,
-			cookieValue(ctx.Header("Cookie"), sessionCookieName),
-			cookieValue(ctx.Header("Cookie"), flowCookieName))
+			cookieValue(ctx.Header("Cookie"), sessionCookieName))
 		if decision.rejectStatus != 0 {
 			if decision.subject != nil {
 				// The denial of a claimed identity is recorded before the
@@ -295,7 +259,7 @@ func (a *Admission) Wrap(declarationID string, next http.Handler) (http.Handler,
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		decision := a.admit(request.Context(), declaration,
-			cookieFrom(request, sessionCookieName), cookieFrom(request, flowCookieName))
+			cookieFrom(request, sessionCookieName))
 		if declaration.Method == "" {
 			// Pattern declarations (any-method routes) record the actual method.
 			decision.fact.Method = request.Method
@@ -395,7 +359,7 @@ func (d *admissionDecision) finalize() context.Context {
 // prepares the root execution metadata: one trusted correlation per request,
 // resumed from the stored authentication flow for flow operations.
 // Client-supplied values can never inject a correlation.
-func (a *Admission) admit(ctx context.Context, declaration Declaration, sessionCredential, flowCredential string) admissionDecision {
+func (a *Admission) admit(ctx context.Context, declaration Declaration, sessionCredential string) admissionDecision {
 	correlationID, err := execution.NewCorrelationID()
 	if err != nil {
 		a.report(AccessFact{OperationID: declaration.ID}, err)
@@ -426,8 +390,7 @@ func (a *Admission) admit(ctx context.Context, declaration Declaration, sessionC
 	// infrastructure faults and answer 503; only the sentinel means
 	// "no valid session".
 	var session *Subject
-	flowSelected := flowCredential != "" && (declaration.Level == LevelFlow || declaration.Level == LevelFlowOrAdmin)
-	if sessionCredential != "" && !flowSelected {
+	if sessionCredential != "" {
 		resolved, err := a.sessions(ctx, sessionCredential)
 		switch {
 		case err == nil:
@@ -445,63 +408,11 @@ func (a *Admission) admit(ctx context.Context, declaration Declaration, sessionC
 		decision.sessionRef = execution.SessionRef{ID: subject.SessionID, AuthRevision: subject.AuthRevision}
 		decision.actor = execution.Principal{Kind: execution.PrincipalUser, ID: subject.UserID}
 	}
-	applyFlow := func(identity FlowIdentity) {
-		decision.subject = &Subject{UserID: identity.UserID}
-		decision.correlation = identity.CorrelationID
-		decision.actor = execution.Principal{Kind: execution.PrincipalUser, ID: identity.UserID}
-	}
 
 	switch declaration.Level {
 	case LevelPublic:
 		// The flow-start surface: no identity is required, anonymous traffic
 		// stays out of the business audit table.
-
-	case LevelFlow:
-		// Flow operations require a valid flow credential bound to a user;
-		// expired, absent, forged or user-less ones are rejected before any
-		// handler runs. The flow's bound user is the claimed identity: its
-		// access facts are recorded like any authenticated request, with the
-		// flow's stored correlation and no session reference.
-		identity, ok := a.resolveFlow(ctx, &decision, flowCredential)
-		if !ok {
-			return decision
-		}
-		if identity.UserID <= 0 {
-			decision.reject(http.StatusUnauthorized, "unauthenticated", "凭据无效或认证流程已过期，请重新开始。")
-			return decision
-		}
-		applyFlow(identity)
-
-	case LevelFlowOrAdmin:
-		if !flowSelected && session != nil {
-			// Admission and the transaction must select the same credential.
-			// A supplied flow is never upgraded by an unrelated admin session.
-			if session.Role != "admin" {
-				applySession(session)
-				decision.reject(http.StatusForbidden, "forbidden", "该操作需要管理员权限。")
-				return decision
-			}
-			if !session.full() {
-				applySession(session)
-				decision.reject(http.StatusForbidden, "forbidden", "请先完成账户初始化后再使用该功能。")
-				return decision
-			}
-			applySession(session)
-		} else {
-			identity, ok := a.resolveFlow(ctx, &decision, flowCredential)
-			if !ok {
-				return decision
-			}
-			if identity.UserID <= 0 {
-				decision.reject(http.StatusUnauthorized, "unauthenticated", "凭据无效或认证流程已过期，请重新开始。")
-				return decision
-			}
-			applyFlow(identity)
-			if !flowOrAdminFlowTypes[identity.Type] {
-				decision.reject(http.StatusForbidden, "forbidden", "当前认证流程不能使用该功能。")
-				return decision
-			}
-		}
 
 	case LevelSession:
 		if session == nil {
@@ -543,16 +454,6 @@ func (a *Admission) admit(ctx context.Context, declaration Declaration, sessionC
 			return decision
 		}
 		applySession(session)
-		if declaration.FlowCorrelated {
-			// The command continues a flow started earlier: its persisted
-			// correlation is mandatory, the admin session stays the acting
-			// identity with its session reference.
-			identity, ok := a.resolveFlow(ctx, &decision, flowCredential)
-			if !ok {
-				return decision
-			}
-			decision.correlation = identity.CorrelationID
-		}
 	}
 
 	if decision.subject != nil {
@@ -560,34 +461,6 @@ func (a *Admission) admit(ctx context.Context, declaration Declaration, sessionC
 	}
 	decision.finalize()
 	return decision
-}
-
-// resolveFlow validates the flow credential. Rejections carry the 401/503
-// split: the sentinel means an absent/invalid/expired flow, anything else is
-// an infrastructure fault. ok=false means decision already carries the
-// rejection (and the flow identity for claimed flows, when attributable).
-func (a *Admission) resolveFlow(ctx context.Context, decision *admissionDecision, credential string) (FlowIdentity, bool) {
-	if credential == "" {
-		decision.reject(http.StatusUnauthorized, "unauthenticated", "凭据无效或认证流程已过期，请重新开始。")
-		return FlowIdentity{}, false
-	}
-	identity, err := a.flows(ctx, credential)
-	if err != nil {
-		if IsErrUnauthenticated(err) {
-			decision.reject(http.StatusUnauthorized, "unauthenticated", "凭据无效或认证流程已过期，请重新开始。")
-			return FlowIdentity{}, false
-		}
-		a.report(*decision.fact, err)
-		decision.reject(http.StatusServiceUnavailable, "unavailable", "暂时无法验证认证流程，请稍后重试。")
-		return FlowIdentity{}, false
-	}
-	if identity.CorrelationID == "" {
-		// A flow record without a persisted correlation cannot be admitted:
-		// the guard never fabricates one to mask the gap.
-		decision.reject(http.StatusUnauthorized, "unauthenticated", "凭据无效或认证流程已过期，请重新开始。")
-		return FlowIdentity{}, false
-	}
-	return identity, true
 }
 
 func (a *Admission) recordDenial(ctx context.Context, decision admissionDecision) {
@@ -616,7 +489,6 @@ func (a *Admission) report(fact AccessFact, err error) {
 
 const (
 	sessionCookieName = "__Host-quoin-session"
-	flowCookieName    = "__Host-quoin-flow"
 )
 
 func cookieValue(cookieHeader, name string) string {

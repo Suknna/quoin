@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/execution"
@@ -72,7 +73,8 @@ func authorizeBootstrapSeedLike(ctx context.Context, _ *execution.Tx) error {
 // write access until its next read.
 func verifyActorTx(ctx context.Context, reader interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, session Session, requireAdmin bool) error {
+}, session Session, requireAdmin bool,
+) error {
 	var revoked sql.NullString
 	var idleExpires, absoluteExpires string
 	err := reader.QueryRowContext(ctx, `SELECT s.revoked_at,s.idle_expires_at,s.absolute_expires_at FROM sessions s WHERE s.id=? AND s.user_id=? AND s.auth_revision_at_issue=?`, session.ID, session.User.ID, session.User.AuthRevision).Scan(&revoked, &idleExpires, &absoluteExpires)
@@ -173,4 +175,43 @@ func mapAdminRejection(err error) error {
 // self-service password change.
 func verifySessionTx(ctx context.Context, tx *execution.Tx, session Session) error {
 	return verifyActorTx(ctx, tx, session, false)
+}
+
+// stepCall carries one call's NON-SECRET facts into the registered Authorize
+// callback through a private context key.
+type stepCall struct {
+	userID      int64
+	tokenDigest []byte // SHA-256 of the session bearer; the raw credential stays out of context
+}
+
+type stepCallKey struct{}
+
+func withStepCall(ctx context.Context, call *stepCall) context.Context {
+	return context.WithValue(ctx, stepCallKey{}, call)
+}
+
+func stepCallFromContext(ctx context.Context) *stepCall {
+	call, _ := ctx.Value(stepCallKey{}).(*stepCall)
+	return call
+}
+
+// mapRejection translates deterministic runner rejections back into the
+// package sentinels so the app keeps one stable error surface.
+func mapRejection(err error) error {
+	var rejection *execution.Rejection
+	if errors.As(err, &rejection) {
+		switch rejection.Code {
+		case "validation_failed":
+			return fmt.Errorf("%w: %s", ErrValidation, rejection.Detail)
+		case "password_policy":
+			return fmt.Errorf("%w: %s", ErrPasswordPolicy, rejection.Detail)
+		case "not_found":
+			return ErrNotFound
+		}
+	}
+	return err
+}
+
+func rejection(code, detail string, objectID int64) error {
+	return &execution.Rejection{Code: code, Detail: detail, ObjectID: objectID}
 }

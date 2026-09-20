@@ -14,18 +14,9 @@ import (
 )
 
 type authOperations struct {
-	seedBootstrap        *execution.Operation
-	adminInitStart       *execution.Operation
-	operatorInitStart    *execution.Operation
-	loginStart           *execution.Operation
-	setFlowPassword      *execution.Operation
-	registerFlowContact  *execution.Operation
-	stageFlowContact     *execution.Operation
-	issueChallenge       *execution.Operation
-	verifyChallenge      *execution.Operation
-	completeAdminInit    *execution.Operation
-	completeOperatorInit *execution.Operation
-	completeLogin        *execution.Operation
+	seedBootstrap *execution.Operation
+	loginLocal    *execution.Operation
+	recoveryBegin *execution.Operation
 
 	// Session-originated domain commands (runner-ledger path).
 	adminCreateUser      *execution.Operation
@@ -37,10 +28,6 @@ type authOperations struct {
 	changeOwnPassword    *execution.Operation
 	logout               *execution.Operation
 	legacyBootstrapSeed  *execution.Operation
-	contactChangeStart   *execution.Operation
-	contactChangeDone    *execution.Operation
-	challengeDelivery    *execution.Operation
-	recoveryBegin        *execution.Operation
 	touchSessionActivity *execution.Operation
 }
 
@@ -70,55 +57,27 @@ func newAuthOperations() (authOperations, *execution.Registry) {
 		}
 		return nil
 	}
+	// authorizeLogin requires only execution metadata: the anonymous caller
+	// cannot present a session yet, and the business closure itself verifies
+	// the credential inside the transaction (the authority for the outcome).
+	authorizeLogin := func(ctx context.Context, _ *execution.Tx) error {
+		if _, ok := execution.FromContext(ctx); !ok {
+			return errors.New("auth: login requires execution metadata")
+		}
+		return nil
+	}
 	return authOperations{
 		seedBootstrap: register(execution.Operation{
 			Name: "auth.bootstrap.seed", Class: execution.ClassWrite, ObjectType: "deployment",
 			Authorize: authorizeBootstrapSeed,
 		}),
-		adminInitStart: register(execution.Operation{
-			Name: "auth.admin_initialize.start", Class: execution.ClassWrite, ObjectType: "user",
-			Authorize: authorizeCredentialStart(startClassAdmin),
-		}),
-		operatorInitStart: register(execution.Operation{
-			Name: "auth.operator_initialize.start", Class: execution.ClassWrite, ObjectType: "user",
-			Authorize: authorizeCredentialStart(startClassOperator),
-		}),
-		loginStart: register(execution.Operation{
-			Name: "auth.login.start", Class: execution.ClassWrite, ObjectType: "user",
-			Authorize: authorizeCredentialStart(startClassLogin),
-		}),
-		setFlowPassword: register(execution.Operation{
-			Name: "auth.flow.set_password", Class: execution.ClassWrite, ObjectType: "user",
-			Authorize: authorizeFlowStep(FlowAdminInitialize, FlowOperatorInitialize),
-		}),
-		registerFlowContact: register(execution.Operation{
-			Name: "auth.flow.register_contact", Class: execution.ClassWrite, ObjectType: "user_contact",
-			Authorize: authorizeFlowStep(FlowAdminInitialize, FlowContactChange),
-		}),
-		// The factor-change start stages the replacement on the auth_flows row;
-		// no user_contacts row exists yet, so its audit target is the flow.
-		stageFlowContact: register(execution.Operation{
-			Name: "auth.flow.stage_contact", Class: execution.ClassWrite, ObjectType: "auth_flow",
-			Authorize: authorizeFlowStep(FlowContactChange),
-		}),
-		issueChallenge: register(execution.Operation{
-			Name: "auth.challenge.issue", Class: execution.ClassWrite, ObjectType: "auth_flow",
-			Authorize: authorizeFlowStep(FlowAdminInitialize, FlowOperatorInitialize, FlowLogin, FlowContactChange),
-		}),
-		// Verification consumes the challenge but mutates the flow's verified
-		// state; the addressed object is the flow (its id is also the recorded
-		// failure/rejection object id), never the contact row.
-		verifyChallenge: register(execution.Operation{
-			Name: "auth.challenge.verify", Class: execution.ClassWrite, ObjectType: "auth_flow",
-			Authorize: authorizeFlowStep(FlowAdminInitialize, FlowOperatorInitialize, FlowContactChange),
-		}),
-		completeAdminInit: register(execution.Operation{
-			Name: "auth.admin_initialize.complete", Class: execution.ClassWrite, ObjectType: "user",
-			Authorize: authorizeFlowStep(FlowAdminInitialize),
-		}),
-		completeOperatorInit: register(execution.Operation{
-			Name: "auth.operator_initialize.complete", Class: execution.ClassWrite, ObjectType: "user",
-			Authorize: authorizeFlowStep(FlowOperatorInitialize),
+		// The local emergency login: one audited operation whose outcome is
+		// success (session issued) or rejected (wrong credential / expired
+		// initial password / external account). The audit authority is the
+		// account row — a failed attempt has no session to name.
+		loginLocal: register(execution.Operation{
+			Name: "auth.login.local", Class: execution.ClassWrite, ObjectType: "user",
+			Authorize: authorizeLogin,
 		}),
 		recoveryBegin: register(execution.Operation{
 			Name: "auth.recovery.begin", Class: execution.ClassWrite, ObjectType: "user",
@@ -127,10 +86,6 @@ func newAuthOperations() (authOperations, *execution.Registry) {
 			// context that already carries HTTP or scheduler metadata can never
 			// drive an offline recovery through the service.
 			Authorize: authorizeRecoveryBegin,
-		}),
-		completeLogin: register(execution.Operation{
-			Name: "auth.login.complete", Class: execution.ClassWrite, ObjectType: "auth_flow",
-			Authorize: authorizeFlowStep(FlowLogin),
 		}),
 
 		// Session-originated domain commands (execution.Run: ledger replay +
@@ -174,22 +129,6 @@ func newAuthOperations() (authOperations, *execution.Registry) {
 		legacyBootstrapSeed: register(execution.Operation{
 			Name: "admin.bootstrap", Class: execution.ClassWrite, ObjectType: "deployment",
 			Authorize: authorizeBootstrapSeedLike,
-		}),
-		contactChangeStart: register(execution.Operation{
-			Name: "auth.contact_change.start", Class: execution.ClassWrite, ObjectType: "user",
-			Authorize: authorizeCredentialStart(startClassContactChange),
-		}),
-		// The atomic completion acts on the administrator's account (session
-		// revocation, revision binding) and its rejection object id is the
-		// user; the swapped user_contacts row has no stable id before the
-		// upsert, so the user is the one honest target authority.
-		contactChangeDone: register(execution.Operation{
-			Name: "auth.contact_change.complete", Class: execution.ClassWrite, ObjectType: "user",
-			Authorize: authorizeFlowStep(FlowContactChange),
-		}),
-		challengeDelivery: register(execution.Operation{
-			Name: "auth.challenge.delivery_result", Class: execution.ClassWrite, ObjectType: "auth_challenge",
-			Authorize: authorizeDeliveryResult,
 		}),
 		touchSessionActivity: register(execution.Operation{
 			Name: "auth.session.activity", Class: execution.ClassWrite, ObjectType: "session",

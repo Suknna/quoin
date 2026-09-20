@@ -1,38 +1,38 @@
 package main
 
 // `quoin admin recover` — the offline administrator recovery command
-// (docs/authentication-design.md §6). Like the other admin lifecycle
-// commands it requires the long-running Quoin to be stopped: OpenDatabase
-// takes the exclusive data-directory lock and verifies the release schema,
-// so a live server makes the command fail instead of racing it. Passwords
-// are read through the attached TTY only; the generated temporary password
-// of the factors mode is printed to the attached TTY exactly once and never
-// enters logs, environment variables or files. After recovery the service
-// starts again and the administrator signs in through the ordinary login
-// into the same unified initialization flow as a first install.
+// (docs/authentication-design.md §6, ADR-0010). Like the other admin
+// lifecycle commands it requires the long-running Quoin to be stopped:
+// OpenDatabase takes the exclusive data-directory lock and verifies the
+// release schema, so a live server makes the command fail instead of racing
+// it. Two shapes share one command:
+//
+//   - The deployment is still pending bootstrap (the initial random password
+//     expired or was lost): recover mints a fresh random credential, rewrites
+//     the 0600 initial-admin-password file in the data directory and re-arms
+//     the 24-hour deadline.
+//   - The administrator is initialized but locked out: the operator chooses a
+//     temporary password through the attached TTY; no deadline applies.
+//
+// Passwords never enter logs, environment variables or arguments.
 
 import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
+	"path/filepath"
+	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"golang.org/x/term"
 )
 
-const adminRecoverUsage = "usage: quoin admin recover --config <path> --mode password|factors"
-
 func runAdminRecover(arguments []string) {
-	mode, configArguments := recoveryModeArgument(arguments)
-	if mode != string(auth.RecoveryModePassword) && mode != string(auth.RecoveryModeFactors) {
-		fail(adminRecoverUsage + "; --mode must be password or factors")
-	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
 		fail("administrator recovery requires an attached TTY")
 	}
-	config := parseConfig(configArguments, "admin recover")
+	config := parseConfig(arguments, "admin recover")
 	ctx := context.Background()
 	database, err := bootstrap.OpenDatabase(ctx, config.DataDirectory, config.RootKeyFile)
 	if err != nil {
@@ -43,55 +43,59 @@ func runAdminRecover(arguments []string) {
 	if err != nil {
 		fail(err.Error())
 	}
-	if mode == string(auth.RecoveryModePassword) {
-		recoverAdminPassword(ctx, service)
+	// Pure reads fail closed without the read-only pool; wire the same
+	// handle production installs before serving.
+	if err := service.SetReader(database.Reader); err != nil {
+		fail(err.Error())
+	}
+	pending, err := service.HasPendingBootstrapAdmin(ctx)
+	if err != nil {
+		fail(err.Error())
+	}
+	if pending {
+		rearmInitialPassword(ctx, service, config.DataDirectory)
 		return
 	}
-	recoverAdminFactors(ctx, service)
+	recoverAdminPassword(ctx, service)
 }
 
-// recoveryModeArgument removes --mode before the shared strict config parser
-// sees the arguments (same pattern as kubernetesSecretArgument).
-func recoveryModeArgument(arguments []string) (string, []string) {
-	for index := 0; index < len(arguments); index++ {
-		if arguments[index] == "--mode" {
-			if index+1 >= len(arguments) || arguments[index+1] == "" {
-				fail("--mode requires password or factors")
-			}
-			return arguments[index+1], append(arguments[:index:index], arguments[index+2:]...)
-		}
-		if strings.HasPrefix(arguments[index], "--mode=") {
-			return strings.TrimPrefix(arguments[index], "--mode="), append(arguments[:index:index], arguments[index+1:]...)
-		}
+// rearmInitialPassword regenerates the bootstrap credential file path: a
+// fresh random password, the same 0600 file and a new 24-hour deadline on
+// the users row.
+func rearmInitialPassword(ctx context.Context, service *auth.Service, dataDirectory string) {
+	password, err := auth.GenerateInitialPassword()
+	if err != nil {
+		fail(err.Error())
 	}
-	return "", arguments
+	path := filepath.Join(dataDirectory, "initial-admin-password")
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, []byte(password+"\n"), 0o600); err != nil {
+		fail(fmt.Sprintf("write %s: %v", temporary, err))
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		fail(fmt.Sprintf("publish %s: %v", path, err))
+	}
+	deadline := time.Now().UTC().Add(auth.InitialPasswordLifetime)
+	if _, err := service.BeginRecovery(ctx, password, &deadline); err != nil {
+		fail(err.Error())
+	}
+	fmt.Fprintf(os.Stdout, "Initial administrator password regenerated (shown only once):\n%s\n", password)
+	fmt.Fprintln(os.Stderr, "File: "+path)
+	fmt.Fprintln(os.Stderr, "Deadline: 24 hours. Start Quoin, sign in, and set the formal password.")
 }
 
-// recoverAdminPassword resets the administrator password to a temporary
-// credential chosen through the attached TTY. The administrator then boots the
-// service, signs in with it, and completes the same unified initialization
-// flow as a first install (formal password plus verified contact).
+// recoverAdminPassword resets the initialized administrator's password to a
+// temporary credential chosen through the attached TTY. The administrator
+// then boots the service, signs in with it and completes the forced password
+// change.
 func recoverAdminPassword(ctx context.Context, service *auth.Service) {
 	password := promptPassword("Temporary administrator password: ")
 	confirmation := promptPassword("Confirm temporary administrator password: ")
 	if password != confirmation {
 		fail("passwords do not match")
 	}
-	if _, err := service.BeginRecovery(ctx, auth.RecoveryModePassword, password); err != nil {
+	if _, err := service.BeginRecovery(ctx, password, nil); err != nil {
 		fail(err.Error())
 	}
-	fmt.Fprintln(os.Stderr, "Administrator password reset. Start Quoin, sign in with the temporary password, and complete initialization.")
-}
-
-// recoverAdminFactors resets every factor and the password. After starting the
-// service, the administrator signs in with the temporary password printed here
-// and completes the unified initialization flow (formal password plus a new
-// verified contact).
-func recoverAdminFactors(ctx context.Context, service *auth.Service) {
-	credential, err := service.BeginRecovery(ctx, auth.RecoveryModeFactors, "")
-	if err != nil {
-		fail(err.Error())
-	}
-	fmt.Fprintf(os.Stdout, "Temporary administrator password (shown only once):\n%s\n", credential.TemporaryPassword)
-	fmt.Fprintln(os.Stderr, "All administrator factors were reset. Start Quoin, sign in with the temporary password above, and complete initialization.")
+	fmt.Fprintln(os.Stderr, "Administrator password reset. Start Quoin, sign in with the temporary password, and set the formal password.")
 }

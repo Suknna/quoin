@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -332,35 +331,6 @@ func testConfig(root string) contract.QuoinConfig {
 	return contract.QuoinConfig{Component: "quoin", PublicOrigin: "https://quoin.test", DataDirectory: filepath.Join(root, "data"), BackupDirectory: filepath.Join(root, "backup"), RootKeyFile: filepath.Join(secrets, "root-key"), RuntimeTLSCertificateFile: filepath.Join(secrets, "runtime-tls.crt"), RuntimeTLSPrivateKeyFile: filepath.Join(secrets, "runtime-tls.key"), RuntimeClientCAFile: filepath.Join(secrets, "stele-service-token")}
 }
 
-// recoveryRecordingSender captures the fixture delivery so the test can read
-// the issued verification code.
-type recoveryRecordingSender struct {
-	mu    sync.Mutex
-	codes []string
-}
-
-func (sender *recoveryRecordingSender) Send(_ context.Context, message auth.Message) error {
-	sender.mu.Lock()
-	defer sender.mu.Unlock()
-	sender.codes = append(sender.codes, message.Variables["code"])
-	return nil
-}
-
-func (sender *recoveryRecordingSender) lastCode() string {
-	sender.mu.Lock()
-	defer sender.mu.Unlock()
-	if len(sender.codes) == 0 {
-		return ""
-	}
-	return sender.codes[len(sender.codes)-1]
-}
-
-// TestRestoreEntersDirectRecoveryFlowAndReachesLogin covers the sanctioned
-// restore journey end to end: the isolated snapshot carries an initialized
-// administrator with live factors, restore burns them and seals the one-time
-// recovery credential, and the web recovery flow (new password plus verified
-// contact) is the only path back to a normal login. The pre-restore temporary
-// password field stays accepted for helper compatibility.
 func TestRestoreEntersDirectRecoveryFlowAndReachesLogin(t *testing.T) {
 	ctx := context.Background()
 	const originalPassword = "original-password-123"
@@ -405,15 +375,6 @@ func TestRestoreEntersDirectRecoveryFlowAndReachesLogin(t *testing.T) {
 	sessionDigest := sha256.Sum256(sessionRaw)
 	if _, err := database.SQL.ExecContext(ctx, `INSERT INTO sessions(user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(?,?,?,?,?,?,?,?)`,
 		adminID, sessionDigest[:], adminRevision, "pre-restore", now, now, time.Now().UTC().Add(12*time.Hour).Format(time.RFC3339Nano), time.Now().UTC().Add(7*24*time.Hour).Format(time.RFC3339Nano)); err != nil {
-		t.Fatal(err)
-	}
-	flowRaw := make([]byte, 32)
-	if _, err := rand.Read(flowRaw); err != nil {
-		t.Fatal(err)
-	}
-	flowDigest := sha256.Sum256(flowRaw)
-	if _, err := database.SQL.ExecContext(ctx, `INSERT INTO auth_flows(flow_type,user_id,flow_token_digest,correlation_id,auth_revision_at_issue,password_set,client_label,status,created_at,expires_at) VALUES('login',?,?,'pre-restore',?,0,'pre-restore','pending',?,?)`,
-		adminID, flowDigest[:], adminRevision, now, time.Now().UTC().Add(15*time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(config.DataDirectory, "artifacts", "blobs"), 0o700); err != nil {
@@ -463,55 +424,34 @@ func TestRestoreEntersDirectRecoveryFlowAndReachesLogin(t *testing.T) {
 	if err := restoredService.SetReader(restored.Reader); err != nil {
 		t.Fatal(err)
 	}
-	sender := &recoveryRecordingSender{}
-	if err := restoredService.ConfigureAuth(auth.AuthConfig{OTPKey: bytes.Repeat([]byte{0x5A}, 32), Sender: sender}); err != nil {
-		t.Fatal(err)
-	}
-
-	// The burned password and every pre-restore factor are dead; the printed
-	// temporary password is the only way in.
-	if _, _, err := restoredService.StartAuthentication(ctx, "admin", originalPassword, "test"); !errors.Is(err, auth.ErrUnauthenticated) {
+	// The burned password is dead; the printed temporary password is the
+	// only way in and lands in the restricted state.
+	if _, err := restoredService.LoginWithPassword(ctx, "admin", originalPassword, "test"); !errors.Is(err, auth.ErrUnauthenticated) {
 		t.Fatalf("the pre-restore password must be unverifiable, got %v", err)
 	}
-	flow, _, err := restoredService.StartAuthentication(ctx, "admin", result.TemporaryPassword, "test")
+	temporary, err := restoredService.LoginWithPassword(ctx, "admin", result.TemporaryPassword, "test")
 	if err != nil {
-		t.Fatalf("start unified initialization after restore: %v", err)
+		t.Fatalf("temporary credential must log in after restore: %v", err)
 	}
-	if flow.Type != auth.FlowAdminInitialize {
-		t.Fatalf("unexpected flow type %q", flow.Type)
+	if !temporary.User.PasswordChangeRequired {
+		t.Fatalf("restore login must stay restricted: %+v", temporary.User)
 	}
-	if err := restoredService.SetFlowPassword(ctx, flow.Bearer, restoredPassword); err != nil {
-		t.Fatalf("set recovery password: %v", err)
-	}
-	contact, err := restoredService.RegisterFlowContact(ctx, flow.Bearer, "email", "ops@quoin.test")
+	temporarySession, err := restoredService.Authenticate(ctx, temporary.Bearer)
 	if err != nil {
-		t.Fatalf("register recovery contact: %v", err)
+		t.Fatal(err)
 	}
-	if _, _, err := restoredService.SendFlowChallenge(ctx, flow.Bearer, contact.Locator); err != nil {
-		t.Fatalf("send recovery challenge: %v", err)
-	}
-	if code := sender.lastCode(); len(code) != 6 {
-		t.Fatalf("expected a 6-digit code, got %q", code)
-	}
-	if err := restoredService.VerifyFlowChallenge(ctx, flow.Bearer, sender.lastCode()); err != nil {
-		t.Fatalf("verify recovery challenge: %v", err)
-	}
-	if err := restoredService.CompleteAdminInitialization(ctx, flow.Bearer); err != nil {
-		t.Fatalf("complete re-initialization: %v", err)
+	if err := restoredService.ChangePassword(ctx, temporarySession, result.TemporaryPassword, restoredPassword); err != nil {
+		t.Fatalf("recovery password change: %v", err)
 	}
 
 	var initialized int
 	if err := restored.SQL.QueryRowContext(ctx, `SELECT initialized FROM users WHERE username='admin'`).Scan(&initialized); err != nil || initialized != 1 {
 		t.Fatalf("recovery completion must re-initialize the administrator: value=%d err=%v", initialized, err)
 	}
-	login, _, err := restoredService.StartAuthentication(ctx, "admin", restoredPassword, "Mozilla/5.0 test")
-	if err != nil {
+	if _, err := restoredService.LoginWithPassword(ctx, "admin", restoredPassword, "Mozilla/5.0 test"); err != nil {
 		t.Fatalf("the restored administrator must reach a normal login: %v", err)
 	}
-	if login.Type != auth.FlowLogin {
-		t.Fatalf("expected the login flow, got %q", login.Type)
-	}
-	if _, _, err := restoredService.StartAuthentication(ctx, "admin", result.TemporaryPassword, "test"); !errors.Is(err, auth.ErrUnauthenticated) {
+	if _, err := restoredService.LoginWithPassword(ctx, "admin", result.TemporaryPassword, "test"); !errors.Is(err, auth.ErrUnauthenticated) {
 		t.Fatalf("the replaced temporary password must be invalid, got %v", err)
 	}
 	var restoreAudits int
@@ -540,12 +480,13 @@ func assertRestoreIsolation(t *testing.T, database *sql.DB) {
 	if enabled != 1 || initialized != 0 || passwordChange != 1 {
 		t.Fatalf("recovery admin isolation enabled=%d initialized=%d passwordChange=%d", enabled, initialized, passwordChange)
 	}
-	var pendingFlows int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM auth_flows WHERE status='pending'`).Scan(&pendingFlows); err != nil {
+	// The retired auth_flows surface no longer exists at all (ADR-0010).
+	var retiredTables int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN ('auth_flows','auth_challenges','auth_delivery_settings')`).Scan(&retiredTables); err != nil {
 		t.Fatal(err)
 	}
-	if pendingFlows != 0 {
-		t.Fatalf("pending flows survived restore isolation: %d", pendingFlows)
+	if retiredTables != 0 {
+		t.Fatalf("retired auth tables must stay absent after restore: %d", retiredTables)
 	}
 	var disabledUserEnabled, disabledUserRevision int
 	disabledUserErr := database.QueryRow(`SELECT enabled,auth_revision FROM users WHERE username='disabled-user'`).Scan(&disabledUserEnabled, &disabledUserRevision)

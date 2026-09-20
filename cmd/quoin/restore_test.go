@@ -148,8 +148,8 @@ func TestRestoreCLIPrintsOneTimeCredentialOnceOnPTY(t *testing.T) {
 	if err := database.SQL.QueryRowContext(context.Background(), `SELECT initialized FROM users WHERE username='admin'`).Scan(&initialized); err != nil || initialized != 0 {
 		t.Fatalf("restored admin must sit at the unified initialization entry: initialized=%d err=%v", initialized, err)
 	}
-	if err := database.SQL.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM auth_flows WHERE status='pending'`).Scan(&pendingFlows); err != nil || pendingFlows != 0 {
-		t.Fatalf("pending flows survived restore isolation: count=%d err=%v", pendingFlows, err)
+	if err := database.SQL.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_master WHERE name IN ('auth_flows','auth_challenges','auth_delivery_settings')`).Scan(&pendingFlows); err != nil || pendingFlows != 0 {
+		t.Fatalf("retired auth tables must stay absent: count=%d err=%v", pendingFlows, err)
 	}
 	// The printed temporary password signs in and starts the unified
 	// initialization flow directly.
@@ -162,12 +162,12 @@ func TestRestoreCLIPrintsOneTimeCredentialOnceOnPTY(t *testing.T) {
 	if err := service.SetReader(database.Reader); err != nil {
 		t.Fatal(err)
 	}
-	flow, _, err := service.StartAuthentication(context.Background(), "admin", token, "test")
+	result, err := service.LoginWithPassword(context.Background(), "admin", token, "test")
 	if err != nil {
 		t.Fatalf("the printed temporary password must sign in: %v", err)
 	}
-	if flow.Type != auth.FlowAdminInitialize {
-		t.Fatalf("unexpected flow type %q", flow.Type)
+	if !result.User.PasswordChangeRequired {
+		t.Fatalf("the restore credential must stay restricted: %+v", result.User)
 	}
 }
 

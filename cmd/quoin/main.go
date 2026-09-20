@@ -22,7 +22,7 @@ func main() {
 		runServe(os.Args[2:])
 	case "admin":
 		if len(os.Args) < 3 || os.Args[2] != "recover" {
-			fail("usage: quoin admin recover --config <path>; the administrator signs in with the default credential and initializes through the web flow")
+			fail("usage: quoin admin recover --config <path>")
 		}
 		runAdminRecover(os.Args[3:])
 	case "backup":

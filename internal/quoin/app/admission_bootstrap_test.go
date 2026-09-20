@@ -53,8 +53,12 @@ func newUninitializedAdmissionServer(t *testing.T) (*apiServer, *auth.Service, *
 	if err := service.SetReader(database.Reader); err != nil {
 		t.Fatal(err)
 	}
+
 	application := NewMaintenanceAPIServer(service, database.SQL, config.RootKeyFile)
 	if err := application.SetReadOnlyReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.configureLoginProviders(nil); err != nil {
 		t.Fatal(err)
 	}
 	return application, service, database
@@ -94,8 +98,8 @@ func TestBootstrapGateBlocksUninitializedSystem(t *testing.T) {
 	// Normal managed endpoints are blocked with the initialization envelope,
 	// regardless of authentication state (no session can exist anyway).
 	for _, path := range []string{
-		"/api/v1/maintenance",
 		"/api/v1/admin/about",
+		"/api/v1/admin/users",
 		"/api/v1/users-not-a-route",
 	} {
 		status, body := getBody(t, server, path)
@@ -104,29 +108,16 @@ func TestBootstrapGateBlocksUninitializedSystem(t *testing.T) {
 		}
 	}
 
-	status, body := getBody(t, server, "/api/v1/auth/me")
-	if status != http.StatusUnauthorized || body["code"] != "initialization_required" {
-		t.Fatalf("session discovery must show authentication UI without granting access: %d %v", status, body)
+	// The public login-channel projection passes the gate (it is the login
+	// page's bootstrap endpoint); the session surface (me) is answered by the
+	// guard's 401, never the initialization envelope.
+	status, body := getBody(t, server, "/api/v1/auth/config")
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/v1/auth/config = %d %v, want the open public gate", status, body)
 	}
-
-	// The minimal declared authentication surface passes the gate: the
-	// flow-start route reaches the API (its response is a handler/validation
-	// answer, never the gate's initialization_required envelope).
-	flowStart, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/auth/login", nil)
-	flowResponse, err := server.Client().Do(flowStart)
-	if err != nil {
-		t.Fatal(err)
-	}
-	flowResponse.Body.Close()
-	if flowResponse.StatusCode == http.StatusServiceUnavailable {
-		t.Fatalf("POST /api/v1/auth/login = %d, the gate must pass declared flow routes", flowResponse.StatusCode)
-	}
-
-	// A flow step without a credential passes the gate and is answered by the
-	// guard (401), proving the route itself is reachable.
-	status, body = getBody(t, server, "/api/v1/auth/flow")
+	status, body = getBody(t, server, "/api/v1/auth/me")
 	if status != http.StatusUnauthorized || body["code"] != "unauthenticated" {
-		t.Fatalf("GET /api/v1/auth/flow = %d %v, want guard 401 through the open gate", status, body["code"])
+		t.Fatalf("GET /api/v1/auth/me = %d %v, want guard 401 through the open gate", status, body)
 	}
 }
 
@@ -141,25 +132,26 @@ func TestBootstrapGateStaysClosedForInitializedOperatorOnly(t *testing.T) {
 	}
 	server := newGatedSurface(t, application)
 
-	status, body := getBody(t, server, "/api/v1/maintenance")
+	status, body := getBody(t, server, "/api/v1/admin/about")
 	if status != http.StatusServiceUnavailable || body["code"] != "initialization_required" {
 		t.Fatalf("initialized operator must not open the gate: %d %v", status, body["code"])
 	}
-	// The flow surface stays reachable for the recovery path.
-	flowStatus, flowBody := getBody(t, server, "/api/v1/auth/flow")
-	if flowStatus != http.StatusUnauthorized || flowBody["code"] != "unauthenticated" {
-		t.Fatalf("flow surface must stay reachable: %d %v", flowStatus, flowBody["code"])
+	// The bootstrap surface (config + login + the session endpoints) stays
+	// reachable for the administrator's forced-change path.
+	configStatus, _ := getBody(t, server, "/api/v1/auth/config")
+	if configStatus != http.StatusOK {
+		t.Fatalf("config surface must stay reachable: %d", configStatus)
 	}
 }
 
 func TestBootstrapGateOpensAfterInitialization(t *testing.T) {
-	application, service, sender := newAdmissionTestServer(t)
+	application, service := newAdmissionTestServer(t)
 	server := newGatedSurface(t, application)
 
 	// With initialization complete the gate passes everything to the guard:
 	// an authenticated request reaches its handler, an anonymous one is the
 	// guard's 401 — never the initialization envelope.
-	bearer := admissionLogin(t, service, sender)
+	bearer := admissionLogin(t, service)
 	response, err := getWithCookie(server, "/api/v1/maintenance", bearer)
 	if err != nil {
 		t.Fatal(err)

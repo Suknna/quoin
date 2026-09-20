@@ -81,7 +81,7 @@ func TestAdminUserAuthorizationMatrix(t *testing.T) {
 		t.Fatalf("op1 missing from user list: %s", users)
 	}
 	reset := mustPost(t, server, admin, `/api/v1/admin/users/`+op1+`/reset-password`, `{"clientCommandId":"authz-reset-01","expectedRowVersion":`+itoa(op1Row)+`,"newPassword":"Replacement passphrase 2027!"}`, http.StatusOK)
-	if !strings.Contains(reset.body, `"revokedSessionCount":1`) {
+	if !strings.Contains(reset.body, `"revokedSessionCount":2`) {
 		t.Fatalf("reset must report the revoked session count, got %s", reset)
 	}
 	if !strings.Contains(reset.body, `"initialized":false`) {

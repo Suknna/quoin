@@ -40,13 +40,14 @@ func TestHTTPListOwnContactsReturnsMaskedProjection(t *testing.T) {
 	if err := service.SetReader(database.Reader); err != nil {
 		t.Fatal(err)
 	}
-	sender := &stubSender{}
-	if err := service.ConfigureAuth(auth.AuthConfig{OTPKey: bytes.Repeat([]byte{9}, 32), Sender: sender}); err != nil {
+	if err := prepareAuthenticationBootstrap(context.Background(), service, dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.EnsureBootstrapAdmin(context.Background()); err != nil {
+	initialRaw, err := os.ReadFile(initialPasswordPath(dir))
+	if err != nil {
 		t.Fatal(err)
 	}
+	initial := strings.TrimSpace(string(initialRaw))
 	application := NewAPIServer(service, database.SQL, keyFile)
 	if err := application.SetReadOnlyReader(database.Reader); err != nil {
 		t.Fatal(err)
@@ -102,30 +103,38 @@ func TestHTTPListOwnContactsReturnsMaskedProjection(t *testing.T) {
 	// non-flow endpoint with 503; contacts behave like sessions here.
 	call("GET", "/api/v1/auth/contacts", nil, 503)
 
-	// Initialize the bootstrap admin with one verified email contact.
-	flow := call("POST", "/api/v1/auth/login", map[string]any{"username": "admin", "password": "admin"}, 200)
-	if flow["type"] != "admin_initialize" {
-		t.Fatalf("unexpected flow %#v", flow)
-	}
+	// Unlock the admin with the initial random password; the restricted
+	// session cannot read the full-admission contact list yet.
 	password := "correct-horse-battery-staple"
-	call("PUT", "/api/v1/auth/flow/password", map[string]any{"newPassword": password}, 204)
-	contact := call("POST", "/api/v1/auth/flow/contacts", map[string]any{"channel": "email", "target": "admin@example.test"}, 200)
-	call("POST", "/api/v1/auth/flow/challenge", map[string]any{"contactId": contact["id"]}, 200)
-	call("POST", "/api/v1/auth/flow/verify", map[string]any{"code": sender.lastCode()}, 200)
-	call("POST", "/api/v1/auth/flow/complete", map[string]any{}, 204)
-
-	// A full session reads its own masked contacts; the raw target never
-	// appears anywhere in the response body.
-	flow = call("POST", "/api/v1/auth/login", map[string]any{"username": "admin", "password": password}, 200)
-	if flow["type"] != "login" {
-		t.Fatal("expected second-factor login")
+	login := call("POST", "/api/v1/auth/login", map[string]any{"username": "admin", "password": initial}, 200)
+	if login["completed"] != true {
+		t.Fatal("bootstrap login must complete")
 	}
-	contacts := flow["contacts"].([]any)
-	contactID := contacts[0].(map[string]any)["id"]
-	call("POST", "/api/v1/auth/flow/challenge", map[string]any{"contactId": contactID}, 200)
-	verified := call("POST", "/api/v1/auth/flow/verify", map[string]any{"code": sender.lastCode()}, 200)
-	if verified["completed"] != true {
-		t.Fatal("login did not complete")
+	// LevelFull stays behind the bootstrap gate until initialization ends.
+	call("GET", "/api/v1/auth/contacts", nil, 503)
+	call("PUT", "/api/v1/auth/password", map[string]any{"currentPassword": initial, "newPassword": password}, 204)
+
+	// Seed the admin's display contact through the service (the same surface
+	// the admin users page drives).
+	seed, err := service.LoginWithPassword(context.Background(), "admin", password, "Test on Linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedSession, err := service.Authenticate(context.Background(), seed.Bearer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.SetUserContacts(context.Background(), seedSession, auth.SetUserContactsInput{
+		ClientCommandID: "cmd-seed-contact", Digest: auth.DigestCommand("user.set_contacts", map[string]any{"userId": seedSession.User.ID}),
+		UserID: seedSession.User.ID, ExpectedRow: seedSession.User.RowVersion,
+		Contacts: []auth.ContactInput{{Channel: "email", Target: "admin@example.test"}},
+	}); err != nil {
+		t.Fatalf("seed admin contact: %v", err)
+	}
+
+	login = call("POST", "/api/v1/auth/login", map[string]any{"username": "admin", "password": password}, 200)
+	if login["completed"] != true {
+		t.Fatal("formal login must complete")
 	}
 	raw := call("GET", "/api/v1/auth/contacts", nil, 200)
 	if raw["items"] == nil {
@@ -139,7 +148,7 @@ func TestHTTPListOwnContactsReturnsMaskedProjection(t *testing.T) {
 		t.Fatalf("contacts len=%d want=1", len(items))
 	}
 	item := items[0].(map[string]any)
-	if item["channel"] != "email" || item["maskedTarget"] != "a***@example.test" || item["verified"] != true {
+	if item["channel"] != "email" || item["maskedTarget"] != "a***@example.test" {
 		t.Fatalf("unexpected masked contact %#v", item)
 	}
 

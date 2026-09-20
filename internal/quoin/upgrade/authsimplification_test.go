@@ -102,12 +102,14 @@ func TestAuthSimplificationPreservesInitializedAccountsAndHistory(t *testing.T) 
 			if initialized != 1 || revision != 3 || version != 5 || password != "retained-password-hash" {
 				t.Fatalf("admin state changed: %d %d %d %q", initialized, revision, version, password)
 			}
-			var sessions, contacts, flows, oldTables, history int
-			if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL),(SELECT COUNT(*) FROM user_contacts WHERE verified_at IS NOT NULL),(SELECT COUNT(*) FROM auth_flows WHERE id=1 AND correlation_id='retained-init-correlation'),(SELECT COUNT(*) FROM sqlite_master WHERE name='install_credentials'),(SELECT COUNT(*) FROM audit_events WHERE action='retained.history' AND correlation_id='durable-history-correlation')`).Scan(&sessions, &contacts, &flows, &oldTables, &history); err != nil {
+			// 20260920_oidc_auth_v1 起 canonical 不再携带 auth_flows；种子里的
+			// retained init flow 连同退役三表一起消失，其余权威面逐字保留。
+			var sessions, contacts, retiredTables, oldTables, history int
+			if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL),(SELECT COUNT(*) FROM user_contacts WHERE verified_at IS NOT NULL),(SELECT COUNT(*) FROM sqlite_master WHERE name IN ('auth_flows','auth_challenges','auth_delivery_settings')),(SELECT COUNT(*) FROM sqlite_master WHERE name='install_credentials'),(SELECT COUNT(*) FROM audit_events WHERE action='retained.history' AND correlation_id='durable-history-correlation')`).Scan(&sessions, &contacts, &retiredTables, &oldTables, &history); err != nil {
 				t.Fatal(err)
 			}
-			if sessions != 1 || contacts != 1 || flows != 1 || oldTables != 0 || history != 1 {
-				t.Fatalf("preservation mismatch: sessions=%d contacts=%d flows=%d tables=%d history=%d", sessions, contacts, flows, oldTables, history)
+			if sessions != 1 || contacts != 1 || retiredTables != 0 || oldTables != 0 || history != 1 {
+				t.Fatalf("preservation mismatch: sessions=%d contacts=%d retiredTables=%d tables=%d history=%d", sessions, contacts, retiredTables, oldTables, history)
 			}
 			var stored string
 			if err := db.QueryRow(`SELECT schema_digest FROM schema_state WHERE id=1`).Scan(&stored); err != nil {

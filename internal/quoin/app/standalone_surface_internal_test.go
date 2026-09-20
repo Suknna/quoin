@@ -5,7 +5,6 @@ package app
 // graph, real admin initialization and the real two-step login.
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,11 +68,11 @@ func newStandaloneSurface(t *testing.T, configured []string) *standaloneSurface 
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
-	cookie := loginStandaloneAdmin(t, server, config.PublicOrigin, formalPassword, sender)
+	cookie := loginStandaloneAdmin(t, server, config.PublicOrigin, formalPassword)
 	return &standaloneSurface{server: server, cookie: cookie, origin: map[string]string{"Origin": config.PublicOrigin, "Content-Type": "application/json", "Cookie": cookie}, application: application}
 }
 
-func loginStandaloneAdmin(t *testing.T, server *httptest.Server, origin, password string, sender *stubSender) string {
+func loginStandaloneAdmin(t *testing.T, server *httptest.Server, origin, password string) string {
 	t.Helper()
 	do := func(method, path, body string, headers map[string]string) (*http.Response, string) {
 		request, _ := http.NewRequest(method, server.URL+path, strings.NewReader(body))
@@ -88,38 +87,14 @@ func loginStandaloneAdmin(t *testing.T, server *httptest.Server, origin, passwor
 		payload, _ := io.ReadAll(response.Body)
 		return response, string(payload)
 	}
-	// Step one: the verified password opens the login flow (no session yet).
+	// The single-step login issues the session cookie directly.
 	response, body := do(http.MethodPost, "/api/v1/auth/login", fmt.Sprintf(`{"username":"admin","password":%q}`, password), map[string]string{"Origin": origin, "Content-Type": "application/json"})
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("login: %d %s", response.StatusCode, body)
 	}
-	flowCookie := scenarioSetCookie(response.Cookies(), flowCookieName)
-	if flowCookie == nil {
-		t.Fatalf("no flow cookie: %v", response.Cookies())
-	}
-	var flow struct {
-		Contacts []struct {
-			ID string `json:"id"`
-		} `json:"contacts"`
-	}
-	if err := json.Unmarshal([]byte(body), &flow); err != nil {
-		t.Fatal(err)
-	}
-	if len(flow.Contacts) == 0 {
-		t.Fatalf("login flow without a deliverable contact: %s", body)
-	}
-	// Step two: the consumed OTP code issues the session cookie.
-	sessionHeaders := map[string]string{"Cookie": flowCookieName + "=" + flowCookie.Value, "Origin": origin, "Content-Type": "application/json"}
-	if response, body := do(http.MethodPost, "/api/v1/auth/flow/challenge", `{"contactId":"`+flow.Contacts[0].ID+`"}`, sessionHeaders); response.StatusCode != http.StatusOK {
-		t.Fatalf("challenge: %d %s", response.StatusCode, body)
-	}
-	verifyResponse, _ := do(http.MethodPost, "/api/v1/auth/flow/verify", `{"code":"`+sender.lastCode()+`"}`, sessionHeaders)
-	if verifyResponse.StatusCode != http.StatusOK {
-		t.Fatalf("verify: %d %s", verifyResponse.StatusCode, body)
-	}
-	sessionCookie := scenarioSetCookie(verifyResponse.Cookies(), scenarioSessionCookieName)
+	sessionCookie := scenarioSetCookie(response.Cookies(), scenarioSessionCookieName)
 	if sessionCookie == nil {
-		t.Fatalf("no session cookie after verification: %v", verifyResponse.Cookies())
+		t.Fatalf("no session cookie after login: %v", response.Cookies())
 	}
 	return scenarioSessionCookieName + "=" + sessionCookie.Value
 }

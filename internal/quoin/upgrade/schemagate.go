@@ -225,6 +225,12 @@ func verifySchemaGate(ctx context.Context, conn *sql.Conn, result *PreflightResu
 		}
 		return verifyUnifiedAuthHistory(ctx, conn, true)
 	}
+	if stored == oidcAuthRetirePredecessorSchemaDigest {
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM migration_ledger`).Scan(&result.MigrationHistory); err != nil {
+			return err
+		}
+		return verifyUnifiedAuthHistory(ctx, conn, true)
+	}
 	if stored != hex.EncodeToString(digest[:]) {
 		return ErrSchemaDigestMismatch
 	}
@@ -339,6 +345,9 @@ func MigrateWithOptions(ctx context.Context, db *sql.DB, options Options) (Prefl
 	}
 	if digest == declaredDiscoveryRetirePredecessorSchemaDigest {
 		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateDeclaredDiscoveryRetireOn)
+	}
+	if digest == oidcAuthRetirePredecessorSchemaDigest {
+		return migrateReleasedSchemaAndFinish(ctx, db, options, migrateOIDCAuthRetireOn)
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {

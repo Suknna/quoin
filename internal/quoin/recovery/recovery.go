@@ -427,7 +427,6 @@ func isolate(ctx context.Context, database *sql.DB, username string) (int64, aut
 			args  []any
 		}{
 			{`UPDATE sessions SET revoked_at=? WHERE revoked_at IS NULL`, []any{now}},
-			{`UPDATE auth_flows SET status='revoked' WHERE status='pending'`, nil},
 			{`UPDATE users SET enabled=0,auth_revision=auth_revision+1,row_version=row_version+1,updated_at=? WHERE id<>? AND enabled=1`, []any{now, adminID}},
 			{`UPDATE alert_sources SET enabled=0,disabled_at=?,row_version=row_version+1 WHERE enabled=1`, []any{now}},
 			// A never-used replacement cannot retire its Active predecessor under the
@@ -447,10 +446,11 @@ func isolate(ctx context.Context, database *sql.DB, username string) (int64, aut
 				return isolationResult{}, err
 			}
 		}
-		// The preserved administrator enters the unified initialization flow:
-		// every factor is reset and the printed temporary password is the only
-		// proof (initialized=0 with the forced formal change marker).
-		credential, err := auth.BeginRecoveryFactorsOn(ctx, tx, adminID, time.Now())
+		// The preserved administrator enters the forced-change state: the
+		// printed temporary password is the only proof (initialized=0 with
+		// the formal-change marker; contacts are display-only since ADR-0010
+		// and survive the isolation untouched).
+		credential, err := auth.ResetAdminCredentialOn(ctx, tx, adminID, time.Now())
 		if err != nil {
 			return isolationResult{}, fmt.Errorf("reset recovery administrator credential: %w", err)
 		}

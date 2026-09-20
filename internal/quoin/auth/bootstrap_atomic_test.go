@@ -3,6 +3,9 @@ package auth_test
 import (
 	"context"
 	"testing"
+	"time"
+
+	"github.com/Suknna/quoin/internal/quoin/auth"
 )
 
 func TestBootstrapRetentionSharesAdminAndAuditTransaction(t *testing.T) {
@@ -10,8 +13,16 @@ func TestBootstrapRetentionSharesAdminAndAuditTransaction(t *testing.T) {
 	if _, err := db.Exec(`CREATE TRIGGER fail_bootstrap_audit BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if created, err := service.EnsureBootstrapAdmin(context.Background(), 12); err == nil || created {
-		t.Fatalf("audit failure must reject bootstrap: created=%v err=%v", created, err)
+	initial, err := auth.GenerateInitialPassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := func() error {
+		_, err := service.EnsureBootstrapAdmin(context.Background(), initial, time.Now().UTC().Add(auth.InitialPasswordLifetime), 12)
+		return err
+	}
+	if err := seed(); err == nil {
+		t.Fatalf("audit failure must reject bootstrap: %v", err)
 	}
 	var users, months int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
@@ -26,11 +37,11 @@ func TestBootstrapRetentionSharesAdminAndAuditTransaction(t *testing.T) {
 	if _, err := db.Exec(`DROP TRIGGER fail_bootstrap_audit`); err != nil {
 		t.Fatal(err)
 	}
-	if created, err := service.EnsureBootstrapAdmin(context.Background(), 12); err != nil || !created {
-		t.Fatalf("bootstrap retry: created=%v err=%v", created, err)
+	if err := seed(); err != nil {
+		t.Fatalf("bootstrap retry: %v", err)
 	}
-	if created, err := service.EnsureBootstrapAdmin(context.Background(), 18); err != nil || created {
-		t.Fatalf("bootstrap repeat: created=%v err=%v", created, err)
+	if created, err := service.EnsureBootstrapAdmin(context.Background(), initial, time.Now().UTC().Add(auth.InitialPasswordLifetime), 18); err != nil || created {
+		t.Fatalf("bootstrap repeat must stay idempotent: created=%v err=%v", created, err)
 	}
 	if err := db.QueryRow(`SELECT retention_months FROM audit_retention WHERE id=1`).Scan(&months); err != nil {
 		t.Fatal(err)

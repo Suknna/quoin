@@ -32,13 +32,6 @@ func raw(d operations.Declaration) operations.Declaration {
 	return d
 }
 
-// flowCorrelated marks an admin declaration that must continue the stored
-// correlation of the authentication flow that started it.
-func flowCorrelated(d operations.Declaration) operations.Declaration {
-	d.FlowCorrelated = true
-	return d
-}
-
 // accessDeclarationTable is the authoritative operation inventory. Object
 // types feed audit_events.domain_ref_type. Sensitive reads stay declared even
 // where handlers keep their own pre-release audit (reveal/download); the
@@ -54,15 +47,10 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		}
 	}
 
-	// 认证与流程：the unified flow replaced the old single-step login route.
+	// 认证：单步本地登录 + 公开登录通道投影（ADR-0010）。
 	add(
-		declaration("startAuthentication", http.MethodPost, "/api/v1/auth/login", operations.LevelPublic, operations.KindCommand, "session"),
-		declaration("readAuthenticationFlow", http.MethodGet, "/api/v1/auth/flow", operations.LevelFlow, operations.KindQuery, "auth_flow"),
-		declaration("setInitializationPassword", http.MethodPut, "/api/v1/auth/flow/password", operations.LevelFlow, operations.KindCommand, "user"),
-		declaration("registerInitializationContact", http.MethodPost, "/api/v1/auth/flow/contacts", operations.LevelFlow, operations.KindCommand, "user"),
-		declaration("sendAuthenticationChallenge", http.MethodPost, "/api/v1/auth/flow/challenge", operations.LevelFlow, operations.KindCommand, "user"),
-		declaration("verifyInitializationChallenge", http.MethodPost, "/api/v1/auth/flow/verify", operations.LevelFlow, operations.KindCommand, "user"),
-		declaration("completeInitialization", http.MethodPost, "/api/v1/auth/flow/complete", operations.LevelFlow, operations.KindCommand, "user"),
+		declaration("loginWithPassword", http.MethodPost, "/api/v1/auth/login", operations.LevelPublic, operations.KindCommand, "user"),
+		declaration("readAuthConfig", http.MethodGet, "/api/v1/auth/config", operations.LevelPublic, operations.KindQuery, "deployment"),
 		declaration("touchSessionActivity", http.MethodPost, "/api/v1/auth/activity", operations.LevelSession, operations.KindCommand, "session"),
 		declaration("getCurrentUser", http.MethodGet, "/api/v1/auth/me", operations.LevelSession, operations.KindQuery, "user"),
 		declaration("listOwnContacts", http.MethodGet, "/api/v1/auth/contacts", operations.LevelFull, operations.KindQuery, "user"),
@@ -70,15 +58,6 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("logout", http.MethodPost, "/api/v1/auth/logout", operations.LevelSession, operations.KindCommand, "session"),
 		declaration("listOwnSessions", http.MethodGet, "/api/v1/auth/sessions", operations.LevelFull, operations.KindQuery, "session"),
 		declaration("revokeOwnSession", http.MethodPost, "/api/v1/auth/sessions/{sessionId}/revoke", operations.LevelFull, operations.KindCommand, "session"),
-		// Delivery management accepts a full admin session or an
-		// admin_initialize/recovery flow (deliveryActor validates the actor).
-		// Contact change: the start command creates the contact_change flow
-		// (its correlation persists server-side); the complete command is an
-		// admin operation that must continue that stored correlation.
-		declaration("startContactChange", http.MethodPost, "/api/v1/auth/contact-change", operations.LevelAdmin, operations.KindCommand, "user"),
-		flowCorrelated(declaration("completeContactChange", http.MethodPost, "/api/v1/auth/contact-change/complete", operations.LevelAdmin, operations.KindCommand, "user")),
-		declaration("readAuthDelivery", http.MethodGet, "/api/v1/auth/flow/delivery", operations.LevelFlowOrAdmin, operations.KindQuery, "auth_delivery"),
-		declaration("configureAuthDelivery", http.MethodPut, "/api/v1/auth/flow/delivery", operations.LevelFlowOrAdmin, operations.KindCommand, "auth_delivery"),
 	)
 
 	// 用户与审计（Admin）。
@@ -272,13 +251,11 @@ func buildNormalAccessRegistry() (*operations.AccessRegistry, error) {
 var NormalAccessRegistry = sync.OnceValues(buildNormalAccessRegistry)
 
 // maintenanceAllowlists are the fixed per-reason maintenance allowlists plus
-// the shared base (authentication flows, delivery, audit, maintenance state)
+// the shared base (login, config projection, audit, maintenance state)
 // and the any-method catch-all raw wrapper.
 var maintenanceBase = []string{
-	"startAuthentication", "readAuthenticationFlow",
-	"setInitializationPassword", "registerInitializationContact", "sendAuthenticationChallenge",
-	"verifyInitializationChallenge", "completeInitialization", "touchSessionActivity",
-	"readAuthDelivery", "configureAuthDelivery",
+	"loginWithPassword", "readAuthConfig",
+	"touchSessionActivity",
 	"getCurrentUser", "changeOwnPassword", "logout",
 	"listAuditEvents", "getAuditSettings", "updateAuditSettings", "previewAuditRetention",
 	"getMaintenanceState", "exitMaintenance",
@@ -366,21 +343,6 @@ func (application *apiServer) accessSessionResolver() operations.SessionResolver
 	}
 }
 
-// accessFlowResolver is the auth.ReadFlow seam: it returns the flow's stored
-// correlation so every step of one authentication flow shares it.
-func (application *apiServer) accessFlowResolver() operations.FlowResolver {
-	return func(ctx context.Context, credential string) (operations.FlowIdentity, error) {
-		flow, err := application.auth.ReadFlow(ctx, credential)
-		if err != nil {
-			if errors.Is(err, auth.ErrUnauthenticated) || errors.Is(err, auth.ErrFlowInvalid) || errors.Is(err, auth.ErrFlowExpired) {
-				return operations.FlowIdentity{}, fmt.Errorf("operations: flow rejected: %w", operations.ErrUnauthenticated)
-			}
-			return operations.FlowIdentity{}, err
-		}
-		return operations.FlowIdentity{Type: string(flow.Type), CorrelationID: flow.CorrelationID, UserID: flow.User.ID}, nil
-	}
-}
-
 // accessAuditSink bridges guard facts onto the shared audit writer with
 // phase=access. Facts always carry a claimed user identity — anonymous
 // traffic never reaches the sink. The write is a single whitelisted INSERT
@@ -423,17 +385,13 @@ func (sink accessAuditSink) RecordAccess(ctx context.Context, fact operations.Ac
 }
 
 // NewAccessAdmission builds the production admission guard for one surface.
-func NewAccessAdmission(application *apiServer, registry *operations.AccessRegistry, flows operations.FlowResolver, sink operations.Sink) (*operations.Admission, error) {
+func NewAccessAdmission(application *apiServer, registry *operations.AccessRegistry, sink operations.Sink) (*operations.Admission, error) {
 	if sink == nil {
 		sink = accessAuditSink{writer: audit.NewWriter(), db: application.db}
-	}
-	if flows == nil {
-		flows = application.accessFlowResolver()
 	}
 	return operations.NewAdmission(operations.AdmissionDeps{
 		Registry: registry,
 		Sessions: application.accessSessionResolver(),
-		Flows:    flows,
 		Sink:     sink,
 		OnSinkError: func(fact operations.AccessFact, err error) {
 			sharedops.LogEvent("quoin", "error", "access_audit.write_failed", fact.OperationID+": "+err.Error())
@@ -455,15 +413,18 @@ func newBootstrapGate(application *apiServer, registry *operations.AccessRegistr
 		if d.Raw {
 			continue
 		}
-		// LevelFlowOrAdmin covers the delivery settings the initializing
-		// administrator must configure before initialization completes; the
-		// admission guard still demands the flow credential.
-		if d.Level == operations.LevelPublic || d.Level == operations.LevelFlow || d.Level == operations.LevelFlowOrAdmin {
+		// The public channels (login + config projection) and the session
+		// bootstrap surface (me / password / logout / activity) stay open
+		// while the deployment waits for its administrator: the forced first
+		// password change rides the ordinary session endpoints (ADR-0010),
+		// and before initialization completes only the single built-in
+		// administrator session can exist.
+		if d.Level == operations.LevelPublic || d.Level == operations.LevelSession {
 			allow[d.Method+" "+d.Path] = true
 		}
 	}
 	if len(allow) == 0 {
-		return nil, errors.New("operations: bootstrap gate found no declared authentication-flow routes")
+		return nil, errors.New("operations: bootstrap gate found no declared authentication routes")
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		initialized, err := application.auth.IsDeploymentInitialized(request.Context())
@@ -474,10 +435,6 @@ func newBootstrapGate(application *apiServer, registry *operations.AccessRegistr
 		}
 		if initialized || allow[request.Method+" "+request.URL.Path] {
 			next.ServeHTTP(writer, request)
-			return
-		}
-		if request.Method == http.MethodGet && request.URL.Path == "/api/v1/auth/me" {
-			writeBackupProblem(writer, http.StatusUnauthorized, "initialization_required", "系统尚未完成初始化。", false)
 			return
 		}
 		writeBackupProblem(writer, http.StatusServiceUnavailable, "initialization_required", "系统尚未完成初始化。", true)

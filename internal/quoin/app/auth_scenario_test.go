@@ -1,76 +1,47 @@
 package app_test
 
-// Shared real-authentication fixture for the legacy HTTP tests in this
-// external package. The two-step login made the old "CreateFirstAdmin +
-// one-shot password login" fixtures impossible: a verified password only
-// opens a flow, the second factor is an OTP delivered to an assigned
-// contact, and only the consumed code issues the session cookie. These
-// helpers drive exactly that production path — initialization through the
-// real flow steps and login over the real HTTP surface (password start,
-// challenge, verify) — with a TEST-ONLY recording auth.Sender capturing the
-// OTP codes. No direct-login bypass exists here.
+// Shared real-authentication fixture for the HTTP tests in this external
+// package (ADR-0010 single-step surface). The local channel verifies a
+// password once and issues the session cookie directly; the first forced
+// password change rides the restricted session over the ordinary
+// PUT /api/v1/auth/password. Helpers drive exactly that production path —
+// no direct-login bypass exists here.
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
-	"github.com/Suknna/quoin/internal/quoin/execution"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
+	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/test/support"
 )
 
-// recordingSender is a TEST-ONLY auth.Sender fake that keeps every delivered
-// message so tests can read the current OTP code.
-type recordingSender struct {
-	mu       sync.Mutex
-	messages []auth.Message
-}
-
-func (s *recordingSender) Send(_ context.Context, message auth.Message) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.messages = append(s.messages, message)
-	return nil
-}
-
-func (s *recordingSender) lastCode() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.messages) == 0 {
-		return ""
-	}
-	return s.messages[len(s.messages)-1].Variables["code"]
-}
-
 const (
-	scenarioAdminEmail     = "admin@quoin.test"
-	scenarioAdminPassword  = "scenario admin horse battery 2026!"
-	scenarioPublicOrigin   = "https://quoin.example.com"
-	scenarioSessionCookie  = "__Host-quoin-session"
-	scenarioFlowCookieName = "__Host-quoin-flow"
+	scenarioAdminEmail    = "admin@quoin.test"
+	scenarioAdminPassword = "scenario admin horse battery 2026!"
+	scenarioPublicOrigin  = "https://quoin.example.com"
+	scenarioSessionCookie = "__Host-quoin-session"
 )
 
-// authScenario is the shared fixture: real database, real auth service with
-// OTP delivery wired to the recording sender, the seeded pending bootstrap
-// administrator fully initialized through the real flow, and the real HTTP
-// server the tests log in against.
+// authScenario is the shared fixture: real database, real auth service, the
+// seeded bootstrap administrator unlocked through the real single-step path
+// (initial random password + forced change), and the real HTTP server the
+// tests log in against.
 type authScenario struct {
 	t             *testing.T
 	server        *httptest.Server
 	db            *sql.DB
 	reader        execution.Reader
 	auth          *auth.Service
-	sender        *recordingSender
 	adminPassword string
 	publicOrigin  string
 	rootKeyFile   string
@@ -119,23 +90,22 @@ func newAuthScenarioWith(t *testing.T, build func(scenario *authScenario) http.H
 	if err := service.SetReader(database.Reader); err != nil {
 		t.Fatal(err)
 	}
-	sender := &recordingSender{}
-	if err := service.ConfigureAuth(auth.AuthConfig{OTPKey: bytes.Repeat([]byte{0x2C}, 32), Sender: sender}); err != nil {
+	initial, err := auth.GenerateInitialPassword()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.EnsureBootstrapAdmin(ctx); err != nil {
+	if _, err := service.EnsureBootstrapAdmin(ctx, initial, time.Now().UTC().Add(auth.InitialPasswordLifetime)); err != nil {
 		t.Fatal(err)
 	}
 	scenario := &authScenario{
-		t: t, db: database.SQL, reader: database.Reader, auth: service, sender: sender,
+		t: t, db: database.SQL, reader: database.Reader, auth: service,
 		adminPassword: scenarioAdminPassword,
 		publicOrigin:  config.PublicOrigin, rootKeyFile: config.RootKeyFile, rootDir: root,
 		origin: map[string]string{"Origin": config.PublicOrigin, "Content-Type": "application/json"},
 	}
-	// The administrator is initialized through the real flow steps (password
-	// step plus verified contact) so the deployment is in its genuine
-	// initialized state before any test logs in.
-	scenario.initializeAdminServiceSide()
+	// The administrator is unlocked through the real single-step path so the
+	// deployment is in its genuine initialized state before any test logs in.
+	scenario.initializeAdminServiceSide(initial)
 	var handler http.Handler
 	if build != nil {
 		handler = build(scenario)
@@ -148,77 +118,36 @@ func newAuthScenarioWith(t *testing.T, build func(scenario *authScenario) http.H
 	return scenario
 }
 
-// initializeAdminServiceSide runs the real admin initialization flow through
-// the service (the same steps the HTTP wizard drives).
-func (s *authScenario) initializeAdminServiceSide() {
+// initializeAdminServiceSide unlocks the bootstrap administrator through the
+// service (the same steps the restricted session drives over HTTP).
+func (s *authScenario) initializeAdminServiceSide(initialPassword string) {
 	s.t.Helper()
 	ctx := context.Background()
-	flow, _, err := s.auth.StartAdminInitialization(ctx, "admin", "admin")
+	result, err := s.auth.LoginWithPassword(ctx, "admin", initialPassword, "Test on Linux")
 	if err != nil {
-		s.t.Fatalf("start admin initialization: %v", err)
+		s.t.Fatalf("bootstrap login: %v", err)
 	}
-	if err := s.auth.SetFlowPassword(ctx, flow.Bearer, s.adminPassword); err != nil {
-		s.t.Fatalf("set initialization password: %v", err)
-	}
-	masked, err := s.auth.RegisterFlowContact(ctx, flow.Bearer, "email", scenarioAdminEmail)
+	session, err := s.auth.Authenticate(ctx, result.Bearer)
 	if err != nil {
-		s.t.Fatalf("register initialization contact: %v", err)
+		s.t.Fatal(err)
 	}
-	if _, _, err := s.auth.SendFlowChallenge(ctx, flow.Bearer, masked.Locator); err != nil {
-		s.t.Fatalf("send initialization challenge: %v", err)
-	}
-	if err := s.auth.VerifyFlowChallenge(ctx, flow.Bearer, s.sender.lastCode()); err != nil {
-		s.t.Fatalf("verify initialization challenge: %v", err)
-	}
-	if err := s.auth.CompleteAdminInitialization(ctx, flow.Bearer); err != nil {
-		s.t.Fatalf("complete admin initialization: %v", err)
+	if err := s.auth.ChangePassword(ctx, session, initialPassword, s.adminPassword); err != nil {
+		s.t.Fatalf("forced password change: %v", err)
 	}
 }
 
-// login performs the real two-step login over HTTP for an initialized user:
-// password start, OTP challenge to the first assigned contact, code verify —
-// and returns the __Host-quoin-session cookie value. A pending forced
-// password change rides along in the issued session (HTTP-AUTH-006).
+// login performs the real single-step login over HTTP and returns the
+// __Host-quoin-session cookie value.
 func (s *authScenario) login(t *testing.T, username, password string) string {
 	t.Helper()
 	body, err := json.Marshal(map[string]string{"username": username, "password": password})
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := mustPost(t, s.server, s.origin, "/api/v1/auth/login", string(body), http.StatusOK)
-	if strings.Contains(start.body, "$schema") {
-		t.Fatalf("flow body must match the frozen OpenAPI schema, got %s", start.body)
-	}
-	flowCookie := scenarioCookie(start.headers, scenarioFlowCookieName)
-	if flowCookie == "" {
-		t.Fatalf("login issued no %s cookie: %v", scenarioFlowCookieName, start.headers)
-	}
-	var flow struct {
-		Type     string `json:"type"`
-		Contacts []struct {
-			ID string `json:"id"`
-		} `json:"contacts"`
-	}
-	if err := json.Unmarshal([]byte(start.body), &flow); err != nil {
-		t.Fatal(err)
-	}
-	if len(flow.Contacts) == 0 {
-		t.Fatalf("login flow has no deliverable contact: %s", start.body)
-	}
-	flowHeaders := merge(s.origin, map[string]string{"Cookie": flowCookie})
-	challengeBody, err := json.Marshal(map[string]string{"contactId": flow.Contacts[0].ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustPost(t, s.server, flowHeaders, "/api/v1/auth/flow/challenge", string(challengeBody), http.StatusOK)
-	verifyBody, err := json.Marshal(map[string]string{"code": s.sender.lastCode()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	verify := mustPost(t, s.server, flowHeaders, "/api/v1/auth/flow/verify", string(verifyBody), http.StatusOK)
-	session := scenarioCookie(verify.headers, scenarioSessionCookie)
+	response := mustPost(t, s.server, s.origin, "/api/v1/auth/login", string(body), http.StatusOK)
+	session := scenarioCookie(response.headers, scenarioSessionCookie)
 	if session == "" {
-		t.Fatalf("verified login issued no session cookie: %v", verify.headers)
+		t.Fatalf("login issued no session cookie: %v", response.headers)
 	}
 	return strings.TrimPrefix(session, scenarioSessionCookie+"=")
 }
@@ -229,9 +158,8 @@ func (s *authScenario) sessionHeaders(session string) map[string]string {
 	return merge(s.origin, map[string]string{"Cookie": scenarioSessionCookie + "=" + session})
 }
 
-// createOperator creates an operator with an assigned OTP contact through the
-// real admin surface. Contacts are mandatory since the two-step login (the
-// user could otherwise never receive a second factor).
+// createOperator creates an operator with a display contact through the real
+// admin surface.
 func (s *authScenario) createOperator(t *testing.T, adminSession, clientCommandID, username, displayName, tempPassword, contact string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
@@ -245,47 +173,17 @@ func (s *authScenario) createOperator(t *testing.T, adminSession, clientCommandI
 	mustPost(t, s.server, s.sessionHeaders(adminSession), "/api/v1/admin/users", string(body), http.StatusCreated)
 }
 
-// initializeOperatorSession drives the real operator initialization flow over
-// HTTP (forced password step plus contact verification of the admin-assigned
-// target) and then performs the two-step login. Returns the operator's
-// session cookie value.
+// initializeOperatorSession drives the operator's forced password change over
+// HTTP (restricted session + PUT /api/v1/auth/password) and returns the
+// operator's formal session cookie value.
 func (s *authScenario) initializeOperatorSession(t *testing.T, username, tempPassword, newPassword string) string {
 	t.Helper()
-	body, err := json.Marshal(map[string]string{"username": username, "password": tempPassword})
+	restricted := s.login(t, username, tempPassword)
+	changeBody, err := json.Marshal(map[string]string{"currentPassword": tempPassword, "newPassword": newPassword})
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := mustPost(t, s.server, s.origin, "/api/v1/auth/login", string(body), http.StatusOK)
-	var flow struct {
-		Type     string `json:"type"`
-		Contacts []struct {
-			ID string `json:"id"`
-		} `json:"contacts"`
-	}
-	if err := json.Unmarshal([]byte(start.body), &flow); err != nil {
-		t.Fatal(err)
-	}
-	if flow.Type != "operator_initialize" || len(flow.Contacts) == 0 {
-		t.Fatalf("expected an operator initialization flow with contacts, got %s", start.body)
-	}
-	flowCookie := scenarioCookie(start.headers, scenarioFlowCookieName)
-	flowHeaders := merge(s.origin, map[string]string{"Cookie": flowCookie})
-	passwordBody, err := json.Marshal(map[string]string{"newPassword": newPassword})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustDo(t, s.server, http.MethodPut, flowHeaders, "/api/v1/auth/flow/password", string(passwordBody), http.StatusNoContent)
-	challengeBody, err := json.Marshal(map[string]string{"contactId": flow.Contacts[0].ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustPost(t, s.server, flowHeaders, "/api/v1/auth/flow/challenge", string(challengeBody), http.StatusOK)
-	verifyBody, err := json.Marshal(map[string]string{"code": s.sender.lastCode()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustPost(t, s.server, flowHeaders, "/api/v1/auth/flow/verify", string(verifyBody), http.StatusOK)
-	mustPost(t, s.server, flowHeaders, "/api/v1/auth/flow/complete", `{}`, http.StatusNoContent)
+	mustDo(t, s.server, http.MethodPut, s.sessionHeaders(restricted), "/api/v1/auth/password", string(changeBody), http.StatusNoContent)
 	return s.login(t, username, newPassword)
 }
 

@@ -1,28 +1,47 @@
 package auth
 
-// Deployment bootstrap (docs/authentication-design.md §2): an empty database
-// gets exactly one pending built-in administrator whose initial password is
-// the public default. The deployment access boundary is owned by the intranet
-// deployment environment, so no one-time install credential exists: first
-// login with the default goes straight into the unified initialization flow.
+// Deployment bootstrap (ADR-0010 / docs/authentication-design.md §2): an
+// empty database gets exactly one pending built-in administrator whose
+// initial password is randomly generated at first start, written to a 0600
+// file next to the database by the application layer, and expires after 24
+// hours unless the administrator completes the forced password change. There
+// is no public default password and no re-arm on restart; `quoin admin
+// recover` is the only re-arm path once the initial password expired.
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
-// ErrAlreadySetup is returned by bootstrap when any user already exists.
-// (Also kept for the legacy CreateFirstAdmin path.)
-// EnsureBootstrapAdmin reports the same situation as (false, nil).
+// InitialPasswordLifetime bounds the bootstrap administrator's initial
+// random password: past the deadline the credential is dead and only
+// `quoin admin recover` can mint a new one.
+const InitialPasswordLifetime = 24 * time.Hour
+
+// GenerateInitialPassword mints the bootstrap credential: 24 random bytes in
+// unpadded base64 (32 characters). It always satisfies the formal password
+// policy trivially and never contains characters hostile to shell copy/paste.
+func GenerateInitialPassword() (string, error) {
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate initial password: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
 
 // EnsureBootstrapAdmin seeds the pending built-in administrator on an empty
-// database. The call is idempotent: with any user present it returns
-// (false, nil) without touching state, so a restart with an already-seeded
-// database never re-opens the default password.
-func (service *Service) EnsureBootstrapAdmin(ctx context.Context, retentionMonths ...int) (bool, error) {
+// database. initialPassword is the deployment-generated bootstrap credential
+// (the caller owns the 0600 initial-admin-password file); expiresAt is its
+// 24-hour deadline persisted on the users row. The call is idempotent: with
+// any user present it returns (false, nil) without touching state, so a
+// restart with an already-seeded database never re-arms a credential.
+func (service *Service) EnsureBootstrapAdmin(ctx context.Context, initialPassword string, expiresAt time.Time, retentionMonths ...int) (bool, error) {
 	meta := execution.Metadata{
 		Actor:  execution.Principal{Kind: execution.PrincipalSystem},
 		Source: execution.Source{Kind: execution.SourceInternal},
@@ -64,12 +83,23 @@ func (service *Service) EnsureBootstrapAdmin(ctx context.Context, retentionMonth
 				return seedResult{}, err
 			}
 		}
-		phc, err := HashPassword(bootstrapDefaultPassword)
+		// The generated bootstrap credential always satisfies the policy; the
+		// explicit validation keeps that contract true even if the generator
+		// changes shape later.
+		validated, policyErr := ValidateNewPassword(initialPassword, "admin", "Administrator")
+		if policyErr != nil {
+			return seedResult{}, fmt.Errorf("initial password violates policy: %w", policyErr)
+		}
+		phc, err := HashPassword(validated)
 		if err != nil {
 			return seedResult{}, err
 		}
-		now := service.timestamp()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO users(username,display_name,role,enabled,auth_revision,initialized,password_phc,password_change_required,row_version,created_at,updated_at) VALUES('admin','Administrator','admin',1,1,0,?,0,1,?,?)`, phc, now, now); err != nil {
+		now := service.now().UTC()
+		// password_change_required=1 keeps the first login on the restricted
+		// session until the administrator sets a formal password, which also
+		// clears the initial-password deadline atomically.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO users(username,display_name,role,enabled,auth_revision,initialized,password_phc,password_change_required,password_change_required_at,initial_password_expires_at,row_version,created_at,updated_at) VALUES('admin','Administrator','admin',1,1,0,?,1,?,?,1,?,?)`,
+			phc, now.Format(time.RFC3339Nano), expiresAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 			return seedResult{}, fmt.Errorf("seed pending administrator: %w", err)
 		}
 		return seedResult{Created: true}, nil
@@ -99,8 +129,8 @@ func (service *Service) IsDeploymentInitialized(ctx context.Context) (bool, erro
 }
 
 // HasPendingBootstrapAdmin reports whether the built-in administrator still
-// waits for initialization. The login page uses this to route to the
-// initialization wizard instead of exposing the default-password state.
+// waits for initialization. The login page uses this to route to the forced
+// password change instead of exposing the bootstrap state.
 func (service *Service) HasPendingBootstrapAdmin(ctx context.Context) (bool, error) {
 	var count int
 	if err := service.read().QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role='admin' AND initialized=0 AND enabled=1`).Scan(&count); err != nil {

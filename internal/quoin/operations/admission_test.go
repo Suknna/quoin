@@ -56,31 +56,11 @@ func resolveSession(ctx context.Context, credential string) (Subject, error) {
 	return Subject{}, fmt.Errorf("bad credential: %w", ErrUnauthenticated)
 }
 
-func resolveFlow(ctx context.Context, credential string) (FlowIdentity, error) {
-	switch credential {
-	case "login-flow":
-		return FlowIdentity{Type: "login", CorrelationID: "login-flow-correlation", UserID: 42}, nil
-	case "init-flow":
-		return FlowIdentity{Type: "admin_initialize", CorrelationID: "init-flow-correlation", UserID: 33}, nil
-	case "userless-flow":
-		return FlowIdentity{Type: "login", CorrelationID: "userless-correlation"}, nil
-	case "recovery-flow":
-		return FlowIdentity{Type: "recovery", CorrelationID: "recovery-flow-correlation", UserID: 7}, nil
-	case "expired-flow":
-		return FlowIdentity{}, fmt.Errorf("expired: %w", ErrUnauthenticated)
-	case "broken-flow":
-		return FlowIdentity{}, errors.New("database unavailable")
-	}
-	return FlowIdentity{}, fmt.Errorf("unknown flow: %w", ErrUnauthenticated)
-}
-
 var testDeclarations = []Declaration{
 	{ID: "getCurrentUser", Method: http.MethodGet, Path: "/api/v1/auth/me", Level: LevelSession, Kind: KindQuery, ObjectType: "user"},
 	{ID: "getAdminAbout", Method: http.MethodGet, Path: "/api/v1/admin/about", Level: LevelAdmin, Kind: KindQuery},
 	{ID: "listBusinessContext", Method: http.MethodGet, Path: "/api/v1/business-context", Level: LevelFull, Kind: KindQuery},
-	{ID: "readAuthenticationFlow", Method: http.MethodGet, Path: "/api/v1/auth/flow", Level: LevelFlow, Kind: KindQuery, ObjectType: "auth_flow"},
 	{ID: "startAuthentication", Method: http.MethodPost, Path: "/api/v1/auth/login", Level: LevelPublic, Kind: KindCommand},
-	{ID: "readAuthDelivery", Method: http.MethodGet, Path: "/api/v1/auth/flow/delivery", Level: LevelFlowOrAdmin, Kind: KindQuery, ObjectType: "auth_delivery"},
 }
 
 func newTestRegistry(t *testing.T, extra ...Declaration) *AccessRegistry {
@@ -95,7 +75,7 @@ func newTestRegistry(t *testing.T, extra ...Declaration) *AccessRegistry {
 func mustAdmission(t *testing.T, registry *AccessRegistry, sink Sink) *Admission {
 	t.Helper()
 	admission, err := NewAdmission(AdmissionDeps{
-		Registry: registry, Sessions: resolveSession, Flows: resolveFlow, Sink: sink,
+		Registry: registry, Sessions: resolveSession, Sink: sink,
 		OnSinkError: func(AccessFact, error) {},
 	})
 	if err != nil {
@@ -249,15 +229,10 @@ func TestNewAdmissionFailsClosedOnMissingDependencies(t *testing.T) {
 	if _, err := NewAdmission(AdmissionDeps{Registry: registry, Sink: &fakeSink{}}); err == nil {
 		t.Fatal("missing session resolver must fail construction")
 	}
-	flowless, err := NewAccessRegistry(Declaration{ID: "getCurrentUser", Method: http.MethodGet, Path: "/api/v1/auth/me", Level: LevelSession, Kind: KindQuery})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := NewAdmission(AdmissionDeps{Registry: flowless, Sessions: resolveSession, Sink: &fakeSink{}}); err != nil {
-		t.Fatalf("flow resolver is only required with flow declarations: %v", err)
-	}
-	if _, err := NewAdmission(AdmissionDeps{Registry: registry, Sessions: resolveSession, Sink: &fakeSink{}}); err == nil {
-		t.Fatal("flow declarations without a flow resolver must fail construction")
+	// The retired flow machinery (ADR-0010) no longer adds a resolver
+	// dependency: any valid registry builds with the session/sink pair.
+	if _, err := NewAdmission(AdmissionDeps{Registry: registry, Sessions: resolveSession, Sink: &fakeSink{}}); err != nil {
+		t.Fatalf("session plus sink must construct: %v", err)
 	}
 }
 
@@ -448,186 +423,9 @@ func TestGuardSeparatesHandlerDenialFromRequestFailure(t *testing.T) {
 	})
 }
 
-func TestFlowOperationsRequireValidFlowBeforeHandler(t *testing.T) {
-	declaration := testDeclarations[3] // readAuthenticationFlow, LevelFlow
-
-	t.Run("absent flow rejected with 401 before handler", func(t *testing.T) {
-		sink := &fakeSink{}
-		handlerRan := false
-		server := newTestAPI(t, mustAdmission(t, newTestRegistry(t), sink), declaration, func(ctx context.Context, input *testInput) (*testOutput, error) {
-			handlerRan = true
-			return &testOutput{}, nil
-		})
-		response := doGet(t, server, declaration.Path)
-		response.Body.Close()
-		if response.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401", response.StatusCode)
-		}
-		if handlerRan {
-			t.Fatal("handler must not run without a flow credential")
-		}
-		if facts := sink.recorded(); len(facts) != 0 {
-			t.Fatalf("rejected flows must not emit business audit facts, got %+v", facts)
-		}
-	})
-
-	t.Run("expired flow rejected with 401 before handler", func(t *testing.T) {
-		sink := &fakeSink{}
-		handlerRan := false
-		server := newTestAPI(t, mustAdmission(t, newTestRegistry(t), sink), declaration, func(ctx context.Context, input *testInput) (*testOutput, error) {
-			handlerRan = true
-			return &testOutput{}, nil
-		})
-		response := doGet(t, server, declaration.Path, expiredFlowCook)
-		response.Body.Close()
-		if response.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401", response.StatusCode)
-		}
-		if handlerRan {
-			t.Fatal("handler must not run for an expired flow")
-		}
-	})
-
-	t.Run("flow resolution failure answers 503", func(t *testing.T) {
-		sink := &fakeSink{}
-		server := newTestAPI(t, mustAdmission(t, newTestRegistry(t), sink), declaration, okHandler(t))
-		response := doGet(t, server, declaration.Path, brokenFlowCook)
-		response.Body.Close()
-		if response.StatusCode != http.StatusServiceUnavailable {
-			t.Fatalf("status = %d, want 503", response.StatusCode)
-		}
-	})
-
-	t.Run("valid flow resumes stored correlation", func(t *testing.T) {
-		sink := &fakeSink{}
-		server := newTestAPI(t, mustAdmission(t, newTestRegistry(t), sink), declaration, func(ctx context.Context, input *testInput) (*testOutput, error) {
-			meta, ok := execution.FromContext(ctx)
-			if !ok {
-				return nil, errors.New("missing correlation metadata")
-			}
-			if meta.CorrelationID != "login-flow-correlation" {
-				t.Errorf("flow operation must resume the stored correlation, got %q", meta.CorrelationID)
-			}
-			if meta.Actor.Kind != execution.PrincipalUser || meta.Actor.ID != 42 {
-				t.Errorf("flow actor = %+v, want the flow's bound user 42", meta.Actor)
-			}
-			if meta.Session.ID != 0 || meta.Session.AuthRevision != 0 {
-				t.Errorf("flow identity must not carry a session reference, got %+v", meta.Session)
-			}
-			return &testOutput{Body: "ok"}, nil
-		})
-		response := doGet(t, server, declaration.Path, loginFlowCook)
-		response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			t.Fatalf("status = %d, want 200", response.StatusCode)
-		}
-		facts := sink.recorded()
-		if len(facts) != 1 || facts[0].Outcome != OutcomeGranted || facts[0].ActorUserID != 42 || facts[0].CorrelationID != "login-flow-correlation" {
-			t.Fatalf("flow access facts = %+v, want one granted record for the flow user", facts)
-		}
-	})
-
-	t.Run("user-less flow rejected with 401", func(t *testing.T) {
-		sink := &fakeSink{}
-		handlerRan := false
-		server := newTestAPI(t, mustAdmission(t, newTestRegistry(t), sink), declaration, func(ctx context.Context, input *testInput) (*testOutput, error) {
-			handlerRan = true
-			return &testOutput{}, nil
-		})
-		response := doGet(t, server, declaration.Path, "__Host-quoin-flow=userless-flow")
-		response.Body.Close()
-		if response.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401 for a flow without a bound user", response.StatusCode)
-		}
-		if handlerRan {
-			t.Fatal("handler must not run for a user-less flow")
-		}
-		if facts := sink.recorded(); len(facts) != 0 {
-			t.Fatalf("unattributable flows must not emit facts, got %+v", facts)
-		}
-	})
-}
-
-func TestFlowOrAdminAcceptsAdminSessionAndTypedFlowsOnly(t *testing.T) {
-	declaration := testDeclarations[5] // readAuthDelivery, LevelFlowOrAdmin
-
-	t.Run("admin session admitted with fresh correlation", func(t *testing.T) {
-		sink := &fakeSink{}
-		server := newTestAPI(t, mustAdmission(t, newTestRegistry(t), sink), declaration, func(ctx context.Context, input *testInput) (*testOutput, error) {
-			meta, _ := execution.FromContext(ctx)
-			if meta.CorrelationID == "login-flow-correlation" || meta.CorrelationID == "" {
-				t.Errorf("session path must keep the request correlation, got %q", meta.CorrelationID)
-			}
-			return &testOutput{Body: "ok"}, nil
-		})
-		response := doGet(t, server, declaration.Path, sessionCookie)
-		response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			t.Fatalf("status = %d, want 200", response.StatusCode)
-		}
-	})
-
-	t.Run("non-admin session rejected with recorded denial", func(t *testing.T) {
-		sink := &fakeSink{}
-		server := newTestAPI(t, mustAdmission(t, newTestRegistry(t), sink), declaration, okHandler(t))
-		response := doGet(t, server, declaration.Path, operatorCookie)
-		response.Body.Close()
-		if response.StatusCode != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403", response.StatusCode)
-		}
-		if facts := sink.recorded(); len(facts) != 1 || facts[0].Outcome != OutcomeDenied {
-			t.Fatalf("facts = %+v, want one denial", sink.recorded())
-		}
-	})
-
-	t.Run("initialization flow admitted without session", func(t *testing.T) {
-		sink := &fakeSink{}
-		server := newTestAPI(t, mustAdmission(t, newTestRegistry(t), sink), declaration, func(ctx context.Context, input *testInput) (*testOutput, error) {
-			meta, _ := execution.FromContext(ctx)
-			if meta.CorrelationID != "init-flow-correlation" {
-				t.Errorf("flow path must resume the stored correlation, got %q", meta.CorrelationID)
-			}
-			return &testOutput{Body: "ok"}, nil
-		})
-		response := doGet(t, server, declaration.Path, initFlowCookie)
-		response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			t.Fatalf("status = %d, want 200", response.StatusCode)
-		}
-		facts := sink.recorded()
-		if len(facts) != 1 || facts[0].Outcome != OutcomeGranted || facts[0].ActorUserID != 33 {
-			t.Fatalf("flow-or-admin facts = %+v, want one granted record for the flow user 33", facts)
-		}
-	})
-
-	t.Run("login flow type rejected with 403", func(t *testing.T) {
-		sink := &fakeSink{}
-		server := newTestAPI(t, mustAdmission(t, newTestRegistry(t), sink), declaration, okHandler(t))
-		response := doGet(t, server, declaration.Path, loginFlowCook)
-		response.Body.Close()
-		if response.StatusCode != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403 for a login flow on delivery management", response.StatusCode)
-		}
-		facts := sink.recorded()
-		if len(facts) != 1 || facts[0].Outcome != OutcomeDenied || facts[0].ActorUserID != 42 || facts[0].Status != http.StatusForbidden {
-			t.Fatalf("wrong-type flow facts = %+v, want one denial for the claimed flow user 42", facts)
-		}
-	})
-
-	t.Run("neither credential rejected with 401", func(t *testing.T) {
-		sink := &fakeSink{}
-		server := newTestAPI(t, mustAdmission(t, newTestRegistry(t), sink), declaration, okHandler(t))
-		response := doGet(t, server, declaration.Path)
-		response.Body.Close()
-		if response.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("status = %d, want 401", response.StatusCode)
-		}
-	})
-}
-
 func TestPublicOperationProceedsWithoutAudit(t *testing.T) {
 	sink := &fakeSink{}
-	declaration := testDeclarations[4] // startAuthentication, LevelPublic
+	declaration := testDeclarations[3] // startAuthentication, LevelPublic
 	server := newTestAPI(t, mustAdmission(t, newTestRegistry(t), sink), declaration, func(ctx context.Context, input *testInput) (*testOutput, error) {
 		meta, ok := execution.FromContext(ctx)
 		if !ok {
@@ -813,73 +611,4 @@ func TestAssertRawSurfaceIgnoresHumaOperations(t *testing.T) {
 	if err := admission.AssertRawSurface(); err != nil {
 		t.Fatalf("a surface without raw routes needs no wrappers, got %v", err)
 	}
-}
-
-func TestFlowCorrelatedAdminContinuesStoredCorrelation(t *testing.T) {
-	declaration := Declaration{
-		ID: "completeContactChange", Method: http.MethodPost, Path: "/api/v1/auth/contact-change/complete",
-		Level: LevelAdmin, Kind: KindCommand, ObjectType: "user", FlowCorrelated: true,
-	}
-
-	t.Run("admin session keeps identity while resuming the flow correlation", func(t *testing.T) {
-		sink := &fakeSink{}
-		server := newTestAPI(t, mustAdmission(t, newTestRegistry(t, declaration), sink), declaration, func(ctx context.Context, input *testInput) (*testOutput, error) {
-			meta, ok := execution.FromContext(ctx)
-			if !ok {
-				return nil, errors.New("missing correlation metadata")
-			}
-			if meta.CorrelationID != "login-flow-correlation" {
-				t.Errorf("complete command must continue the stored flow correlation, got %q", meta.CorrelationID)
-			}
-			if meta.Actor.ID != 7 || meta.Actor.Kind != execution.PrincipalUser {
-				t.Errorf("actor = %+v, want the admin session user 7", meta.Actor)
-			}
-			if meta.Session.ID != 101 || meta.Session.AuthRevision != 3 {
-				t.Errorf("session reference = %+v, want the admin session 101 at revision 3", meta.Session)
-			}
-			return &testOutput{Body: "ok"}, nil
-		})
-		request, _ := http.NewRequest(http.MethodPost, server.URL+declaration.Path, nil)
-		request.Header.Set("Cookie", sessionCookie+"; "+loginFlowCook)
-		response, err := server.Client().Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			t.Fatalf("status = %d, want 200", response.StatusCode)
-		}
-		facts := sink.recorded()
-		if len(facts) != 1 || facts[0].Outcome != OutcomeGranted || facts[0].ActorUserID != 7 || facts[0].CorrelationID != "login-flow-correlation" {
-			t.Fatalf("facts = %+v, want one granted record under the flow correlation", facts)
-		}
-	})
-
-	t.Run("missing or invalid flow credential rejects before the handler", func(t *testing.T) {
-		for _, cookies := range []string{sessionCookie, sessionCookie + "; __Host-quoin-flow=expired-flow"} {
-			sink := &fakeSink{}
-			handlerRan := false
-			server := newTestAPI(t, mustAdmission(t, newTestRegistry(t, declaration), sink), declaration, func(ctx context.Context, input *testInput) (*testOutput, error) {
-				handlerRan = true
-				return &testOutput{}, nil
-			})
-			request, _ := http.NewRequest(http.MethodPost, server.URL+declaration.Path, nil)
-			request.Header.Set("Cookie", cookies)
-			response, err := server.Client().Do(request)
-			if err != nil {
-				t.Fatal(err)
-			}
-			response.Body.Close()
-			if response.StatusCode != http.StatusUnauthorized {
-				t.Fatalf("%q: status = %d, want 401", cookies, response.StatusCode)
-			}
-			if handlerRan {
-				t.Fatalf("%q: handler must not run without the starting flow", cookies)
-			}
-			facts := sink.recorded()
-			if len(facts) != 1 || facts[0].Outcome != OutcomeDenied || facts[0].ActorUserID != 7 {
-				t.Fatalf("%q: facts = %+v, want one denial for the admin", cookies, facts)
-			}
-		}
-	})
 }

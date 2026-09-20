@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/audit"
@@ -24,12 +23,14 @@ var (
 	// (length, blocklist, context match); the HTTP layer maps only these to
 	// 422 while infrastructure failures become 500.
 	ErrPasswordPolicy = errors.New("password does not satisfy the policy")
-	// ErrInitializeRejected marks rejected initialization starts (unknown
-	// user, wrong credential class or wrong role for the requested flow).
-	ErrInitializeRejected = errors.New("initialization credentials are invalid")
-	// ErrFlowDeliveryNotConfigured marks a challenge request before
-	// ConfigureAuth installed the OTP key and sender (fail closed, 503).
-	ErrFlowDeliveryNotConfigured = errors.New("message delivery is not configured")
+	// ErrLocalLoginUnavailable marks a local login attempt against an
+	// external (OIDC) account: the account has no local password by
+	// construction and the login page routes it to the IdP.
+	ErrLocalLoginUnavailable = errors.New("account signs in through the unified identity platform")
+	// ErrInitialPasswordExpired marks a bootstrap administrator whose initial
+	// random password passed its 24-hour deadline; only `quoin admin
+	// recover` re-arms the credential.
+	ErrInitialPasswordExpired = errors.New("initial administrator password expired; run quoin admin recover")
 )
 
 type User struct {
@@ -40,6 +41,7 @@ type User struct {
 	Role                   string  `json:"role"`
 	Enabled                bool    `json:"enabled"`
 	Initialized            bool    `json:"initialized"`
+	AuthSource             string  `json:"authSource"`
 	AuthRevision           int64   `json:"authRevision"`
 	RowVersion             int64   `json:"rowVersion"`
 	PasswordChangeRequired bool    `json:"passwordChangeRequired"`
@@ -63,24 +65,13 @@ type Service struct {
 	passwords *Passwords
 	limiter   *loginLimiter
 	now       func() time.Time
-	// runner executes every flow step with automatic, same-transaction audit
-	// (ADR-0006); ops holds this package's declared write operations.
+	// runner executes every login/command with automatic, same-transaction
+	// audit (ADR-0006); ops holds this package's declared write operations.
 	runner *execution.Runner
 	ops    authOperations
-	// authMu guards the configured OTP key, the delivery sender and the
-	// read-only pool installed at startup.
-	authMu sync.RWMutex
-	otpKey []byte
-	sender Sender
 	// reader is the optional read-only source for pure reads; nil falls back
 	// to the writer database.
 	reader audit.Reader
-	// otpFailures is the per-user cross-flow verification failure limiter
-	// (in-memory; the durable failed-flow gate bounds restart resets).
-	otpFailures *loginLimiter
-	// factors holds the registered per-channel second-factor sources;
-	// nil entries fall back to the built-in numeric generator.
-	factors map[string]FactorSource
 }
 
 func NewService(db *sql.DB) (*Service, error) {
@@ -90,15 +81,15 @@ func NewService(db *sql.DB) (*Service, error) {
 	}
 	ops, registry := newAuthOperations()
 	return &Service{
-		db: db, passwords: passwords, limiter: newLoginLimiter(), otpFailures: newLoginLimiter(), now: time.Now,
+		db: db, passwords: passwords, limiter: newLoginLimiter(), now: time.Now,
 		runner: execution.NewRunner(db, registry, nil), ops: ops,
 	}, nil
 }
 
 // CreateFirstAdmin is the legacy offline bootstrap seed kept for the not-yet-
 // retired CLI path and existing external tests. It seeds an initialized=0
-// administrator who can never reach a session without the full initialization
-// flow and second factor; new deployments use EnsureBootstrapAdmin.
+// administrator under the forced password-change marker; new deployments use
+// EnsureBootstrapAdmin with the generated initial-password file.
 // The seed runs through the execution runner (audited, no manual audit).
 func (service *Service) CreateFirstAdmin(ctx context.Context, username, displayName, password string) (bool, error) {
 	if _, exists := execution.FromContext(ctx); exists {
@@ -174,11 +165,12 @@ func (service *Service) Authenticate(ctx context.Context, bearer string) (Sessio
 	var session Session
 	var storedDigest []byte
 	var enabled, initialized, passwordRequired int
+	var passwordPHC sql.NullString
 	var revoked sql.NullString
 	var idleExpires, absoluteExpires string
 	var lastLogin sql.NullString
-	err = service.read().QueryRowContext(ctx, `SELECT s.id,s.session_token_digest,s.revoked_at,s.idle_expires_at,s.absolute_expires_at,u.id,u.username,u.display_name,u.role,u.enabled,u.auth_revision,u.initialized,u.row_version,u.password_change_required,u.password_phc,(SELECT MAX(created_at) FROM sessions WHERE user_id=u.id) FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.session_token_digest=? AND s.auth_revision_at_issue=u.auth_revision`, digest[:]).Scan(
-		&session.ID, &storedDigest, &revoked, &idleExpires, &absoluteExpires, &session.User.ID, &session.User.Username, &session.User.DisplayName, &session.User.Role, &enabled, &session.User.AuthRevision, &initialized, &session.User.RowVersion, &passwordRequired, &session.User.passwordPHC, &lastLogin)
+	err = service.read().QueryRowContext(ctx, `SELECT s.id,s.session_token_digest,s.revoked_at,s.idle_expires_at,s.absolute_expires_at,u.id,u.username,u.display_name,u.role,u.enabled,u.auth_revision,u.initialized,u.row_version,u.password_change_required,u.password_phc,(SELECT CASE WHEN EXISTS(SELECT 1 FROM identities i WHERE i.user_id=u.id) THEN 'oidc' ELSE 'local' END),(SELECT MAX(created_at) FROM sessions WHERE user_id=u.id) FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.session_token_digest=? AND s.auth_revision_at_issue=u.auth_revision`, digest[:]).Scan(
+		&session.ID, &storedDigest, &revoked, &idleExpires, &absoluteExpires, &session.User.ID, &session.User.Username, &session.User.DisplayName, &session.User.Role, &enabled, &session.User.AuthRevision, &initialized, &session.User.RowVersion, &passwordRequired, &passwordPHC, &session.User.AuthSource, &lastLogin)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		if !service.readPoolWired() {
 			return Session{}, ErrReaderNotWired
@@ -188,6 +180,7 @@ func (service *Service) Authenticate(ctx context.Context, bearer string) (Sessio
 	if err != nil || subtle.ConstantTimeCompare(storedDigest, digest[:]) != 1 || revoked.Valid || enabled != 1 {
 		return Session{}, ErrUnauthenticated
 	}
+	session.User.passwordPHC = passwordPHC.String
 	now := service.now().UTC()
 	idleTime, idleErr := time.Parse(time.RFC3339Nano, idleExpires)
 	absoluteTime, absoluteErr := time.Parse(time.RFC3339Nano, absoluteExpires)
@@ -232,7 +225,10 @@ func (service *Service) ChangePassword(ctx context.Context, session Session, cur
 			return false, err
 		}
 		now := service.timestamp()
-		update, err := tx.ExecContext(runCtx, `UPDATE users SET password_phc=?,password_change_required=0,password_change_required_at=NULL,auth_revision=auth_revision+1,row_version=row_version+1,updated_at=? WHERE id=? AND auth_revision=?`, newPHC, now, current.ID, current.AuthRevision)
+		// The completed change is also the initialization completion: it
+		// clears the forced-change marker, the bootstrap deadline and flips
+		// initialized so the full admission level unlocks.
+		update, err := tx.ExecContext(runCtx, `UPDATE users SET password_phc=?,password_change_required=0,password_change_required_at=NULL,initial_password_expires_at=NULL,initialized=1,auth_revision=auth_revision+1,row_version=row_version+1,updated_at=? WHERE id=? AND auth_revision=?`, newPHC, now, current.ID, current.AuthRevision)
 		if err != nil {
 			return false, err
 		}
@@ -276,18 +272,21 @@ func (service *Service) findUserByUsername(ctx context.Context, username string)
 
 func findUserByID(ctx context.Context, queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, id int64) (User, error) {
+}, id int64,
+) (User, error) {
 	return scanUser(queryer.QueryRowContext(ctx, `SELECT id,username,display_name,role,enabled,auth_revision,initialized,row_version,password_change_required,password_phc,(SELECT MAX(created_at) FROM sessions WHERE user_id=users.id) FROM users WHERE id=?`, id))
 }
 
 func scanUser(row *sql.Row) (User, error) {
 	var user User
 	var enabled, initialized, required int
+	var passwordPHC sql.NullString
 	var lastLogin sql.NullString
-	err := row.Scan(&user.ID, &user.Username, &user.DisplayName, &user.Role, &enabled, &user.AuthRevision, &initialized, &user.RowVersion, &required, &user.passwordPHC, &lastLogin)
+	err := row.Scan(&user.ID, &user.Username, &user.DisplayName, &user.Role, &enabled, &user.AuthRevision, &initialized, &user.RowVersion, &required, &passwordPHC, &lastLogin)
 	if err != nil {
 		return User{}, err
 	}
+	user.passwordPHC = passwordPHC.String
 	user.Locator = fmt.Sprint(user.ID)
 	user.Enabled = enabled == 1
 	user.Initialized = initialized == 1

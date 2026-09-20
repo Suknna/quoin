@@ -9,7 +9,34 @@ import (
 )
 
 func (application *apiServer) registerAuthContactRoutes(api huma.API) {
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/auth/contacts", OperationID: "listOwnContacts"}, application.listOwnContacts)
 	huma.Register(api, huma.Operation{Method: http.MethodPut, Path: "/api/v1/admin/users/{userId}/contacts", OperationID: "setUserContacts"}, application.setUserContacts)
+}
+
+// listOwnContacts returns the session user's masked display contacts.
+func (application *apiServer) listOwnContacts(ctx context.Context, input *authInput) (*struct {
+	CacheControl string `header:"Cache-Control"`
+	Body         struct {
+		Items []auth.MaskedContact `json:"items"`
+	}
+}, error,
+) {
+	session, err := application.authenticateFull(ctx, input.Session, "读取联系方式")
+	if err != nil {
+		return nil, err
+	}
+	contacts, err := application.auth.ListOwnContacts(ctx, session)
+	if err != nil {
+		return nil, authenticationError(err)
+	}
+	output := &struct {
+		CacheControl string `header:"Cache-Control"`
+		Body         struct {
+			Items []auth.MaskedContact `json:"items"`
+		}
+	}{CacheControl: "no-store"}
+	output.Body.Items = contacts
+	return output, nil
 }
 
 func (application *apiServer) setUserContacts(ctx context.Context, input *struct {

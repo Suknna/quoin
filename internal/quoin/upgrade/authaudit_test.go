@@ -202,12 +202,13 @@ func TestAuthAuditMigrationRetainsTheSingleAdmin(t *testing.T) {
 	}
 	// 新引导容量为空：补初始化从零开始，不伪造历史。
 	// install_credentials 仅保留历史迁移权威，运行期不再读写，故不在此断言。
-	var flows, contacts, challenges int
-	if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM auth_flows),(SELECT COUNT(*) FROM user_contacts),(SELECT COUNT(*) FROM auth_challenges)`).Scan(&flows, &contacts, &challenges); err != nil {
+	// 20260920_oidc_auth_v1 起 auth_flows/auth_challenges 已随 OTP 退役从 canonical 消失。
+	var contacts, retiredTables int
+	if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM user_contacts),(SELECT COUNT(*) FROM sqlite_master WHERE name IN ('auth_flows','auth_challenges','auth_delivery_settings'))`).Scan(&contacts, &retiredTables); err != nil {
 		t.Fatal(err)
 	}
-	if flows != 0 || contacts != 0 || challenges != 0 {
-		t.Fatalf("auth bootstrap capacity must start empty: flows=%d contacts=%d challenges=%d", flows, contacts, challenges)
+	if contacts != 0 || retiredTables != 0 {
+		t.Fatalf("auth bootstrap capacity must start empty: contacts=%d retiredTables=%d", contacts, retiredTables)
 	}
 	// 审计保留单例已按旧数据保守值种子化：清理关闭，等待用户确认。
 	var retentionMonths, cleanupEnabled int

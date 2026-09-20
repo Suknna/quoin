@@ -47,13 +47,13 @@ func TestDownloadBackupRecordsFailedTerminalAuditWhenSessionRevokesMidTransfer(t
 	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
-	database, authService, sender := newScenarioAuth(t, config.DataDirectory, config.RootKeyFile)
+	database, authService, initialPassword := newScenarioAuth(t, config.DataDirectory, config.RootKeyFile)
 	defer database.Close()
 	// The administrator is initialized through the real flow and the session
 	// comes from the real two-step login: audited handler calls need the
 	// guard-shaped execution metadata of a genuine session.
-	scenarioInitializeAdmin(t, authService, sender, "Correct horse battery staple 2026!")
-	bearer := scenarioTwoStepLogin(t, authService, sender, "admin", "Correct horse battery staple 2026!")
+	scenarioInitializeAdmin(t, authService, initialPassword, "Correct horse battery staple 2026!")
+	bearer := scenarioLogin(t, authService, "admin", "Correct horse battery staple 2026!")
 	session, err := authService.Authenticate(ctx, bearer)
 	if err != nil {
 		t.Fatal(err)
@@ -133,10 +133,10 @@ func TestDownloadBackupContentLengthMakesTruncatedTransportObservable(t *testing
 	if err := support.GenerateDeploymentSecrets(config); err != nil {
 		t.Fatal(err)
 	}
-	database, authService, sender := newScenarioAuth(t, config.DataDirectory, config.RootKeyFile)
+	database, authService, initialPassword := newScenarioAuth(t, config.DataDirectory, config.RootKeyFile)
 	defer database.Close()
-	scenarioInitializeAdmin(t, authService, sender, "Correct horse battery staple 2026!")
-	bearer := scenarioTwoStepLogin(t, authService, sender, "admin", "Correct horse battery staple 2026!")
+	scenarioInitializeAdmin(t, authService, initialPassword, "Correct horse battery staple 2026!")
+	bearer := scenarioLogin(t, authService, "admin", "Correct horse battery staple 2026!")
 	session, err := authService.Authenticate(ctx, bearer)
 	if err != nil {
 		t.Fatal(err)

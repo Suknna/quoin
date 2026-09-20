@@ -30,3 +30,7 @@ status: accepted
 空库首启的 `admin/admin` 直接进入统一初始化流程（设置正式密码 → 投递配置 → 验证联系方式 → 返回登录页）。管理员恢复保持 CLI-only（停止长期进程、独占数据库、attached TTY），恢复后以 CLI 设置的临时密码登录并进入同一统一初始化流程。`install_credentials` 表保留在 `contracts/sql/schema.sql` 作为历史迁移权威（首装不再生成安装凭据；恢复用途的一次性凭据仍由该表承载）。本文其余决定不变。
 
 **更正（2026-09-15，随后落地时确认）：** 上段关于 `install_credentials` 的保留叙述不再成立：该表已从 `contracts/sql/schema.sql` 完全移除，且没有任何已发布 Release 工件或迁移基线携带过该表（此前“历史迁移权威/遗留行仅作迁移数据”的说法不成立，已撤回）；恢复也不依赖任何存储的一次性凭据——`quoin admin recover`（`--mode password|factors`）经 attached TTY 设置或打印一次临时密码，不设单独有效期，恢复后的正常登录按凭据与账号状态机械分类为统一初始化流程，认证 wire 上不存在独立的 recovery 流程类别；初始化的完成以本流程内验证通过的收码渠道为准（流程投影 `factorVerified`），不依赖账户级渠道的历史验证状态。
+
+## 决定更新（2026-09-20）
+
+[ADR-0010](0010-oidc-auth-and-local-emergency.md) 修订本决定三处结论：公开默认密码 `admin/admin` 改为首次启动随机生成、24 小时未改密即作废的初始密码文件（`quoin admin recover` 兜底）；密码后强制二级验证（OTP）整体退役，双因子职责移交外部 IdP，本地登录降级为单步应急通道；外部登录从"未来方向"落地为配置驱动的 OIDC（开放 JIT，角色恒为 operator）。上文取舍中涉及这三点的条款仅作历史解读，现行权威见 ADR-0010 与[统一认证设计](../authentication-design.md)。其余决定（唯一内置管理员及其触发器保护、不透明服务端会话与 auth_revision 撤销、同源防护、审计自动化）不变。

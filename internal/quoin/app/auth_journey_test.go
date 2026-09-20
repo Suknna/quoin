@@ -10,13 +10,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 )
 
-func TestHTTPInitializationThenTwoStepLoginAndAudit(t *testing.T) {
+func TestHTTPBootstrapUnlockThenSingleStepLoginAndAudit(t *testing.T) {
 	dir := t.TempDir()
 	keyFile := filepath.Join(t.TempDir(), "key")
 	if err := os.WriteFile(keyFile, bytes.Repeat([]byte{7}, 32), 0o600); err != nil {
@@ -31,20 +32,22 @@ func TestHTTPInitializationThenTwoStepLoginAndAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Production installs the read-only pool before serving; tests wire
-	// their only handle so pure reads run through the same seam.
 	if err := service.SetReader(database.Reader); err != nil {
 		t.Fatal(err)
 	}
-	sender := &stubSender{}
-	if err := service.ConfigureAuth(auth.AuthConfig{OTPKey: bytes.Repeat([]byte{9}, 32), Sender: sender}); err != nil {
+	if err := prepareAuthenticationBootstrap(context.Background(), service, dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.EnsureBootstrapAdmin(context.Background()); err != nil {
+	raw, err := os.ReadFile(initialPasswordPath(dir))
+	if err != nil {
 		t.Fatal(err)
 	}
+	initial := strings.TrimSpace(string(raw))
 	application := NewAPIServer(service, database.SQL, keyFile)
 	if err := application.SetReadOnlyReader(database.Reader); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.configureLoginProviders(nil); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewUnstartedServer(nil)
@@ -85,8 +88,8 @@ func TestHTTPInitializationThenTwoStepLoginAndAudit(t *testing.T) {
 					cleared[cookie.Name] = true
 				}
 			}
-			if !cleared["__Host-quoin-session"] || !cleared[flowCookieName] {
-				t.Fatal("logout must explicitly clear both session and authentication flow cookies")
+			if !cleared["__Host-quoin-session"] {
+				t.Fatal("logout must explicitly clear the session cookie")
 			}
 		}
 
@@ -105,34 +108,49 @@ func TestHTTPInitializationThenTwoStepLoginAndAudit(t *testing.T) {
 		}
 		return result
 	}
-	flow := call("POST", "/api/v1/auth/login", map[string]any{"username": "admin", "password": "admin"}, 200)
-	if flow["type"] != "admin_initialize" {
-		t.Fatalf("unexpected flow %#v", flow)
+
+	// The public login-channel projection answers before any session exists.
+	config := call("GET", "/api/v1/auth/config", nil, 200)
+	if local := config["local"].(map[string]any); !local["enabled"].(bool) || !local["visible"].(bool) {
+		t.Fatalf("default local projection = %#v", config)
 	}
-	call("GET", "/api/v1/auth/me", nil, 401)
+
+	// The initial random password logs into the restricted session directly.
+	login := call("POST", "/api/v1/auth/login", map[string]any{"username": "admin", "password": initial}, 200)
+	if login["completed"] != true {
+		t.Fatal("single-step login must complete")
+	}
+	user := login["user"].(map[string]any)
+	if user["passwordChangeRequired"] != true {
+		t.Fatalf("bootstrap session must stay restricted: %#v", user)
+	}
+	me := call("GET", "/api/v1/auth/me", nil, 200)
+	if me["passwordChangeRequired"] != true || me["authSource"] != "local" {
+		t.Fatalf("restricted me projection = %#v", me)
+	}
+	// Before the deployment completes initialization even the authenticated
+	// bootstrap administrator cannot reach managed routes: the gate answers
+	// with the initialization envelope.
+	call("GET", "/api/v1/admin/users", nil, 503)
+
 	password := "correct-horse-battery-staple"
-	call("PUT", "/api/v1/auth/flow/password", map[string]any{"newPassword": password}, 204)
-	contact := call("POST", "/api/v1/auth/flow/contacts", map[string]any{"channel": "email", "target": "admin@example.test"}, 200)
-	call("POST", "/api/v1/auth/flow/challenge", map[string]any{"contactId": contact["id"]}, 200)
-	verified := call("POST", "/api/v1/auth/flow/verify", map[string]any{"code": sender.lastCode()}, 200)
-	if verified["completed"] != false {
-		t.Fatal("initialization unexpectedly logged in")
+	call("PUT", "/api/v1/auth/password", map[string]any{"currentPassword": initial, "newPassword": password}, 204)
+	me = call("GET", "/api/v1/auth/me", nil, 200)
+	if me["passwordChangeRequired"] != false {
+		t.Fatal("the forced change must unlock the session")
 	}
-	call("POST", "/api/v1/auth/flow/complete", map[string]any{}, 204)
+
+	// Logout, then the formal password logs in with a normal session.
+	call("POST", "/api/v1/auth/logout", nil, 204)
 	call("GET", "/api/v1/auth/me", nil, 401)
-	flow = call("POST", "/api/v1/auth/login", map[string]any{"username": "admin", "password": password}, 200)
-	if flow["type"] != "login" {
-		t.Fatal("expected second-factor login")
-	}
-	call("GET", "/api/v1/auth/me", nil, 401)
-	contacts := flow["contacts"].([]any)
-	contactID := contacts[0].(map[string]any)["id"]
-	call("POST", "/api/v1/auth/flow/challenge", map[string]any{"contactId": contactID}, 200)
-	verified = call("POST", "/api/v1/auth/flow/verify", map[string]any{"code": sender.lastCode()}, 200)
-	if verified["completed"] != true {
-		t.Fatal("login did not complete")
+	login = call("POST", "/api/v1/auth/login", map[string]any{"username": "admin", "password": password}, 200)
+	if login["completed"] != true {
+		t.Fatal("formal login must complete")
 	}
 	call("GET", "/api/v1/auth/me", nil, 200)
+
+	// Wrong passwords answer 401 and the attempts land in the audit log.
+	call("POST", "/api/v1/auth/login", map[string]any{"username": "admin", "password": "wrong password value!"}, 401)
 	events := call("GET", "/api/v1/audit-events?limit=100", nil, 200)
 	if len(events["items"].([]any)) == 0 {
 		t.Fatal("authentication and access audit missing")
