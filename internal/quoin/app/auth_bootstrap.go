@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"os"
@@ -103,6 +105,37 @@ func (application *apiServer) configureLoginProviders(config *contract.QuoinAuth
 		Visible: config.LocalVisible(),
 	}); err != nil {
 		return err
+	}
+	if oidcEnabled {
+		if application.rootKey == nil {
+			return fmt.Errorf("the oidc login channel requires the deployment root key")
+		}
+		secrets, err := readAuthSecretsFile(config.SecretsFile)
+		if err != nil {
+			return err
+		}
+		clientSecret := secrets["oidcClientSecret"]
+		if clientSecret == "" {
+			return fmt.Errorf("authentication.secretsFile must provide the oidcClientSecret reference")
+		}
+		rootKey, err := application.rootKey()
+		if err != nil {
+			return fmt.Errorf("read root key for the oidc state signing key: %w", err)
+		}
+		mac := hmac.New(sha256.New, rootKey)
+		mac.Write([]byte("quoin:authentication:oidc:v1"))
+		if err := registry.Register(&auth.OIDCProvider{
+			Service:      application.auth,
+			Issuer:       config.OIDC.Issuer,
+			ClientID:     config.OIDC.ClientID,
+			ClientSecret: clientSecret,
+			RedirectURL:  config.OIDC.RedirectURL,
+			Label:        config.OIDC.Label,
+			IconURL:      config.OIDC.IconURL,
+			StateKey:     mac.Sum(nil),
+		}); err != nil {
+			return err
+		}
 	}
 	application.providers = registry
 	return nil

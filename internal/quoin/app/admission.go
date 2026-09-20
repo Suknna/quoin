@@ -51,6 +51,10 @@ func accessDeclarationTable() map[string]operations.Declaration {
 	add(
 		declaration("loginWithPassword", http.MethodPost, "/api/v1/auth/login", operations.LevelPublic, operations.KindCommand, "user"),
 		declaration("readAuthConfig", http.MethodGet, "/api/v1/auth/config", operations.LevelPublic, operations.KindQuery, "deployment"),
+		// The OIDC redirect dance owns its response head (302 + cookies), so
+		// both routes are raw handlers under the admission wrapper.
+		raw(declaration("beginOIDCLogin", http.MethodGet, "/api/v1/auth/oidc/login", operations.LevelPublic, operations.KindQuery, "deployment")),
+		raw(declaration("completeOIDCLogin", http.MethodGet, "/api/v1/auth/oidc/callback", operations.LevelPublic, operations.KindQuery, "deployment")),
 		declaration("touchSessionActivity", http.MethodPost, "/api/v1/auth/activity", operations.LevelSession, operations.KindCommand, "session"),
 		declaration("getCurrentUser", http.MethodGet, "/api/v1/auth/me", operations.LevelSession, operations.KindQuery, "user"),
 		declaration("listOwnContacts", http.MethodGet, "/api/v1/auth/contacts", operations.LevelFull, operations.KindQuery, "user"),
@@ -255,6 +259,7 @@ var NormalAccessRegistry = sync.OnceValues(buildNormalAccessRegistry)
 // and the any-method catch-all raw wrapper.
 var maintenanceBase = []string{
 	"loginWithPassword", "readAuthConfig",
+	"beginOIDCLogin", "completeOIDCLogin",
 	"touchSessionActivity",
 	"getCurrentUser", "changeOwnPassword", "logout",
 	"listAuditEvents", "getAuditSettings", "updateAuditSettings", "previewAuditRetention",

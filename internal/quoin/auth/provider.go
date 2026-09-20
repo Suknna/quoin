@@ -68,7 +68,9 @@ type LoginCompletion struct {
 type Provider interface {
 	Descriptor() ProviderDescriptor
 	BeginLogin(ctx context.Context, returnTo string) (LoginIntent, error)
-	CompleteLogin(ctx context.Context, completion LoginCompletion) (LoginResult, error)
+	// CompleteLogin finishes the channel and additionally returns the
+	// sanitized same-origin return-to target the login intent carried.
+	CompleteLogin(ctx context.Context, completion LoginCompletion) (LoginResult, string, error)
 	Logout(ctx context.Context, session Session) error
 }
 
@@ -88,8 +90,9 @@ func (p LocalProvider) BeginLogin(ctx context.Context, returnTo string) (LoginIn
 	return LoginIntent{}, ErrProviderNotRedirect
 }
 
-func (p LocalProvider) CompleteLogin(ctx context.Context, completion LoginCompletion) (LoginResult, error) {
-	return p.Service.LoginWithPassword(ctx, completion.Username, completion.Password, completion.UserAgent)
+func (p LocalProvider) CompleteLogin(ctx context.Context, completion LoginCompletion) (LoginResult, string, error) {
+	result, err := p.Service.LoginWithPassword(ctx, completion.Username, completion.Password, completion.UserAgent)
+	return result, "", err
 }
 
 func (p LocalProvider) Logout(ctx context.Context, session Session) error {

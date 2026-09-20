@@ -86,6 +86,9 @@ func newMaintenanceHandler(application *apiServer, publicOrigin, maintenanceReas
 		return nil, wrapErr
 	}
 	apiMux.Handle("/api/", unavailable)
+	if err := application.registerOIDCRoutes(admission, apiMux); err != nil {
+		return nil, err
+	}
 	application.registerAuthenticationFlows(api)
 	application.registerAuthConfigRoutes(api)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/auth/me", OperationID: "getCurrentUser"}, application.me)

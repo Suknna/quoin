@@ -31,6 +31,9 @@ var (
 	// random password passed its 24-hour deadline; only `quoin admin
 	// recover` re-arms the credential.
 	ErrInitialPasswordExpired = errors.New("initial administrator password expired; run quoin admin recover")
+	// ErrAccountDisabled marks an IdP-authenticated subject whose platform
+	// account was disabled: the IdP verdict never overrides the disable.
+	ErrAccountDisabled = errors.New("account is disabled")
 )
 
 type User struct {

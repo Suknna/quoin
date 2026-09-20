@@ -134,17 +134,11 @@ func (service *Service) LoginWithPassword(ctx context.Context, username, passwor
 				return loginOutcome{}, &execution.RecordedFailure{Code: "initial_password_expired", Detail: "initial administrator password expired; run quoin admin recover", ObjectID: entry.User.ID}
 			}
 		}
-		raw := make([]byte, 32)
-		if _, err := rand.Read(raw); err != nil {
-			return loginOutcome{}, fmt.Errorf("create session: %w", err)
+		bearer, err := issueSession(ctx, tx, entry.User.ID, entry.User.AuthRevision, clientLabel(userAgent), service.now())
+		if err != nil {
+			return loginOutcome{}, err
 		}
-		digest := sha256.Sum256(raw)
-		nowTime := service.now().UTC()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(?,?,?,?,?,?,?,?)`,
-			entry.User.ID, digest[:], entry.User.AuthRevision, clientLabel(userAgent), nowTime.Format(time.RFC3339Nano), nowTime.Format(time.RFC3339Nano), nowTime.Add(12*time.Hour).Format(time.RFC3339Nano), nowTime.Add(7*24*time.Hour).Format(time.RFC3339Nano)); err != nil {
-			return loginOutcome{}, fmt.Errorf("persist session: %w", err)
-		}
-		return loginOutcome{Bearer: base64.RawURLEncoding.EncodeToString(raw), UserID: entry.User.ID}, nil
+		return loginOutcome{Bearer: bearer, UserID: entry.User.ID}, nil
 	}, func(result loginOutcome) int64 { return result.UserID })
 	if err != nil {
 		mapped := mapLoginFailure(err)
@@ -181,4 +175,21 @@ func mapLoginFailure(err error) error {
 		return ErrLocalLoginUnavailable
 	}
 	return err
+}
+
+// issueSession mints the opaque 32-byte bearer, persists its SHA-256 digest
+// bound to the user's current auth_revision and returns the raw bearer for
+// the one-time cookie write. Random source failure rejects issuance.
+func issueSession(ctx context.Context, tx *execution.Tx, userID, revision int64, label string, nowTime time.Time) (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("create session: %w", err)
+	}
+	digest := sha256.Sum256(raw)
+	nowTime = nowTime.UTC()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(?,?,?,?,?,?,?,?)`,
+		userID, digest[:], revision, label, nowTime.Format(time.RFC3339Nano), nowTime.Format(time.RFC3339Nano), nowTime.Add(12*time.Hour).Format(time.RFC3339Nano), nowTime.Add(7*24*time.Hour).Format(time.RFC3339Nano)); err != nil {
+		return "", fmt.Errorf("persist session: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
 }

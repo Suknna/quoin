@@ -568,6 +568,9 @@ func NewHandler(application *apiServer, publicOrigin string) (http.Handler, erro
 	if err := accessRegistry.ValidateSurface(api); err != nil {
 		return nil, err
 	}
+	if err := application.registerOIDCRoutes(admission, mux); err != nil {
+		return nil, err
+	}
 	alertStream, err := admission.Wrap("streamAlertEvents", http.HandlerFunc(newAlertEventStream(application).serve))
 	if err != nil {
 		return nil, err

@@ -16,6 +16,8 @@ import (
 type authOperations struct {
 	seedBootstrap *execution.Operation
 	loginLocal    *execution.Operation
+	oidcJit       *execution.Operation
+	loginOIDC     *execution.Operation
 	recoveryBegin *execution.Operation
 
 	// Session-originated domain commands (runner-ledger path).
@@ -77,6 +79,17 @@ func newAuthOperations() (authOperations, *execution.Registry) {
 		// account row — a failed attempt has no session to name.
 		loginLocal: register(execution.Operation{
 			Name: "auth.login.local", Class: execution.ClassWrite, ObjectType: "user",
+			Authorize: authorizeLogin,
+		}),
+		// JIT provisioning of an unknown external identity: one audited
+		// user+identity(+contact) creation, idempotent on the unique key.
+		oidcJit: register(execution.Operation{
+			Name: "auth.oidc.jit", Class: execution.ClassWrite, ObjectType: "user",
+			Authorize: authorizeLogin,
+		}),
+		// The everyday SSO login: the audit authority is the account row.
+		loginOIDC: register(execution.Operation{
+			Name: "auth.login.oidc", Class: execution.ClassWrite, ObjectType: "user",
 			Authorize: authorizeLogin,
 		}),
 		recoveryBegin: register(execution.Operation{
