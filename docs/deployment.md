@@ -58,11 +58,11 @@ kubectl -n quoin apply -f deploy/kubernetes/ops-services.yaml
 
 先将 `quoin-config` 的 `publicOrigin` 改为精确公开 HTTPS Origin，并以发布的 digest 替换四个默认应用镜像。默认 gateway Service 是 `ClusterIP`；按集群网络条件由运维改为 `LoadBalancer` 或 `NodePort`。PVC 的 StorageClass、容量、备份策略和回收策略也由运维平台决定。
 
-首次 Admin 初始化不需要部署编排创建任何用户：首次启动 Quoin 在空库上自动播种唯一待初始化的内置管理员（用户名/初始密码为公开默认值 `admin/admin`，仅初始化状态可用，永不签发工作台会话）。运维在浏览器打开公开 Origin，用默认凭据登录后直接进入统一初始化流程：设置正式密码、配置并测试验证消息投递（SMTP/HTTPS webhook；指向私网接收方时必须显式放通私网 CIDR 并提供 CA 证书，投递配置加密存库）、登记并真实验证管理员邮箱或手机号，最后原子完成初始化——默认密码入口永久关闭，返回登录页以正式密码加二级验证进入工作台。
+首次 Admin 初始化不需要部署编排创建任何用户：首次启动 Quoin 在空库上自动播种唯一待初始化的内置管理员，初始密码由进程随机生成并写入数据目录 `initial-admin-password` 文件（0600，与 SQLite 同卷；启动日志只报路径与 24 小时期限）。运维用 `kubectl exec`/`docker compose exec` 读取该文件后，以 `admin` + 初始密码登录——单步登录签发受限会话，强制设置正式密码后自动进入工作台；初始密码随之永久失效（24 小时未改密则作废，见下文恢复）。不存在公开默认密码。
 
 Quoin 定位为内网运维平台，不在产品内提供首次安装的所有权证明机制：公开默认凭据在首次初始化完成前不具备服务端防抢占能力，**首次部署的访问边界由部署环境负责**。建议将 Quoin 部署于受控内网或受限管理网络（gateway 不对不受信网络发布，Kubernetes 中保持 `ClusterIP` 并按需经内网 ingress 暴露），完成管理员初始化后再按需扩大可达范围；部署与恢复密码不得进入命令行参数、环境变量或日志。
 
-管理员恢复以离线命令为准：停止长期 Quoin workload，使用与**同一**数据卷和 Secret 挂载的受控一次性容器/Pod，通过 attached TTY 执行 `quoin admin recover --config /etc/quoin/component.yaml --mode password`（仅忘记密码：设置新的临时密码，保留已验证的二级验证方式，随后启动服务用该密码登录并完成统一初始化流程）或 `--mode factors`（所有因素均不可用：重置全部因素并设置新的临时密码，随后启动服务登录并重新绑定联系方式）。两种模式均撤销旧会话与挑战；不得恢复 `admin/admin` 默认密码，也不创建第二管理员；恢复后的统一初始化流程与首次安装完全一致，Web 登录页不提供独立的恢复入口。`quoin backup --offline`、`quoin restore` 和 `quoin migrate` 同样要求长期 Quoin 已停止且调用者独占 SQLite；运维负责提供正确的 PVC/目录和只读 Secret 挂载。
+管理员恢复以离线命令为准：停止长期 Quoin workload，使用与**同一**数据卷和 Secret 挂载的受控一次性容器/Pod，通过 attached TTY 执行 `quoin admin recover --config /etc/quoin/component.yaml`。部署仍在待初始化（初始密码过期或遗失）时，该命令重新生成随机初始密码、重写数据卷内的 0600 文件并重置 24 小时期限；管理员已初始化但被锁出时，命令经 TTY 交互设置临时密码。两种形态均撤销旧会话；不存在 `admin/admin` 默认密码，也不创建第二管理员；Web 登录页不提供独立的恢复入口。`quoin backup --offline`、`quoin restore` 和 `quoin migrate` 同样要求长期 Quoin 已停止且调用者独占 SQLite；运维负责提供正确的 PVC/目录和只读 Secret 挂载。
 
 ## Compose
 
@@ -115,7 +115,7 @@ make image COMPONENT=quoin VERSION=v1.0.2
 
 已登录 Admin 可继续使用 Web 备份管理与定时策略创建核心一致性备份。在线管理不是在线覆盖恢复：恢复前必须停机并独占 SQLite。运维执行 `quoin backup --offline`、`quoin restore` 或 `quoin migrate` 前，应确认：目标数据目录/PVC、备份文件及其 checksum、版本兼容性、根密钥/Secret 匹配，以及没有其他 Quoin 进程持有数据库锁。
 
-`quoin restore` 在隔离事务中撤销全部会话、流程、连接与告警源凭据，保留唯一管理员并清除其二级验证方式，将管理员改为待初始化状态并生成临时密码。临时密码仅在 attached TTY 输出一次；数据库仅保存密码哈希，不提供 Web 恢复令牌或独立恢复页面。完成停机后校验和 `quoin restore finalize`，再启动长期服务，使用 `admin` 与临时密码从普通登录页进入统一初始化流程，设置正式密码、重新验证联系方式，完成后返回登录页进行密码加二级验证登录。临时密码若遗失，在服务停止时执行 `quoin admin recover` 替换；不要删除数据库或恢复默认密码。组件身份来自部署 Secret，恢复后 Plinth 自动重连，在「平台状态」页确认即可。
+`quoin restore` 在隔离事务中撤销全部会话、连接与告警源凭据，保留唯一管理员并置其入待初始化状态（强制改密标记），生成临时密码。临时密码仅在 attached TTY 输出一次；数据库仅保存密码哈希，不提供 Web 恢复令牌或独立恢复页面。完成停机后校验和 `quoin restore finalize`，再启动长期服务，使用 `admin` 与临时密码从登录页进入受限会话、设置正式密码后直接进入工作台。临时密码若遗失，在服务停止时执行 `quoin admin recover` 替换；不要删除数据库或恢复默认密码。组件身份来自部署 Secret，恢复后 Plinth 自动重连，在「平台状态」页确认即可。
 
 ## 存量部署升级到统一 mTLS
 

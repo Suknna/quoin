@@ -25,7 +25,7 @@ kubectl get namespace quoin
 
 最后一条在全新安装时预期返回 NotFound；**如果 namespace 已存在，先确认是否有已有部署，不能直接执行本指南覆盖 Secret 或重建身份。** 本文是全新安装流程，不是升级或恢复流程。
 
-> NodePort 并非只绑定私网接口。首次初始化前通过防火墙或管理网络限制访问；默认 `admin/admin` 不提供防抢占能力。不要在不受信网络上开放未初始化实例。
+> NodePort 并非只绑定私网接口。首次初始化前通过防火墙或管理网络限制访问；初始管理员密码是首启随机生成并写入 PVC 的 0600 文件（24 小时未改密作废），掌握集群访问权即掌握该文件。不要在不受信网络上开放未初始化实例。
 
 ## 1. 构建并分发镜像
 
@@ -222,7 +222,7 @@ curl --fail --cacert private-ca/ca.crt \
 
 ## 5. 管理员初始化与验证码
 
-1. 使用 `admin/admin` 进入初始化页面，它不能直接登录工作台。
+1. 读取随机初始密码：`kubectl exec deploy/quoin -- cat /var/lib/quoin/data/initial-admin-password`；用 `admin` + 该密码登录，进入受限会话的强制改密页。
 2. 设置正式密码，配置 TLS SMTP 或 HTTPS webhook 并测试投递。
 3. 私网接收方配置最小 `allowPrivateCIDRs`，私有 CA 填入 `rootCaPem`。地址必须从 **Quoin Pod 内**可达，Pod 内的 `localhost` 不是节点。
 4. 登记管理员联系方式，输入实际收到的验证码并完成初始化。

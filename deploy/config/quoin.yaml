@@ -20,26 +20,20 @@ runtimeClientCaFile: /run/quoin-secrets/runtime-ca.pem
 # deployments may only extend it. Omit the whole section to keep the default.
 audit:
   retentionMonths: 6
-# Authentication delivery bootstrap (authentication design section 8), kept
-# commented out: enabling it provisions the initial verification-code delivery
-# from this file and requires a read-only secret reference file at secretsFile
-# (reference name -> value, JSON or YAML; values never belong in this YAML).
-# Omit the section to configure delivery at runtime as an administrator;
-# runtime-configured secrets stay root-key encrypted.
+# Login channels (ADR-0010). Omit the whole section for the default: the
+# local emergency channel enabled and visible. Enabling OIDC requires the
+# three endpoint fields plus secretsFile, a read-only secret reference file
+# (reference name -> value, JSON or YAML) providing oidcClientSecret; the
+# secret value never belongs in this YAML. local.enabled=false together with
+# oidc.enabled=false is rejected at startup.
 # authentication:
-#   secretsFile: /run/quoin-secrets/auth-delivery-secrets.yaml
-#   configuration:
-#     email:
-#       kind: smtp
-#       host: smtp.example.com
-#       port: 587
-#       from: noreply@quoin.example.com
-#       username: quoin
-#       passwordRef: smtp-password
-#       tlsMode: starttls
-#     sms:
-#       kind: webhook
-#       url: https://sms-gateway.example.com/send
-#       secretHeaders:
-#         X-Api-Key: sms-api-key
-#       encoding: json
+#   local:
+#     enabled: true
+#     visible: true
+#   oidc:
+#     enabled: true
+#     issuer: https://sso.example.com
+#     clientId: quoin
+#     redirectUrl: https://quoin.example.com/api/v1/auth/oidc/callback
+#     label: 统一身份登录
+#   secretsFile: /run/quoin-secrets/auth-secrets.yaml
