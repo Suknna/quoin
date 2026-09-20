@@ -756,7 +756,6 @@ func (service *RuntimeService) dispatchAllCancellingInspections(ctx context.Cont
 	rows, err := service.Inspections.Reader().QueryContext(ctx, `
 		SELECT a.id FROM execution_attempts a
 		WHERE a.state='Cancelling' AND a.attempt_type IN ('inspection_collection','inspection_analysis')
-		AND NOT EXISTS (SELECT 1 FROM browser_operations b WHERE b.owner_attempt_id=a.id AND b.kind='journey')
 		ORDER BY a.id`)
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "inspection.cancel_replay", err.Error())
