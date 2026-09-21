@@ -5,6 +5,7 @@ package stele
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -295,9 +296,66 @@ func TestDeadLetterListAndReplay(t *testing.T) {
 		t.Fatalf("replay must ride the explicit credential: %+v", batch)
 	}
 
-	// 不存在的 id：明确报错且已重放数正确。
-	if _, err = queue.ReplayDeadLetters(ctx, []string{"evt-missing"}, 0, 0); err == nil {
-		t.Fatal("replaying a missing id must fail")
+	// 不存在的 id：整体回滚——错误明确、计数为 0、已处理部分不留痕。
+	replayed, err = queue.ReplayDeadLetters(ctx, []string{"evt-missing"}, 0, 0)
+	if err == nil || replayed != 0 {
+		t.Fatalf("replaying a missing id must fail with count 0, got (%d,%v)", replayed, err)
+	}
+}
+
+// 重放的全有或全无：任一 id 失败即整体回滚，返回计数必须为 0（回滚后
+// 事务内已走的插入/删除全部撤销），outbox 与死信表保持原状。
+func TestDeadLetterReplayRollsBackEverythingOnMissingID(t *testing.T) {
+	ctx := context.Background()
+	queue := openTestQueue(t)
+	for _, id := range []string{"evt-roll-a", "evt-roll-b"} {
+		if err := queue.EnqueueEvents(ctx, []QueuedEvent{sampleEvent(id)}); err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+		if _, err := queue.MarkResult(ctx, id, 2 /* REJECTED */, time.Now().UTC()); err != nil {
+			t.Fatalf("reject %s: %v", id, err)
+		}
+	}
+	replayed, err := queue.ReplayDeadLetters(ctx, []string{"evt-roll-a", "evt-roll-missing"}, 0, 0)
+	if err == nil {
+		t.Fatal("missing id must fail the replay")
+	}
+	if replayed != 0 {
+		t.Fatalf("rolled-back replay count = %d, want 0", replayed)
+	}
+	if letters, _ := queue.ListDeadLetters(ctx, DeadLetterFilter{}); len(letters) != 2 {
+		t.Fatalf("rollback must restore both dead letters, got %d", len(letters))
+	}
+	if depth, _ := queue.QueueDepth(ctx); depth != 0 {
+		t.Fatalf("rollback must not leave events in the outbox, depth = %d", depth)
+	}
+}
+
+// 重放入参校验：空/空白 id、负凭据、凭据与快照失配、超出 int64 的快照
+// 都在开事务前拒绝，不触碰任何行。
+func TestDeadLetterReplayValidatesInput(t *testing.T) {
+	ctx := context.Background()
+	queue := openTestQueue(t)
+	if _, err := queue.ReplayDeadLetters(ctx, nil, 0, 0); err == nil {
+		t.Fatal("empty id list must be rejected")
+	}
+	if _, err := queue.ReplayDeadLetters(ctx, []string{"evt-1", "  "}, 0, 0); err == nil {
+		t.Fatal("blank ids must be rejected")
+	}
+	if _, err := queue.ReplayDeadLetters(ctx, []string{"evt-1"}, -1, 0); err == nil {
+		t.Fatal("negative credential id must be rejected")
+	}
+	if _, err := queue.ReplayDeadLetters(ctx, []string{"evt-1"}, 0, 3); err == nil {
+		t.Fatal("snapshot version without a credential id must be rejected")
+	}
+	if _, err := queue.ReplayDeadLetters(ctx, []string{"evt-1"}, 1, math.MaxUint64); err == nil {
+		t.Fatal("snapshot version beyond int64 must be rejected")
+	}
+	if depth, _ := queue.QueueDepth(ctx); depth != 0 {
+		t.Fatalf("rejected input must not touch the outbox, depth = %d", depth)
+	}
+	if letters, _ := queue.ListDeadLetters(ctx, DeadLetterFilter{}); len(letters) != 0 {
+		t.Fatalf("rejected input must not touch dead letters, got %d", len(letters))
 	}
 }
 

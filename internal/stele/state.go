@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -113,6 +114,34 @@ func OpenQueue(dataDirectory string) (*Queue, error) {
 
 func (queue *Queue) Close() error {
 	return queue.db.Close()
+}
+
+// OpenQueueReadOnly 以严格只读方式打开既有 <dataDirectory>/stele.db：mode=ro
+// + query_only 让 SQLite 本身拒绝一切写入（与 Quoin 侧 execution.OpenReadOnly
+// / 离线 rebind 的只读约定一致）。死信列表这类管理面查看用它兜底：dataDirectory
+// 配错时只会得到明确报错，绝不产生创建目录、bootstrap、v1→v2 迁移或 chmod
+// 等副作用；库文件不存在直接失败。WAL 库在 -shm 文件可写（如网关同用户
+// 在跑或已干净关闭）时可正常只读。
+func OpenQueueReadOnly(dataDirectory string) (*Queue, error) {
+	databasePath := filepath.Join(dataDirectory, "stele.db")
+	if _, err := os.Stat(databasePath); err != nil {
+		return nil, fmt.Errorf("stele: inspect state database %s: %w", databasePath, err)
+	}
+	dsn := (&url.URL{
+		Scheme: "file", Path: databasePath,
+		RawQuery: "mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)",
+	}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("stele: open state database read-only: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("stele: ping state database: %w", err)
+	}
+	return &Queue{db: db}, nil
 }
 
 // bootstrap 建表并推进 user_version；已识别版本则跳过。
@@ -455,7 +484,9 @@ type DeadLetterFilter struct {
 }
 
 // ListDeadLetters 按 dead_at 倒序列出死信（管理面只读；Limit<=0 时默认 50，
-// 上限 500，避免一次性捞出全部原文）。
+// 上限 500，避免一次性捞出全部原文）。凭据列只在 v2 存在：v1 老库在只读
+// 句柄下无从迁移，凭据投影为 0（重放侧对凭据 0 仍强制显式指定）；不认识
+// 的版本直接拒绝，与可写打开的 bootstrap 语义一致。
 func (queue *Queue) ListDeadLetters(ctx context.Context, filter DeadLetterFilter) ([]DeadLetter, error) {
 	limit := filter.Limit
 	if limit <= 0 {
@@ -464,9 +495,21 @@ func (queue *Queue) ListDeadLetters(ctx context.Context, filter DeadLetterFilter
 	if limit > 500 {
 		limit = 500
 	}
-	query := `SELECT id, source_kind, source_id, credential_id, credential_snapshot_version,
+	credentialColumns := "credential_id, credential_snapshot_version"
+	var version int
+	if err := queue.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return nil, fmt.Errorf("stele: read state schema version: %w", err)
+	}
+	switch version {
+	case queueSchemaVersion:
+	case 1:
+		credentialColumns = "0, 0"
+	default:
+		return nil, fmt.Errorf("stele: state database schema version %d is not supported (want %d)", version, queueSchemaVersion)
+	}
+	query := fmt.Sprintf(`SELECT id, source_kind, source_id, %s,
 		event_type, payload, reason, attempts, first_received_at, dead_at
-		FROM dead_letters`
+		FROM dead_letters`, credentialColumns)
 	var clauses []string
 	var args []any
 	if filter.SourceKind != "" {
@@ -508,13 +551,30 @@ func (queue *Queue) ListDeadLetters(ctx context.Context, filter DeadLetterFilter
 }
 
 // ReplayDeadLetters 把选中的死信在单事务内重新入队（attempts 复位、立即到
-// 期）并删除死信行；event_id 主键使重复重放必然冲突而不是静默双写。
-// credentialID/snapshotVersion 指定重放使用的凭据：轮换场景下原凭据已吊销，
-// 操作者必须显式给出当前有效凭据（来自 Quoin 告警源详情）；传 0 则沿死信
-// 行原凭据（Quoin 侧仍会按当前有效性裁决，无效会再次被拒并回到死信）。
+// 期）并删除死信行；event_id 主键使重复重放必然冲突而不是静默双写。事务
+// 全有或全无：任一 id 失败即整体回滚，返回的已重放计数为 0，不会重放一半。
+// 入参在开事务前校验：空/空白 id、负凭据、凭据与快照失配、超出 int64 的
+// 快照版本直接拒绝。credentialID/snapshotVersion 指定重放使用的凭据：轮换
+// 场景下原凭据已吊销，操作者必须显式给出当前有效凭据（来自 Quoin 告警源
+// 详情）；传 0 则沿死信行原凭据（Quoin 侧仍会按当前有效性裁决，无效会再
+// 次被拒并回到死信）。
 func (queue *Queue) ReplayDeadLetters(ctx context.Context, ids []string, credentialID int64, snapshotVersion uint64) (int, error) {
 	if len(ids) == 0 {
-		return 0, nil
+		return 0, fmt.Errorf("stele: replay requires at least one dead letter id")
+	}
+	for _, id := range ids {
+		if strings.TrimSpace(id) == "" {
+			return 0, fmt.Errorf("stele: dead letter ids must not be blank")
+		}
+	}
+	if credentialID < 0 {
+		return 0, fmt.Errorf("stele: credential id must not be negative (got %d)", credentialID)
+	}
+	if snapshotVersion > math.MaxInt64 {
+		return 0, fmt.Errorf("stele: credential snapshot version %d exceeds the stored column", snapshotVersion)
+	}
+	if credentialID == 0 && snapshotVersion != 0 {
+		return 0, fmt.Errorf("stele: credential snapshot version %d requires an explicit credential id", snapshotVersion)
 	}
 	tx, err := queue.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -531,9 +591,9 @@ func (queue *Queue) ReplayDeadLetters(ctx context.Context, ids []string, credent
 		if err != nil {
 			_ = tx.Rollback()
 			if err == sql.ErrNoRows {
-				return replayed, fmt.Errorf("stele: dead letter %q not found (%d already replayed)", id, replayed)
+				return 0, fmt.Errorf("stele: dead letter %q not found; the whole replay was rolled back", id)
 			}
-			return replayed, fmt.Errorf("stele: load dead letter: %w", err)
+			return 0, fmt.Errorf("stele: load dead letter: %w", err)
 		}
 		useCredential, useSnapshot := credentialID, snapshotVersion
 		if useCredential == 0 {
@@ -541,7 +601,7 @@ func (queue *Queue) ReplayDeadLetters(ctx context.Context, ids []string, credent
 		}
 		if useCredential <= 0 {
 			_ = tx.Rollback()
-			return replayed, fmt.Errorf("stele: dead letter %q has no usable credential; pass an explicit valid credential id", id)
+			return 0, fmt.Errorf("stele: dead letter %q has no usable credential; pass an explicit valid credential id", id)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO events_outbox(
 			id, source_kind, source_id, credential_id, credential_snapshot_version,
@@ -550,16 +610,16 @@ func (queue *Queue) ReplayDeadLetters(ctx context.Context, ids []string, credent
 			letter.ID, letter.SourceKind, letter.SourceID, useCredential, useSnapshot,
 			letter.EventType, receivedAt, letter.Payload, formatStateTime(time.Now().UTC())); err != nil {
 			_ = tx.Rollback()
-			return replayed, fmt.Errorf("stele: re-enqueue dead letter %q: %w", id, err)
+			return 0, fmt.Errorf("stele: re-enqueue dead letter %q: %w", id, err)
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM dead_letters WHERE id=?`, id); err != nil {
 			_ = tx.Rollback()
-			return replayed, fmt.Errorf("stele: delete replayed dead letter %q: %w", id, err)
+			return 0, fmt.Errorf("stele: delete replayed dead letter %q: %w", id, err)
 		}
 		replayed++
 	}
 	if err := tx.Commit(); err != nil {
-		return replayed, fmt.Errorf("stele: commit dead-letter replay: %w", err)
+		return 0, fmt.Errorf("stele: commit dead-letter replay: %w", err)
 	}
 	return replayed, nil
 }
