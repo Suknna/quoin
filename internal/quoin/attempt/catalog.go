@@ -28,12 +28,11 @@ package attempt
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
+	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/plugins"
 )
 
@@ -359,35 +358,38 @@ func frozenToolFromDefinition(def ToolDef) FrozenTool {
 // ProviderToolsJSON renders the frozen catalog into the canonical
 // provider-facing tool schema bytes. Creation and every later execution
 // render from THIS document, so the bytes never drift with the installed
-// implementation.
+// implementation. The byte shape itself is the SHARED contract authority in
+// internal/contract (the Plinth worker renders the same document through the
+// same neutral functions), so both ends stay byte-identical by construction
+// instead of by discipline (ADR-0004, ADR-0011).
 func (catalog *FrozenCatalog) ProviderToolsJSON() ([]byte, error) {
 	if catalog == nil {
 		return nil, fmt.Errorf("frozen tool catalog is absent")
 	}
-	tools := make([]any, 0, len(catalog.Tools))
-	for _, tool := range catalog.Tools {
-		tools = append(tools, map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name":        tool.Name,
-				"description": tool.Description,
-				"parameters":  tool.Parameters,
-			},
-		})
-	}
-	return json.Marshal(tools)
+	return contract.ProviderToolsJSON(providerRenderTools(catalog.Tools))
 }
 
 // Digest is the SHA-256 hex of the frozen provider schema bytes — the value
 // BeginModelCall verifies against the worker rendering and the value the
 // model_calls provenance rows seal.
 func (catalog *FrozenCatalog) Digest() (string, error) {
-	body, err := catalog.ProviderToolsJSON()
-	if err != nil {
-		return "", err
+	if catalog == nil {
+		return "", fmt.Errorf("frozen tool catalog is absent")
 	}
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:]), nil
+	return contract.ProviderToolsDigest(providerRenderTools(catalog.Tools))
+}
+
+// providerRenderTools projects the frozen document into the neutral render
+// input; the projection itself carries no information (the neutral function
+// sees exactly the three rendered fields), so it can never drift the bytes.
+func providerRenderTools(tools []FrozenTool) []contract.ProviderTool {
+	projected := make([]contract.ProviderTool, 0, len(tools))
+	for _, tool := range tools {
+		projected = append(projected, contract.ProviderTool{
+			Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters,
+		})
+	}
+	return projected
 }
 
 // Lookup resolves one tool inside THIS attempt's frozen catalog.

@@ -9,8 +9,6 @@ package worker
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Suknna/quoin/internal/contract"
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"gopkg.in/yaml.v3"
 )
@@ -133,37 +132,48 @@ func ProviderToolsJSONForInput(canonicalInput []byte, agentVersion string) ([]by
 	return nil, fmt.Errorf("attempt input predates per-attempt catalog freezing and has no resolvable tool catalog")
 }
 
-// ProviderToolsJSON renders the frozen catalog into the canonical
-// provider-facing tool schema bytes. 构造与 Quoin 侧目录渲染相同(同名键的
-// map + json.Marshal),因此两边的字节与摘要逐字节一致。
-func (catalog *frozenToolCatalog) ProviderToolsJSON() ([]byte, error) {
-	if catalog == nil {
-		return nil, fmt.Errorf("frozen tool catalog is absent")
-	}
-	tools := make([]any, 0, len(catalog.Tools))
-	for _, tool := range catalog.Tools {
-		tools = append(tools, map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name":        tool.Name,
-				"description": tool.Description,
-				"parameters":  tool.Parameters,
-			},
-		})
-	}
-	return json.Marshal(tools)
-}
-
 // ProviderToolsDigestForInput is the SHA-256 hex of
 // ProviderToolsJSONForInput — the value the StartAttempt frame seals and
 // BeginModelCall re-derives from the attempt's stored catalog.
 func ProviderToolsDigestForInput(canonicalInput []byte, agentVersion string) (string, error) {
-	body, err := ProviderToolsJSONForInput(canonicalInput, agentVersion)
-	if err != nil {
-		return "", err
+	catalog, ok := catalogFromInputDocument(canonicalInput)
+	if !ok {
+		return "", fmt.Errorf("attempt input predates per-attempt catalog freezing and has no resolvable tool catalog")
 	}
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:]), nil
+	return catalog.ProviderToolsDigest()
+}
+
+// ProviderToolsJSON renders the frozen catalog into the canonical
+// provider-facing tool schema bytes. 渲染的构造与字节形状在 internal/contract
+// 的中立纯函数(与 Quoin 侧同一份实现),因此两边的字节与摘要逐字节一致——
+// ADR-0011 编译级隔离下,这是两端共享同一渲染权威而不共享任何业务/插件类型
+// 的方式。
+func (catalog *frozenToolCatalog) ProviderToolsJSON() ([]byte, error) {
+	if catalog == nil {
+		return nil, fmt.Errorf("frozen tool catalog is absent")
+	}
+	return contract.ProviderToolsJSON(providerRenderTools(catalog.Tools))
+}
+
+// ProviderToolsDigest is the SHA-256 hex of ProviderToolsJSON.
+func (catalog *frozenToolCatalog) ProviderToolsDigest() (string, error) {
+	if catalog == nil {
+		return "", fmt.Errorf("frozen tool catalog is absent")
+	}
+	return contract.ProviderToolsDigest(providerRenderTools(catalog.Tools))
+}
+
+// providerRenderTools projects the frozen document into the neutral render
+// input (name/description/parameters only — the three fields the provider
+// schema carries).
+func providerRenderTools(tools []frozenTool) []contract.ProviderTool {
+	projected := make([]contract.ProviderTool, 0, len(tools))
+	for _, tool := range tools {
+		projected = append(projected, contract.ProviderTool{
+			Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters,
+		})
+	}
+	return projected
 }
 
 // Plinth 侧的执行模式常量(与 runtimev1.ToolExecutionMode 枚举名一致)。
