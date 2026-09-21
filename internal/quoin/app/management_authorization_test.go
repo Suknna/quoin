@@ -40,17 +40,14 @@ func TestOperatorCannotCallManagementAPIs(t *testing.T) {
 		}
 	}
 
-	context := mustRequest(t, server, operator, "/api/v1/business-context", http.StatusOK)
+	alerts := mustRequest(t, server, operator, "/api/v1/alerts?state=Firing", http.StatusOK)
 	var body struct {
-		Items []struct {
-			Key         string `json:"key"`
-			DisplayName string `json:"displayName"`
-		} `json:"items"`
+		Items []json.RawMessage `json:"items"`
 	}
-	if err := json.Unmarshal([]byte(context), &body); err != nil {
+	if err := json.Unmarshal([]byte(alerts), &body); err != nil {
 		t.Fatal(err)
 	}
 	if body.Items == nil {
-		t.Fatalf("business context must serialize an empty items array, got %s", context)
+		t.Fatalf("alerts must serialize an empty items array, got %s", alerts)
 	}
 }

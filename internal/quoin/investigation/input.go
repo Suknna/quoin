@@ -18,7 +18,6 @@ import (
 	"strings"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
-	"github.com/Suknna/quoin/internal/quoin/config"
 )
 
 // Input is the rendered investigation_v1 snapshot: the active-branch
@@ -26,19 +25,18 @@ import (
 // chat contract (ARCH-AGENT-003: the worker renders these values, never
 // selects them).
 type Input struct {
-	Messages        []MessageInput           `json:"messages"`
-	Sources         []RenderedSource         `json:"sources"`
-	BusinessContext *RenderedBusinessContext `json:"businessContext,omitempty"`
+	Messages []MessageInput   `json:"messages"`
+	Sources  []RenderedSource `json:"sources"`
 	// Integrations is the frozen source-level authority (ADR-0004): the
-	// admin-enabled integrations at creation, rendered exactly when the
-	// attempt has no business context. The declaration view narrows; this
-	// list is the whole read-only scope.
+	// admin-enabled integrations at creation. This list is the whole
+	// read-only scope（business_context 已随 ADR-0012 退役删除）.
 	Integrations []RenderedIntegration `json:"integrations,omitempty"`
-	// RecentOccurrences is Quoin's own recent alert history (renderer v3):
-	// resolved occurrences disappear from instant ALERTS queries, so the
-	// prompt context must carry them for "summarize current alerts" work.
-	// Only immutable occurrence facts render — state/resolvedAt may still
-	// change after the freeze, which would break digest reproduction.
+	// RecentOccurrences is the session's correlated-view alert history
+	// (renderer v5, ADR-0012): alerts sharing a frozen correlation view or
+	// the source of one of the investigation's occurrence sources, inside
+	// the initial-analysis 24h window. Only immutable occurrence facts
+	// render — state/resolvedAt may still change after the freeze, which
+	// would break digest reproduction.
 	RecentOccurrences []RenderedRecentOccurrence `json:"recentOccurrences,omitempty"`
 	ModelContract     ModelContract              `json:"modelContract"`
 	// ToolCatalog is the attempt's frozen model tool catalog (ADR-0004);
@@ -55,20 +53,15 @@ type RenderedIntegration struct {
 }
 
 // RenderedRecentOccurrence is one frozen history occurrence rendered into
-// the investigation prompt context (immutable facts only).
+// the investigation prompt context (immutable facts only; ADR-0012 归一
+// 语义 severity/title 一并冻结渲染).
 type RenderedRecentOccurrence struct {
 	ID        string            `json:"id"`
+	Severity  string            `json:"severity"`
+	Title     string            `json:"title"`
 	SourceKey string            `json:"sourceKey"`
 	StartsAt  string            `json:"startsAt"`
 	Labels    map[string]string `json:"labels"`
-}
-
-// RenderedBusinessContext exposes the frozen declaration's resource choices;
-// credentials, connection routing and mandatory labels remain in Quoin.
-type RenderedBusinessContext struct {
-	SystemKey       string                      `json:"systemKey"`
-	ConfigVersionID string                      `json:"configVersionId"`
-	Resources       []config.ResourceProjection `json:"resources"`
 }
 
 // MessageInput is one active-branch message of the turn; user messages
@@ -149,11 +142,26 @@ func attachInputAttachments(ctx context.Context, queries queryer, messages []Mes
 	return rows.Err()
 }
 
+// occurrenceSourceContext 是 occurrence 来源的冻结上下文（ADR-0012 增强）：
+// 归一语义（severity/title/resource）、规范 annotations、首观测富化终值与
+// 视图关联快照一并渲染，模型不再从 labels 反推。全部为不可变事实（state 活读
+// 会破坏 digest 复现，保持排除）。
 type occurrenceSourceContext struct {
-	ID          string            `json:"id"`
-	FirstSeenAt string            `json:"firstSeenAt"`
-	Labels      map[string]string `json:"labels"`
-	Annotations map[string]string `json:"annotations,omitempty"`
+	ID           string                `json:"id"`
+	Severity     string                `json:"severity"`
+	Title        string                `json:"title"`
+	Resource     string                `json:"resource,omitempty"`
+	FirstSeenAt  string                `json:"firstSeenAt"`
+	Labels       map[string]string     `json:"labels"`
+	Annotations  map[string]string     `json:"annotations,omitempty"`
+	Enrichment   map[string]string     `json:"enrichment,omitempty"`
+	Correlations []RenderedCorrelation `json:"correlations,omitempty"`
+}
+
+// RenderedCorrelation 是来源 occurrence 首观测冻结的视图关联快照。
+type RenderedCorrelation struct {
+	ViewKey     string `json:"viewKey"`
+	DisplayName string `json:"displayName"`
 }
 
 type analysisSourceContext struct {
@@ -192,16 +200,15 @@ type provider struct {
 // grant. The dispatch path verifies the digest against the snapshot row,
 // so any drift here fails dispatch instead of silently diverging. The
 // frozen tool catalog is read from the stored column, never re-derived
-// from current enablement.
+// from current enablement. ADR-0012 首发收敛：无历史 renderer 分叉，
+// business_context 谱系已随整域退役删除。
 func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]byte, error) {
 	var investigationID, probeResultID int64
-	var rendererVersion string
 	err := service.runner.Reader().QueryRowContext(ctx, `
-		SELECT a.scope_id, g.qualified_probe_result_id, s.renderer_version
+		SELECT a.scope_id, g.qualified_probe_result_id
 		FROM execution_attempts a
 		JOIN attempt_connection_grants g ON g.attempt_id=a.id AND g.purpose='chat_model'
-		JOIN attempt_input_snapshots s ON s.attempt_id=a.id
-		WHERE a.id=? AND a.attempt_type='investigation'`, attemptID).Scan(&investigationID, &probeResultID, &rendererVersion)
+		WHERE a.id=? AND a.attempt_type='investigation'`, attemptID).Scan(&investigationID, &probeResultID)
 	if err != nil {
 		return nil, fmt.Errorf("attempt %d investigation binding missing: %w", attemptID, err)
 	}
@@ -209,34 +216,19 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 	if err != nil {
 		return nil, err
 	}
-	businessContext, err := businessContextForAttempt(ctx, service.runner.Reader(), attemptID)
-	if err != nil {
-		return nil, err
-	}
 	toolCatalog, err := attempt.FrozenToolCatalogDoc(ctx, service.runner.Reader(), attemptID)
 	if err != nil {
 		return nil, err
 	}
-	// Renderer v2 renders the frozen integrations — the source-level
-	// authority of every new attempt (ADR-0004). v3 additionally renders
-	// Quoin's recent alert history frozen as lineage items. v1/v2 snapshots
-	// keep their exact historical bytes; old attempts are never
-	// re-interpreted.
-	var integrations []RenderedIntegration
-	if rendererVersion != "investigation-renderer-v1" {
-		integrations, err = frozenIntegrations(ctx, service.runner.Reader(), attemptID)
-		if err != nil {
-			return nil, err
-		}
+	integrations, err := frozenIntegrations(ctx, service.runner.Reader(), attemptID)
+	if err != nil {
+		return nil, err
 	}
-	var history []RenderedRecentOccurrence
-	if rendererVersion == RendererVersion {
-		history, err = frozenRecentOccurrences(ctx, service.runner.Reader(), attemptID)
-		if err != nil {
-			return nil, err
-		}
+	history, err := frozenRecentOccurrences(ctx, service.runner.Reader(), attemptID)
+	if err != nil {
+		return nil, err
 	}
-	return service.rebuildFor(ctx, service.runner.Reader(), investigationID, cutoffSeq, businessContext, integrations, history, probeResultID, toolCatalog)
+	return service.rebuildFor(ctx, service.runner.Reader(), investigationID, cutoffSeq, integrations, history, probeResultID, toolCatalog)
 }
 
 // frozenIntegrations reconstructs the frozen source-level authority from the
@@ -271,10 +263,10 @@ func frozenIntegrations(ctx context.Context, queries queryer, attemptID int64) (
 // frozenRecentOccurrences reconstructs the frozen alert-history lineage:
 // the occurrences frozen into the snapshot at creation, read back through
 // the immutable lineage so later occurrence state changes cannot drift the
-// digest.
+// digest. Only immutable facts render (severity/title/startsAt/labels).
 func frozenRecentOccurrences(ctx context.Context, queries queryer, attemptID int64) ([]RenderedRecentOccurrence, error) {
 	rows, err := queries.QueryContext(ctx, `
-		SELECT o.id, src.source_key, o.starts_at, o.labels_canonical
+		SELECT o.id, src.source_key, o.starts_at, o.labels_canonical, o.severity, o.title
 		FROM attempt_input_snapshots snapshot
 		JOIN attempt_input_items item ON item.snapshot_id=snapshot.id
 			AND item.item_role='history_occurrence' AND item.occurrence_id IS NOT NULL
@@ -291,7 +283,7 @@ func frozenRecentOccurrences(ctx context.Context, queries queryer, attemptID int
 		var id int64
 		var labelsJSON string
 		var occurrence RenderedRecentOccurrence
-		if err := rows.Scan(&id, &occurrence.SourceKey, &occurrence.StartsAt, &labelsJSON); err != nil {
+		if err := rows.Scan(&id, &occurrence.SourceKey, &occurrence.StartsAt, &labelsJSON, &occurrence.Severity, &occurrence.Title); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(labelsJSON), &occurrence.Labels); err != nil {
@@ -337,7 +329,7 @@ func attemptUserMessage(ctx context.Context, queries queryer, attemptID int64) (
 // investigation's durable rows; the message set freezes at the turn's
 // cutoff seq (create/send/retry pass their own user message, dispatch
 // rebuilds resolve it through attemptUserMessage).
-func (service *Service) rebuildFor(ctx context.Context, queries queryer, investigationID, cutoffSeq int64, businessContext *frozenBusinessContext, integrations []RenderedIntegration, history []RenderedRecentOccurrence, probeResultID int64, toolCatalog *attempt.FrozenCatalog) ([]byte, error) {
+func (service *Service) rebuildFor(ctx context.Context, queries queryer, investigationID, cutoffSeq int64, integrations []RenderedIntegration, history []RenderedRecentOccurrence, probeResultID int64, toolCatalog *attempt.FrozenCatalog) ([]byte, error) {
 	var input Input
 	rows, err := queries.QueryContext(ctx, `
 		SELECT id, role, content FROM investigation_messages
@@ -373,13 +365,6 @@ func (service *Service) rebuildFor(ctx context.Context, queries queryer, investi
 		return nil, err
 	}
 	input.Sources = sources
-	if businessContext != nil {
-		input.BusinessContext = &RenderedBusinessContext{
-			SystemKey:       businessContext.SystemKey,
-			ConfigVersionID: strconv.FormatInt(businessContext.ConfigVersionID, 10),
-			Resources:       append([]config.ResourceProjection(nil), businessContext.Resources...),
-		}
-	}
 	input.Integrations = integrations
 	input.RecentOccurrences = history
 	contract := ModelContract{}
@@ -447,14 +432,55 @@ func (service *Service) renderSources(ctx context.Context, queries queryer, inve
 
 func (service *Service) renderOccurrenceSource(ctx context.Context, queries queryer, occurrenceID int64) (RenderedSource, error) {
 	var context occurrenceSourceContext
-	var labelsJSON string
+	var labelsJSON, annotationsJSON string
 	if err := queries.QueryRowContext(ctx, `
-		SELECT first_seen_at, labels_canonical FROM alert_occurrences WHERE id=?`, occurrenceID).
-		Scan(&context.FirstSeenAt, &labelsJSON); err != nil {
+		SELECT first_seen_at, labels_canonical, severity, title, annotations_canonical, resource
+		FROM alert_occurrences WHERE id=?`, occurrenceID).
+		Scan(&context.FirstSeenAt, &labelsJSON, &context.Severity, &context.Title, &annotationsJSON, &context.Resource); err != nil {
 		return RenderedSource{}, err
 	}
 	context.ID = strconv.FormatInt(occurrenceID, 10)
 	if err := json.Unmarshal([]byte(labelsJSON), &context.Labels); err != nil {
+		return RenderedSource{}, err
+	}
+	if annotationsJSON != "" && annotationsJSON != "{}" {
+		if err := json.Unmarshal([]byte(annotationsJSON), &context.Annotations); err != nil {
+			return RenderedSource{}, err
+		}
+	}
+	// 首观测富化终值与视图关联快照（均不可变，digest 可复现）。
+	var enrichmentJSON sql.NullString
+	if err := queries.QueryRowContext(ctx, `
+		SELECT enrichment_json FROM alert_enrichments WHERE occurrence_id=?`, occurrenceID).
+		Scan(&enrichmentJSON); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return RenderedSource{}, err
+	}
+	if enrichmentJSON.Valid && enrichmentJSON.String != "" {
+		var document struct {
+			Fields map[string]string `json:"fields"`
+		}
+		if err := json.Unmarshal([]byte(enrichmentJSON.String), &document); err != nil {
+			return RenderedSource{}, fmt.Errorf("decode frozen alert enrichment: %w", err)
+		}
+		if len(document.Fields) > 0 {
+			context.Enrichment = document.Fields
+		}
+	}
+	rows, err := queries.QueryContext(ctx, `
+		SELECT view_key, display_name FROM alert_occurrence_correlations
+		WHERE occurrence_id=? ORDER BY matched_at, id`, occurrenceID)
+	if err != nil {
+		return RenderedSource{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var correlation RenderedCorrelation
+		if err := rows.Scan(&correlation.ViewKey, &correlation.DisplayName); err != nil {
+			return RenderedSource{}, err
+		}
+		context.Correlations = append(context.Correlations, correlation)
+	}
+	if err := rows.Err(); err != nil {
 		return RenderedSource{}, err
 	}
 	encoded, err := json.Marshal(context)

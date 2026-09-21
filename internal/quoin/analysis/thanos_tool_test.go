@@ -232,15 +232,11 @@ func TestThanosGrantFreezesInToolCallTransaction(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM tool_call_connection_grants WHERE tool_call_id=? AND connection_grant_id=?`, authorization.ToolCallID, authorization.Grants[0].GrantID).Scan(&bindings); err != nil || bindings != 1 {
 		t.Fatalf("bindings=%d err=%v", bindings, err)
 	}
-	// ADR-0004: thanos_query grants never carry a business system; authority
-	// is the frozen metrics_source connection only.
-	var grantedBusiness sql.NullInt64
+	// ADR-0004: thanos_query grants freeze on the frozen metrics_source
+	// connection only; the business_system authorization column is retired.
 	var grantedConnection int64
-	if err := db.QueryRow(`SELECT business_system_id,connection_id FROM attempt_connection_grants WHERE id=?`, authorization.Grants[0].GrantID).Scan(&grantedBusiness, &grantedConnection); err != nil {
+	if err := db.QueryRow(`SELECT connection_id FROM attempt_connection_grants WHERE id=?`, authorization.Grants[0].GrantID).Scan(&grantedConnection); err != nil {
 		t.Fatal(err)
-	}
-	if grantedBusiness.Valid {
-		t.Fatalf("grant carries a business system: %d", grantedBusiness.Int64)
 	}
 	expectedConnection, _, _ := seedThanosChain(t, db)
 	if grantedConnection != expectedConnection {
@@ -320,51 +316,27 @@ func TestThanosToolRejectedWithoutAuthorizationTarget(t *testing.T) {
 	}
 }
 
-// TestThanosBeginToolCallExecutionFence proves the execution authorization
-// re-reads the connection state (DATA-CONN-002): a disable committed after
-// the grant refuses BeginToolCall and the tool call stays pending.
-// TestThanosQueryUsesAnalysisSnapshotAfterNewPublish proves a new business
-// publish cannot redirect an already-created analysis to its newer connection.
-func TestThanosQueryUsesAnalysisSnapshotAfterNewPublish(t *testing.T) {
+// TestThanosQueryStaysOnFrozenSourceAfterNewEnablement proves a connection
+// enabled after the attempt was created cannot redirect its grants: authority
+// stays the metrics_source list frozen at creation (ADR-0004 来源级授权；
+// business_system 授权已随 ADR-0012 退役)。
+func TestThanosQueryStaysOnFrozenSourceAfterNewEnablement(t *testing.T) {
 	db, dbPath := newTestDB(t)
 	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
 	originalConnection, _, _ := seedThanosChain(t, db)
 	occurrenceID := seedOccurrence(t, db)
 	attemptID, callID := runThanosAttempt(t, db, service, occurrenceID, "cmd-thanos-fixed-snapshot")
+	seedAdditionalThanosChain(t, db)
 
-	var businessID, oldVersionID, contractID int64
-	var systemKey, displayName string
-	if err := db.QueryRow(`
-		SELECT occurrence.business_system_id, config.id, config.label_contract_version_id, config.system_key, config.display_name
-		FROM alert_occurrences occurrence
-		JOIN business_systems business ON business.id=occurrence.business_system_id
-		JOIN business_system_config_versions config ON config.id=business.current_config_version_id
-		WHERE occurrence.id=?`, occurrenceID).Scan(&businessID, &oldVersionID, &contractID, &systemKey, &displayName); err != nil {
-		t.Fatal(err)
-	}
-	newConnection := seedAdditionalThanosChain(t, db)
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	declaration, err := json.Marshal(map[string]any{"systemKey": systemKey, "displayName": displayName, "MetricsConnectionID": newConnection, "resources": []any{map[string]any{"name": "default", "displayName": "Default", "matchLabels": map[string]string{"business_system": systemKey}, "discoveryMetric": "up", "identityLabels": []string{"instance"}, "allowedMetrics": []string{"up"}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	draft, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,2,'draft','fixture','fixture','v1',?,?,?,?,?,?,?,1,'UTC')`, businessID, contractID, string(declaration), strings.Repeat("d", 64), now, systemKey, displayName, newConnection)
-	if err != nil {
-		t.Fatal(err)
-	}
-	newVersionID, _ := draft.LastInsertId()
-	if _, err := db.Exec(`UPDATE business_systems SET current_config_version_id=?,display_name=?,enabled=1,timezone='UTC',row_version=row_version+1 WHERE id=?`, newVersionID, displayName, businessID); err != nil {
-		t.Fatal(err)
-	}
 	authorization := completeThanosProposal(t, service, attemptID, callID)
 	var grantedConnection int64
 	if err := db.QueryRow(`SELECT connection_id FROM attempt_connection_grants WHERE id=?`, authorization.Grants[0].GrantID).Scan(&grantedConnection); err != nil || grantedConnection != originalConnection {
 		t.Fatalf("grant connection=%d, want frozen original=%d (err=%v)", grantedConnection, originalConnection, err)
 	}
-	var snapshotVersion int64
-	if err := db.QueryRow(`SELECT business_system_config_version_id FROM attempt_input_items WHERE snapshot_id=(SELECT id FROM attempt_input_snapshots WHERE attempt_id=?) AND business_system_config_version_id IS NOT NULL`, attemptID).Scan(&snapshotVersion); err != nil || snapshotVersion != oldVersionID {
-		t.Fatalf("snapshot version=%d, want original=%d (err=%v)", snapshotVersion, oldVersionID, err)
+	var frozenSources int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM attempt_input_items i JOIN attempt_input_snapshots s ON s.id=i.snapshot_id WHERE s.attempt_id=? AND i.item_role='metrics_source'`, attemptID).Scan(&frozenSources); err != nil || frozenSources != 1 {
+		t.Fatalf("frozen metrics sources=%d, want the single creation-time source (err=%v)", frozenSources, err)
 	}
 }
 

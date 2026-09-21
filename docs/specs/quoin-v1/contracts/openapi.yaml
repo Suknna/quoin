@@ -203,37 +203,6 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
       summary: 更新独立巡检计划
-  /api/v1/business-context:
-    get:
-      tags:
-      - config
-      summary: 当前用户可用的业务上下文（已发布配置的业务系统键与名称）
-      operationId: listBusinessContext
-      security:
-      - sessionCookie: []
-      responses:
-        '200':
-          description: 业务上下文条目（无业务系统时为空数组）
-          headers:
-            Cache-Control:
-              schema:
-                type: string
-                const: no-store
-          content:
-            application/json:
-              schema:
-                type: object
-                required:
-                - items
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/BusinessContextItem'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          description: 读取失败（problem 详情）
   /api/v1/business-views:
     get:
       tags:
@@ -348,6 +317,120 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
       summary: 更新业务视图
+  /api/v1/enrichment-rules:
+    get:
+      tags:
+      - adminops
+      operationId: listEnrichmentRules
+      responses:
+        '200':
+          description: 实际持久化的结果。
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - items
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EnrichmentRule'
+                  nextCursor:
+                    $ref: '#/components/schemas/Cursor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      summary: 富化规则列表（ADR-0012）
+    post:
+      tags:
+      - adminops
+      operationId: createEnrichmentRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrichmentRuleInput'
+      responses:
+        '201':
+          description: 实际持久化的结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrichmentRule'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      summary: 创建富化规则
+  /api/v1/enrichment-rules/{ruleKey}:
+    parameters:
+    - name: ruleKey
+      in: path
+      required: true
+      schema:
+        type: string
+    get:
+      tags:
+      - adminops
+      operationId: getEnrichmentRule
+      responses:
+        '200':
+          description: 实际持久化的结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrichmentRule'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      summary: 读取富化规则
+    put:
+      tags:
+      - adminops
+      operationId: updateEnrichmentRule
+      description: 更新必须携带 expectedRowVersion 和 clientCommandId；ruleKey 由路径唯一携带，请求体不重复。规则永不删除——退役 = enabled=0，key 不复用；更新不回写任何已冻结的首观测富化文档。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateEnrichmentRuleRequest'
+      responses:
+        '200':
+          description: 实际持久化的结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrichmentRule'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      summary: 更新富化规则
   /api/v1/auth/login:
     post:
       tags: [auth]
@@ -1139,13 +1222,9 @@ paths:
           schema:
             type: string
             enum: [Firing, Resolved]
-        - name: businessSystemKey
-          in: query
-          schema:
-            $ref: '#/components/schemas/StableKey'
         - name: viewKey
           in: query
-          description: 按冻结的业务视图归属过滤（ADR-0008）；设置后平台内部故障不并入列表。
+          description: 按冻结的视图关联过滤（ADR-0012）：occurrence 命中该视图的任一冻结关联行即入选；设置后平台内部故障不并入列表。
           schema:
             $ref: '#/components/schemas/StableKey'
         - $ref: '#/components/parameters/Cursor'
@@ -4173,18 +4252,6 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorModel'
   schemas:
-    BusinessContextItem:
-      type: object
-      required:
-      - key
-      - displayName
-      properties:
-        key:
-          type: string
-          description: 业务系统键
-        displayName:
-          type: string
-          description: 展示名
     PluginInspectionScope:
       oneOf:
       - type: object
@@ -4462,6 +4529,143 @@ components:
               description: 显式参与告警归属的 Alertmanager 告警源 key（ADR-0008）；非空时必须至少一个标签条件。
               items:
                 $ref: '#/components/schemas/StableKey'
+        clientCommandId:
+          type: string
+          minLength: 8
+          maxLength: 128
+        expectedRowVersion:
+          type: integer
+          minimum: 1
+    EnrichmentRule:
+      type: object
+      required:
+      - ruleKey
+      - displayName
+      - description
+      - enabled
+      - labelConditions
+      - alertSourceKeys
+      - outputs
+      - priority
+      - rowVersion
+      - createdAt
+      - updatedAt
+      properties:
+        ruleKey:
+          $ref: '#/components/schemas/StableKey'
+          description: 退役不复用；不可改写、行不可删除（退役 = enabled=0）。
+        displayName:
+          type: string
+        description:
+          type: string
+        enabled:
+          type: boolean
+          description: false = 规则停用（不参与首观测富化求值），即退役形态。
+        labelConditions:
+          type: object
+          additionalProperties:
+            type: string
+          description: 精确 label=value 匹配条件（与业务视图同语义）；空对象 = 全局规则，命中一切。
+        alertSourceKeys:
+          type: array
+          description: 规则适用的告警源 key（必须存在且启用）；空数组 = 不限来源。
+          items:
+            $ref: '#/components/schemas/StableKey'
+        outputs:
+          type: object
+          additionalProperties:
+            type: string
+          description: 命中时叠加的富化字段；按规则 priority 升序叠加，后命中不覆盖已写字段。
+        priority:
+          type: integer
+          minimum: 1
+          description: 叠加序（升序先生效）；缺省 100。
+        rowVersion:
+          type: integer
+          minimum: 1
+        createdAt:
+          $ref: '#/components/schemas/Timestamp'
+        updatedAt:
+          $ref: '#/components/schemas/Timestamp'
+    EnrichmentRuleInput:
+      type: object
+      additionalProperties: false
+      required:
+      - ruleKey
+      - displayName
+      - description
+      - enabled
+      - labelConditions
+      - outputs
+      - clientCommandId
+      properties:
+        ruleKey:
+          $ref: '#/components/schemas/StableKey'
+        displayName:
+          type: string
+        description:
+          type: string
+        enabled:
+          type: boolean
+        labelConditions:
+          type: object
+          additionalProperties:
+            type: string
+        alertSourceKeys:
+          type: array
+          description: 引用的告警源必须存在且启用；自动去重并按稳定序存储。
+          items:
+            $ref: '#/components/schemas/StableKey'
+        outputs:
+          type: object
+          additionalProperties:
+            type: string
+          description: 至少一个字段，值为非空字符串。
+        priority:
+          type: integer
+          minimum: 0
+          description: 叠加序（升序先生效）；0 或缺省视为 100。
+        clientCommandId:
+          type: string
+          minLength: 8
+          maxLength: 128
+    UpdateEnrichmentRuleRequest:
+      type: object
+      additionalProperties: false
+      description: 更新富化规则的可变字段与并发前提；ruleKey 由路径唯一携带，不在此重复。
+      required:
+      - displayName
+      - description
+      - enabled
+      - labelConditions
+      - outputs
+      - clientCommandId
+      - expectedRowVersion
+      properties:
+        displayName:
+          type: string
+        description:
+          type: string
+        enabled:
+          type: boolean
+        labelConditions:
+          type: object
+          additionalProperties:
+            type: string
+        alertSourceKeys:
+          type: array
+          description: 引用的告警源必须存在且启用；空数组 = 不限来源。
+          items:
+            $ref: '#/components/schemas/StableKey'
+        outputs:
+          type: object
+          additionalProperties:
+            type: string
+          description: 至少一个字段，值为非空字符串。
+        priority:
+          type: integer
+          minimum: 0
+          description: 叠加序（升序先生效）；0 或缺省视为 100。
         clientCommandId:
           type: string
           minLength: 8
@@ -5040,7 +5244,7 @@ components:
             $ref: '#/components/schemas/RuntimeSlot'
     AlertOccurrenceSummary:
       type: object
-      required: [id, source, state, rowVersion, firstSeenAt, lastStateChangeAt, labels]
+      required: [id, source, state, rowVersion, severity, title, firstSeenAt, lastStateChangeAt, labels, correlations]
       properties:
         id:
           type: string
@@ -5059,14 +5263,16 @@ components:
         rowVersion:
           type: integer
           minimum: 1
-        businessSystemKey:
-          $ref: '#/components/schemas/StableKey'
-        attribution:
-          $ref: '#/components/schemas/AlertAttributionDiagnostic'
-          description: 首次观测时冻结的声明归属判定；不是对当前声明的重新计算。历史行专用，新 occurrence 不再写入。
-        viewAttribution:
-          $ref: '#/components/schemas/AlertViewAttributionDiagnostic'
-          description: 首次接收时冻结的业务视图归属（ADR-0008）；展示的 key/name 取自冻结候选快照，不随视图改名漂移。
+        severity:
+          type: string
+          enum: [critical, high, warning, info]
+          description: 首观测经插件 AlertNormalizer 冻结的统一严重度（ADR-0012）；平台故障按故障类别在入库侧映射。缺失/解析失败降为 info 并记 normalizer_missing 接入问题。
+        title:
+          type: string
+          description: 统一人面告警名（Alertmanager：labels.alertname）；平台故障为固定平台标题。缺省为空字符串。
+        resource:
+          type: string
+          description: 受影响对象的最佳身份（Alertmanager：labels.instance，回退 labels.job）。
         firstSeenAt:
           $ref: '#/components/schemas/Timestamp'
         lastStateChangeAt:
@@ -5081,45 +5287,41 @@ components:
           type: object
           additionalProperties:
             type: string
-    AlertAttributionDiagnostic:
+          description: 首观测冻结的规范化注释全量快照（ADR-0012 annotations_canonical）；平台故障为入库侧投影。
+        correlations:
+          type: array
+          description: 首观测时冻结的全部命中视图证据（ADR-0012，多命中全记录，替代旧唯一归属状态机）；按 matched_at 稳定序，视图改名/退役后不漂移。
+          items:
+            $ref: '#/components/schemas/AlertCorrelation'
+        enrichment:
+          $ref: '#/components/schemas/AlertEnrichment'
+          description: 首观测时冻结的富化投影（ADR-0012）；无规则命中时 fields 为空对象（与未求值区分），详情面额外携带 ruleKeys 溯源。
+    AlertCorrelation:
       type: object
       additionalProperties: false
-      required: [status, candidateSystemIdsJson, candidateConfigVersionIdsJson, reasonJson]
+      required: [viewKey, displayName]
       properties:
-        status:
-          type: string
-          enum: [attributed, unattributed, conflict]
-        candidateSystemIdsJson:
-          type: string
-          description: 冻结候选业务系统 locator 的 JSON 数组。
-        candidateConfigVersionIdsJson:
-          type: string
-          description: 冻结候选配置版本 locator 的 JSON 数组。
-        reasonJson:
-          type: string
-          description: 冻结归属诊断的 JSON 对象，至少含 code。
-    AlertViewAttributionDiagnostic:
-      type: object
-      additionalProperties: false
-      required: [status, candidatesJson, reasonJson, createdAt]
-      properties:
-        status:
-          type: string
-          enum: [attributed, ambiguous, unattributed]
         viewKey:
           $ref: '#/components/schemas/StableKey'
-          description: 唯一匹配时冻结的视图 key；来自候选快照首元素，未归属/歧义时缺省。
-        viewName:
+          description: 命中视图的冻结 key 快照。
+        displayName:
           type: string
-          description: 唯一匹配时冻结的视图显示名；来自候选快照首元素。
-        candidatesJson:
-          type: string
-          description: 冻结候选视图完整快照的 JSON 数组（viewId/viewKey/displayName/scope），唯一归属恰一元素。
-        reasonJson:
-          type: string
-          description: 冻结归属诊断的 JSON 对象，至少含 code（source_mismatch/label_mismatch/exactly_one_matching_view/multiple_matching_views）。
-        createdAt:
-          $ref: '#/components/schemas/Timestamp'
+          description: 命中视图的冻结显示名快照。
+    AlertEnrichment:
+      type: object
+      additionalProperties: false
+      required: [fields]
+      properties:
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+          description: 按规则 priority 升序叠加、后命中不覆盖已写字段的富化终值。
+        ruleKeys:
+          type: array
+          description: 命中规则的溯源 key 列表（求值序：priority 升序、同序按创建序）；仅详情面返回。
+          items:
+            type: string
     AlertOccurrenceDetail:
       allOf:
         - $ref: '#/components/schemas/AlertOccurrenceSummary'
@@ -5227,7 +5429,7 @@ components:
           $ref: '#/components/schemas/Timestamp'
         terminationReason:
           type: string
-          enum: [context_too_large, timeout, rate_limited, provider_unavailable, invalid_response, tool_error, artifact_commit_failed, artifact_body_expired, sandbox_unavailable, worker_protocol_error, cancelled, connection_disabled, business_system_disabled, lease_expired, replaced, revoked]
+          enum: [context_too_large, timeout, rate_limited, provider_unavailable, invalid_response, tool_error, artifact_commit_failed, artifact_body_expired, sandbox_unavailable, worker_protocol_error, cancelled, connection_disabled, lease_expired, replaced, revoked]
         createdAt:
           $ref: '#/components/schemas/Timestamp'
     ToolCallSummary:
@@ -5299,7 +5501,8 @@ components:
           description: 告警源的人类稳定 key；列表不得以 sourceId 作为主要识别信息。
         kind:
           type: string
-          enum: [identity_conflict, fingerprint_mismatch, delivery_truncated]
+          enum: [identity_conflict, fingerprint_mismatch, delivery_truncated, normalizer_missing]
+          description: normalizer_missing（ADR-0012）：来源协议无 AlertNormalizer 或归一化失败，首观测以缺省语义冻结；来源级问题，不指向具体条目。
         deliveryId:
           $ref: '#/components/schemas/LocatorId'
         deliveryItemId:
@@ -5473,6 +5676,13 @@ components:
             expectedHeadMessageId:
               $ref: '#/components/schemas/NullableLocatorId'
               description: 当前 head locator（DATA-INVEST-001）；Undo 撤回全部消息后可为 null，其余情况必须与当前 head 一致；head 已变化返回 409。
+            sources:
+              type: array
+              maxItems: 100
+              uniqueItems: true
+              items:
+                $ref: '#/components/schemas/InvestigationSourceInput'
+              description: ADR-0012「+ 引入告警」：随消息追加的告警来源（幂等——已链接的来源忽略）；新来源并入下一次模型输入。
     StreamRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'
@@ -5556,9 +5766,6 @@ components:
       properties:
         id:
           $ref: '#/components/schemas/LocatorId'
-        businessSystemKey:
-          description: 仅旧业务声明产生的历史 Run 保留此字段。
-          type: [string, 'null']
         connectionName:
           description: 本次执行冻结的来源接入名称。
           type: string

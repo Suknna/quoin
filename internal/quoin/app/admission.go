@@ -128,7 +128,6 @@ func accessDeclarationTable() map[string]operations.Declaration {
 	)
 
 	// 业务上下文（User）。
-	add(declaration("listBusinessContext", http.MethodGet, "/api/v1/business-context", operations.LevelFull, operations.KindQuery, "business_context"))
 
 	// 分析（User）。
 	add(
@@ -194,6 +193,14 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("createBusinessView", http.MethodPost, "/api/v1/business-views", operations.LevelAdmin, operations.KindCommand, "business_view"),
 		declaration("getBusinessView", http.MethodGet, "/api/v1/business-views/{viewKey}", operations.LevelAdmin, operations.KindQuery, "business_view"),
 		declaration("updateBusinessView", http.MethodPut, "/api/v1/business-views/{viewKey}", operations.LevelAdmin, operations.KindCommand, "business_view"),
+	)
+
+	// 富化规则（Admin，ADR-0012）。
+	add(
+		declaration("listEnrichmentRules", http.MethodGet, "/api/v1/enrichment-rules", operations.LevelAdmin, operations.KindQuery, "enrichment_rule"),
+		declaration("createEnrichmentRule", http.MethodPost, "/api/v1/enrichment-rules", operations.LevelAdmin, operations.KindCommand, "enrichment_rule"),
+		declaration("getEnrichmentRule", http.MethodGet, "/api/v1/enrichment-rules/{ruleKey}", operations.LevelAdmin, operations.KindQuery, "enrichment_rule"),
+		declaration("updateEnrichmentRule", http.MethodPut, "/api/v1/enrichment-rules/{ruleKey}", operations.LevelAdmin, operations.KindCommand, "enrichment_rule"),
 	)
 
 	// 知识与反馈（User）。

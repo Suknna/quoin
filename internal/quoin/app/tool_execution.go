@@ -167,6 +167,8 @@ func (service *RuntimeService) executeRoutedToolCall(ctx context.Context, attemp
 	var seal toolCallSeal
 	if entry, known := attempts.Catalogs.Handlers[toolName]; known {
 		seal = service.invokePluginTool(execCtx, attempts, loaded, entry)
+	} else if toolName == "alerts_recent" {
+		seal = service.invokeAlertsRecentTool(execCtx, attempts, loaded)
 	} else if toolName == "artifact_read" || toolName == "artifact_grep" {
 		seal = service.invokeArtifactTool(execCtx, loaded)
 	} else {
@@ -263,11 +265,155 @@ func (service *RuntimeService) invokePluginTool(ctx context.Context, attempts *a
 	}
 }
 
+// alertsRecentRow 是一次 alerts_recent 查询结果的单行投影（ADR-0012 归一化
+// 语义：severity/title/resource 均来自 occurrence 首观测冻结列）。
+type alertsRecentRow struct {
+	OccurrenceID int64
+	Severity     string
+	Title        string
+	State        string
+	StartedAt    string
+	Resource     string
+	ViewKeys     []string
+}
+
+// invokeAlertsRecentTool 执行平台工具 alerts_recent（ADR-0012：读 Quoin 自有
+// 告警库 = 平台工具）。只读查询走 attempt 机器注入的只读 reader（与 artifact
+// 工具同一围栏/封存路径；不包含平台故障——那只查 alert_occurrences）。
+// severity 词表排序在 SQL 里用 CASE 投影为可比较序数；viewKey 过滤按首观测
+// 冻结的关联快照命中，不回读当前视图配置。
+func (service *RuntimeService) invokeAlertsRecentTool(ctx context.Context, attempts *attempt.Service, loaded *routedToolContext) toolCallSeal {
+	var arguments map[string]any
+	if err := json.Unmarshal(loaded.arguments, &arguments); err != nil {
+		return routedFailureSeal(loaded, "invalid_arguments", "arguments unparseable: "+err.Error())
+	}
+	viewKey, _ := arguments["viewKey"].(string)
+	severityMin := "info"
+	if value, exists := arguments["severityMin"].(string); exists && value != "" {
+		severityMin = value
+	}
+	hours := 24.0
+	if value, ok := arguments["hours"].(float64); ok && value >= 1 && value <= 168 {
+		hours = value
+	}
+	limit := 10.0
+	if value, ok := arguments["limit"].(float64); ok && value >= 1 && value <= 50 {
+		limit = value
+	}
+	reader := attempts.Reader()
+	now := time.Now().UTC()
+	windowStart := now.Add(-time.Duration(hours * float64(time.Hour)))
+	rows, err := reader.QueryContext(ctx, `
+		SELECT o.id, o.severity, o.title, o.state, o.starts_at, o.resource
+		FROM alert_occurrences o
+		WHERE o.starts_at >= ?
+		  AND CASE o.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END
+		      >= CASE ? WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END
+		  AND (? = '' OR EXISTS (
+		    SELECT 1 FROM alert_occurrence_correlations c
+		    WHERE c.occurrence_id = o.id AND c.view_key = ?))
+		ORDER BY o.starts_at DESC, o.id DESC
+		LIMIT ?`, windowStart.Format(time.RFC3339Nano), severityMin, viewKey, viewKey, int64(limit))
+	if err != nil {
+		return routedFailureSeal(loaded, "alerts_recent_failed", boundedRoutedDetail(err.Error()))
+	}
+	results := make([]alertsRecentRow, 0, int(limit))
+	for rows.Next() {
+		var row alertsRecentRow
+		if err := rows.Scan(&row.OccurrenceID, &row.Severity, &row.Title, &row.State, &row.StartedAt, &row.Resource); err != nil {
+			rows.Close()
+			return routedFailureSeal(loaded, "alerts_recent_failed", boundedRoutedDetail(err.Error()))
+		}
+		results = append(results, row)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return routedFailureSeal(loaded, "alerts_recent_failed", boundedRoutedDetail(err.Error()))
+	}
+	// total 是同过滤条件下的全量命中数（不受本次 limit 截断影响）。
+	total := 0
+	if err := reader.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM alert_occurrences o
+		WHERE o.starts_at >= ?
+		  AND CASE o.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END
+		      >= CASE ? WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END
+		  AND (? = '' OR EXISTS (
+		    SELECT 1 FROM alert_occurrence_correlations c
+		    WHERE c.occurrence_id = o.id AND c.view_key = ?))`,
+		windowStart.Format(time.RFC3339Nano), severityMin, viewKey, viewKey).Scan(&total); err != nil {
+		return routedFailureSeal(loaded, "alerts_recent_failed", boundedRoutedDetail(err.Error()))
+	}
+	if err := attachAlertsRecentViewKeys(ctx, reader, results); err != nil {
+		return routedFailureSeal(loaded, "alerts_recent_failed", boundedRoutedDetail(err.Error()))
+	}
+	alerts := make([]map[string]any, 0, len(results))
+	for _, row := range results {
+		alerts = append(alerts, map[string]any{
+			"occurrenceId": strconv.FormatInt(row.OccurrenceID, 10),
+			"severity":     row.Severity,
+			"title":        row.Title,
+			"state":        row.State,
+			"startedAt":    row.StartedAt,
+			"resource":     row.Resource,
+			"viewKeys":     row.ViewKeys,
+		})
+	}
+	payload := map[string]any{
+		"alerts": alerts,
+		"total":  total,
+		"window": windowStart.Format(time.RFC3339Nano) + "/" + now.Format(time.RFC3339Nano),
+	}
+	return routedSuccessSeal(loaded, payload)
+}
+
+// attachAlertsRecentViewKeys 就地补齐每条命中告警的关联视图 key 列表
+// （按 matched_at 稳定序；无关联为空数组）。
+func attachAlertsRecentViewKeys(ctx context.Context, reader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, results []alertsRecentRow) error {
+	if len(results) == 0 {
+		return nil
+	}
+	placeholders := make([]string, 0, len(results))
+	arguments := make([]any, 0, len(results))
+	for index := range results {
+		placeholders = append(placeholders, "?")
+		arguments = append(arguments, results[index].OccurrenceID)
+	}
+	rows, err := reader.QueryContext(ctx, `
+		SELECT occurrence_id, view_key FROM alert_occurrence_correlations
+		WHERE occurrence_id IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY occurrence_id, matched_at, id`, arguments...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	byID := make(map[int64][]string, len(results))
+	for rows.Next() {
+		var occurrenceID int64
+		var viewKey string
+		if err := rows.Scan(&occurrenceID, &viewKey); err != nil {
+			return err
+		}
+		byID[occurrenceID] = append(byID[occurrenceID], viewKey)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for index := range results {
+		results[index].ViewKeys = byID[results[index].OccurrenceID]
+		if results[index].ViewKeys == nil {
+			results[index].ViewKeys = []string{}
+		}
+	}
+	return nil
+}
+
 // invokeArtifactTool 执行平台 quoin_routed 工具（artifact_read/artifact_grep）。
 // 参数/结果契约与原 Plinth 执行器一致：读取直接走进程内 ArtifactService
 // 背后的 artifact.Store（不经 gRPC 自调）。
-func (service *RuntimeService) invokeArtifactTool(ctx context.Context, loaded *routedToolContext) toolCallSeal {
-	if service.Artifacts == nil {
+func (service *RuntimeService) invokeArtifactTool(ctx context.Context, loaded *routedToolContext) toolCallSeal {	if service.Artifacts == nil {
 		return routedFailureSeal(loaded, "artifact_store_unavailable", "artifact store is not wired")
 	}
 	var arguments map[string]any

@@ -68,7 +68,7 @@ func TestSimultaneousSendsConflictDeterministically(t *testing.T) {
 		wait.Add(1)
 		go func(slot int) {
 			defer wait.Done()
-			_, err := service.Send(ctx, principalID, "cmd-race-send-"+string(rune('a'+slot)), created.InvestigationID, &head, "并发消息"+string(rune('a'+slot)), nil)
+			_, err := service.Send(ctx, principalID, "cmd-race-send-"+string(rune('a'+slot)), created.InvestigationID, &head, "并发消息"+string(rune('a'+slot)), nil, nil)
 			results[slot] = err
 		}(index)
 	}
@@ -120,14 +120,14 @@ func TestSendReplayIdempotentAcrossTargetAndHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sent, err := service.Send(ctx, principalID, "cmd-replay-send", first.InvestigationID, &head, "第二条", nil)
+	sent, err := service.Send(ctx, principalID, "cmd-replay-send", first.InvestigationID, &head, "第二条", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The head has moved past the send's own fence; the replay still
 	// returns the original message (HTTP-COMMAND-007: the command key
 	// lookup precedes any version/head premise).
-	replayed, err := service.Send(ctx, principalID, "cmd-replay-send", first.InvestigationID, &head, "第二条", nil)
+	replayed, err := service.Send(ctx, principalID, "cmd-replay-send", first.InvestigationID, &head, "第二条", nil, nil)
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestSendReplayIdempotentAcrossTargetAndHead(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := service.Send(ctx, principalID, "cmd-replay-send", other.InvestigationID, &otherHead, "第二条", nil); !errors.Is(err, ErrCommandReused) {
+	if _, err := service.Send(ctx, principalID, "cmd-replay-send", other.InvestigationID, &otherHead, "第二条", nil, nil); !errors.Is(err, ErrCommandReused) {
 		t.Fatalf("cross-target replay err=%v want ErrCommandReused", err)
 	}
 }
@@ -212,7 +212,7 @@ func TestUndoWithdrawsLatestTurnAndCancelsQueuedAttempt(t *testing.T) {
 	// New messages continue from the withdrawn head: the explicit null
 	// fence (HTTP-COMMAND-002), and the withdrawn message never re-enters
 	// the new attempt's input snapshot.
-	resent, err := service.Send(ctx, principalID, "cmd-undo-resend", created.InvestigationID, nil, "重新表述的消息", nil)
+	resent, err := service.Send(ctx, principalID, "cmd-undo-resend", created.InvestigationID, nil, "重新表述的消息", nil, nil)
 	if err != nil {
 		t.Fatalf("resend after full withdrawal: %v", err)
 	}
@@ -553,7 +553,7 @@ func TestRetryGuardsAndReanswer(t *testing.T) {
 
 	// Retry with an active attempt conflicts (one active attempt per
 	// investigation, DATA-INVEST-003).
-	active, err := service.Send(ctx, principalID, "cmd-retry-next", created.InvestigationID, &head, "下一轮", nil)
+	active, err := service.Send(ctx, principalID, "cmd-retry-next", created.InvestigationID, &head, "下一轮", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

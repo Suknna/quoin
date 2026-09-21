@@ -283,12 +283,12 @@ func TestSourceInvestigationThanosGrantResolvesBySourceRef(t *testing.T) {
 		t.Fatalf("resolution=%+v, want one grant", resolution)
 	}
 	var purpose string
-	var grantedConnection, grantedBusiness sql.NullInt64
-	if err := db.QueryRow(`SELECT purpose,connection_id,business_system_id FROM attempt_connection_grants WHERE id=?`, resolution.Grants[0].GrantID).Scan(&purpose, &grantedConnection, &grantedBusiness); err != nil {
+	var grantedConnection int64
+	if err := db.QueryRow(`SELECT purpose,connection_id FROM attempt_connection_grants WHERE id=?`, resolution.Grants[0].GrantID).Scan(&purpose, &grantedConnection); err != nil {
 		t.Fatal(err)
 	}
-	if purpose != thanos.QueryToolPurpose || grantedConnection.Int64 != connectionID || grantedBusiness.Valid {
-		t.Fatalf("grant purpose=%s connection=%v business=%v", purpose, grantedConnection, grantedBusiness)
+	if purpose != thanos.QueryToolPurpose || grantedConnection != connectionID {
+		t.Fatalf("grant purpose=%s connection=%v", purpose, grantedConnection)
 	}
 	var executionJSON string
 	if err := db.QueryRow(`SELECT arguments_json FROM tool_call_execution_inputs WHERE tool_call_id=?`, toolCallID).Scan(&executionJSON); err != nil {

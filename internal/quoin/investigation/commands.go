@@ -3,12 +3,13 @@ package investigation
 // Create/Send commands (DATA-INVEST-001): both freeze the input, create
 // the Execution Attempt and append the user message in one runner-owned
 // transaction that also persists the durable command ledger row and the
-// automatic audit event. Create also atomically creates the Investigation and
-// its immutable provenance links — the "新建" UI opens only client-side blank
-// input and no empty Investigation is ever persisted. A replayed client
-// command returns its original result from the persisted ledger; a reused
-// command id with a different request digest conflicts (HTTP-COMMAND-003) —
-// the in-process replay table is gone.
+// automatic audit event. Create atomically creates the Investigation and
+// its provenance links; Send appends both the turn and any newly
+// introduced alert sources（ADR-0012「+ 引入告警」幂等追加）. The "新建" UI
+// opens only client-side blank input and no empty Investigation is ever
+// persisted. A replayed client command returns its original result from the
+// persisted ledger; a reused command id with a different request digest
+// conflicts (HTTP-COMMAND-003) — the in-process replay table is gone.
 
 import (
 	"context"
@@ -40,28 +41,20 @@ const activeAttemptStates = "('Queued','Assigned','Running','Cancelling')"
 // and the first attempt in one transaction (DATA-INVEST-001). A replayed
 // client command returns its original result; a reused command id with a
 // different request digest conflicts (HTTP-COMMAND-003).
-// Create preserves the source-only command surface for internal callers. Direct
-// chat callers that deliberately bind a published business system use
-// CreateWithBusinessSystem below.
+// Create renders the input snapshot, creates the Investigation, its
+// sources, the first user message (with its ordered attachment references)
+// and the first attempt in one transaction (DATA-INVEST-001). A replayed
+// client command returns its original result; a reused command id with a
+// different request digest conflicts (HTTP-COMMAND-003). ADR-0012 首发收敛：
+// businessSystemKey 直连通道已随 business_systems 域退役删除。
 func (service *Service) Create(ctx context.Context, principalID int64, clientCommandID, content string, attachmentIDs []int64, sources []SourceInput) (CreateResult, error) {
-	return service.create(ctx, principalID, clientCommandID, content, attachmentIDs, sources, "")
-}
-
-// CreateWithBusinessSystem creates a direct chat with an explicit system key.
-// The key is resolved to immutable published configuration/contract references
-// in the same transaction; user prompt text never participates in authority.
-func (service *Service) CreateWithBusinessSystem(ctx context.Context, principalID int64, clientCommandID, content string, attachmentIDs []int64, sources []SourceInput, businessSystemKey string) (CreateResult, error) {
-	return service.create(ctx, principalID, clientCommandID, content, attachmentIDs, sources, businessSystemKey)
-}
-
-func (service *Service) create(ctx context.Context, principalID int64, clientCommandID, content string, attachmentIDs []int64, sources []SourceInput, businessSystemKey string) (CreateResult, error) {
 	if err := validateMessage(content, len(attachmentIDs)); err != nil {
 		return CreateResult{}, err
 	}
 	if err := validateAttachmentIDs(attachmentIDs); err != nil {
 		return CreateResult{}, err
 	}
-	digest := commandDigest("create:"+businessSystemKey, content, nil, attachmentIDs, sources)
+	digest := commandDigest("create:", content, nil, attachmentIDs, sources)
 	outcome, err := execution.Run(ctx, service.runner, service.opCreate, execution.Command{
 		PrincipalType:   string(execution.PrincipalUser),
 		PrincipalID:     principalID,
@@ -73,10 +66,6 @@ func (service *Service) create(ctx context.Context, principalID int64, clientCom
 			return CreateResult{}, execution.Changed, err
 		}
 		attachments, err := service.resolveAttachments(ctx, tx, principalID, attachmentIDs)
-		if err != nil {
-			return CreateResult{}, execution.Changed, err
-		}
-		businessContext, err := resolveBusinessContext(ctx, tx, businessSystemKey)
 		if err != nil {
 			return CreateResult{}, execution.Changed, err
 		}
@@ -93,7 +82,7 @@ func (service *Service) create(ctx context.Context, principalID int64, clientCom
 		if err := insertSources(ctx, tx, investigationID, principalID, sources, now); err != nil {
 			return CreateResult{}, execution.Changed, err
 		}
-		messageID, attemptID, err := service.insertTurn(ctx, tx, investigationID, principalID, clientCommandID, content, attachments, businessContext, selected, now)
+		messageID, attemptID, err := service.insertTurn(ctx, tx, investigationID, principalID, clientCommandID, content, attachments, selected, now)
 		if err != nil {
 			return CreateResult{}, execution.Changed, err
 		}
@@ -110,15 +99,17 @@ func (service *Service) create(ctx context.Context, principalID int64, clientCom
 // attachment references) and moving the head (DATA-INVEST-001), with the
 // command ledger row and the automatic audit event in the same commit. The
 // expected head fences concurrent writers; the one active attempt invariant
-// rejects sends while a model attempt runs (DATA-INVEST-003).
-func (service *Service) Send(ctx context.Context, principalID int64, clientCommandID string, investigationID int64, expectedHead *int64, content string, attachmentIDs []int64) (SendResult, error) {
+// rejects sends while a model attempt runs (DATA-INVEST-003). ADR-0012
+// 「+ 引入告警」：sources 随消息追加来源链接（部分唯一索引幂等，已存在则
+// 忽略），新来源并入下一次模型输入。
+func (service *Service) Send(ctx context.Context, principalID int64, clientCommandID string, investigationID int64, expectedHead *int64, content string, attachmentIDs []int64, sources []SourceInput) (SendResult, error) {
 	if err := validateMessage(content, len(attachmentIDs)); err != nil {
 		return SendResult{}, err
 	}
 	if err := validateAttachmentIDs(attachmentIDs); err != nil {
 		return SendResult{}, err
 	}
-	digest := commandDigest("send:"+strconv.FormatInt(investigationID, 10), content, expectedHead, attachmentIDs, nil)
+	digest := commandDigest("send:"+strconv.FormatInt(investigationID, 10), content, expectedHead, attachmentIDs, sources)
 	outcome, err := execution.Run(ctx, service.runner, service.opSend, execution.Command{
 		PrincipalType:   string(execution.PrincipalUser),
 		PrincipalID:     principalID,
@@ -159,12 +150,11 @@ func (service *Service) Send(ctx context.Context, principalID int64, clientComma
 		if err != nil {
 			return SendResult{}, execution.Changed, err
 		}
-		businessContext, err := businessContextForInvestigation(ctx, tx, investigationID)
-		if err != nil {
+		now := service.nowText()
+		if err := insertSources(ctx, tx, investigationID, principalID, sources, now); err != nil {
 			return SendResult{}, execution.Changed, err
 		}
-		now := service.nowText()
-		messageID, attemptID, err := service.insertTurn(ctx, tx, investigationID, principalID, clientCommandID, content, attachments, businessContext, selected, now)
+		messageID, attemptID, err := service.insertTurn(ctx, tx, investigationID, principalID, clientCommandID, content, attachments, selected, now)
 		if err != nil {
 			return SendResult{}, execution.Changed, err
 		}
@@ -198,7 +188,7 @@ func headMatches(current sql.NullInt64, expected *int64) bool {
 // attempt row, the user message with its ordered attachment references
 // and the head move, then the frozen input snapshot and grants
 // (DATA-INVEST-001, DATA-ATTACH-001).
-func (service *Service) insertTurn(ctx context.Context, tx writer, investigationID, principalID int64, clientCommandID, content string, attachments []resolvedAttachment, businessContext *frozenBusinessContext, selected provider, now string) (int64, int64, error) {
+func (service *Service) insertTurn(ctx context.Context, tx writer, investigationID, principalID int64, clientCommandID, content string, attachments []resolvedAttachment, selected provider, now string) (int64, int64, error) {
 	// CreateOn centrally persists the command's correlation metadata onto
 	// the new attempt in this same transaction (ADR-0006); a context
 	// without execution metadata fails the creation.
@@ -235,7 +225,7 @@ func (service *Service) insertTurn(ctx context.Context, tx writer, investigation
 		UPDATE investigations SET current_head_message_id=? WHERE id=?`, messageID, investigationID); err != nil {
 		return 0, 0, err
 	}
-	if err := service.freezeInputSnapshot(ctx, tx, investigationID, attemptID, messageID, attachments, businessContext, selected, now); err != nil {
+	if err := service.freezeInputSnapshot(ctx, tx, investigationID, attemptID, messageID, attachments, selected, now); err != nil {
 		return 0, 0, err
 	}
 	return messageID, attemptID, nil
@@ -251,7 +241,7 @@ func (service *Service) insertTurn(ctx context.Context, tx writer, investigation
 // message this attempt answers — the newly created attempt of a retry
 // owns no message row of its own, so the cutoff cannot be derived from
 // the attempt at freeze time.
-func (service *Service) freezeInputSnapshot(ctx context.Context, tx writer, investigationID, attemptID, turnMessageID int64, attachments []resolvedAttachment, businessContext *frozenBusinessContext, selected provider, now string) error {
+func (service *Service) freezeInputSnapshot(ctx context.Context, tx writer, investigationID, attemptID, turnMessageID int64, attachments []resolvedAttachment, selected provider, now string) error {
 	var cutoffSeq int64
 	if err := tx.QueryRowContext(ctx, `
 		SELECT seq FROM investigation_messages WHERE id=? AND investigation_id=?`, turnMessageID, investigationID).Scan(&cutoffSeq); err != nil {
@@ -266,20 +256,19 @@ func (service *Service) freezeInputSnapshot(ctx context.Context, tx writer, inve
 	}
 	// ADR-0004: the enabled integrations are ALWAYS the attempt's source-
 	// level authority — frozen as grant-eligible input items and rendered so
-	// the model can name sourceRef. An explicit business key only adds
-	// descriptive context; it can never grant or scope new work.
+	// the model can name sourceRef.
 	integrations, err := enabledIntegrations(ctx, tx)
 	if err != nil {
 		return err
 	}
-	// Renderer v3: freeze Quoin's own recent alert history into the input.
-	// Resolved occurrences vanish from instant ALERTS queries, so the model
-	// must see the platform's record; the lineage keeps the digest stable.
-	history, err := recentOccurrenceHistory(ctx, tx)
+	// Renderer v5（ADR-0012）：近期告警记录按「会话来源告警的关联视图」圈定
+	// ——各来源 occurrence 首观测冻结的关联视图命中或同窗口的其它告警；无关联
+	// 视图的会话为空。lineage 冻结集合，digest 可重建。
+	history, err := correlatedRecentOccurrences(ctx, tx, investigationID)
 	if err != nil {
 		return err
 	}
-	canonical, err := service.rebuildFor(ctx, tx, investigationID, cutoffSeq, businessContext, integrations, history, selected.ProbeResultID, catalog)
+	canonical, err := service.rebuildFor(ctx, tx, investigationID, cutoffSeq, integrations, history, selected.ProbeResultID, catalog)
 	if err != nil {
 		return err
 	}
@@ -312,14 +301,6 @@ func (service *Service) freezeInputSnapshot(ctx context.Context, tx writer, inve
 			VALUES(?,?,?,?,?)`, snapshotID, itemCount, "history_occurrence", hex.EncodeToString(itemDigest[:]), occurrenceID); err != nil {
 			return err
 		}
-	}
-	if businessContext != nil {
-		// The declaration pair is frozen as descriptive context only; later
-		// config publication cannot silently redirect an accepted Investigation.
-		if err := insertBusinessContextLineage(ctx, tx, snapshotID, itemCount, *businessContext); err != nil {
-			return err
-		}
-		itemCount += 2
 	}
 	written, err := insertSourceLineageItems(ctx, tx, snapshotID, int64(itemCount)+1)
 	if err != nil {
@@ -354,17 +335,36 @@ func (service *Service) freezeInputSnapshot(ctx context.Context, tx writer, inve
 	return nil
 }
 
-// recentOccurrenceHistory selects Quoin's own most recent alert occurrences
-// as the bounded history context (renderer v3). Only immutable projection
-// facts render: state/resolvedAt may still change after the freeze and are
-// deliberately excluded so the digest stays reproducible (ARCH-CONTEXT-006).
-func recentOccurrenceHistory(ctx context.Context, tx writer) ([]RenderedRecentOccurrence, error) {
+// correlatedRecentOccurrences selects the session's correlated-view recent
+// alerts (renderer v5, ADR-0012): the union over every occurrence source of
+// this investigation — alerts that hit one of the source occurrence's frozen
+// correlation view keys, or share its source, whose first observation falls
+// in the 24h window before that source occurrence's first observation
+// (initial_analysis 的窗口口径). No correlated views on any source means no
+// history at all. Only immutable projection facts render: state/resolvedAt
+// may still change after the freeze and are deliberately excluded so the
+// digest stays reproducible (ARCH-CONTEXT-006).
+func correlatedRecentOccurrences(ctx context.Context, tx writer, investigationID int64) ([]RenderedRecentOccurrence, error) {
 	rows, err := tx.QueryContext(ctx, `
-		SELECT o.id, src.source_key, o.starts_at, o.labels_canonical
-		FROM alert_occurrences o
+		SELECT DISTINCT o.id, src.source_key, o.starts_at, o.labels_canonical, o.severity, o.title
+		FROM investigation_source_links link
+		JOIN alert_occurrences anchor ON anchor.id=link.occurrence_id
+		JOIN alert_occurrence_correlations correlation ON correlation.occurrence_id=anchor.id
+		JOIN alert_occurrences o ON (
+		  EXISTS (
+		    SELECT 1 FROM alert_occurrence_correlations oc
+		    WHERE oc.occurrence_id=o.id AND oc.view_key=correlation.view_key)
+		  OR o.source_id=anchor.source_id)
 		JOIN alert_sources src ON src.id=o.source_id
+		WHERE link.investigation_id=?
+		  AND o.id<>anchor.id
+		  AND o.first_seen_at>=(
+		    SELECT strftime('%Y-%m-%dT%H:%M:%fZ',
+		      julianday(anchor.first_seen_at)-?)
+		  )
+		  AND o.first_seen_at<=anchor.first_seen_at
 		ORDER BY o.first_seen_at DESC, o.id DESC
-		LIMIT 10`)
+		LIMIT 10`, investigationID, 1.0)
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +374,7 @@ func recentOccurrenceHistory(ctx context.Context, tx writer) ([]RenderedRecentOc
 		var id int64
 		var labelsJSON string
 		var occurrence RenderedRecentOccurrence
-		if err := rows.Scan(&id, &occurrence.SourceKey, &occurrence.StartsAt, &labelsJSON); err != nil {
+		if err := rows.Scan(&id, &occurrence.SourceKey, &occurrence.StartsAt, &labelsJSON, &occurrence.Severity, &occurrence.Title); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(labelsJSON), &occurrence.Labels); err != nil {
@@ -429,9 +429,10 @@ func nextMessageSeq(ctx context.Context, tx audit.Reader, investigationID int64)
 	return 1, nil
 }
 
-// insertSources verifies and freezes the create command's provenance
-// references (immutable after creation; the create transaction is the only
-// write path — DATA-INVEST-004).
+// insertSources verifies and freezes provenance references. Create writes
+// them in the creation transaction; Send 追加新来源（ADR-0012「+ 引入告警」）。
+// 部分唯一索引是幂等权威：请求内重复仍拒绝（确定性 422），已链接的来源
+// 直接跳过——重复引入不产生第二行，也不进命令语义。
 func insertSources(ctx context.Context, tx writer, investigationID, principalID int64, sources []SourceInput, now string) error {
 	if len(sources) > 100 {
 		return ErrInvalidSource
@@ -476,6 +477,16 @@ func insertSources(ctx context.Context, tx writer, investigationID, principalID 
 		}
 		if exists != 1 {
 			return ErrSourceNotFound
+		}
+		// 幂等：同一调查已链接该对象时忽略本次引入。
+		var linked int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM investigation_source_links
+			WHERE investigation_id=? AND `+column+`=?`, investigationID, source.SourceID).Scan(&linked); err != nil {
+			return err
+		}
+		if linked > 0 {
+			continue
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO investigation_source_links(investigation_id,`+column+`,linked_by,linked_at)

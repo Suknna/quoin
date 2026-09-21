@@ -60,6 +60,8 @@ Plinth 和 Stele 的组件身份是部署 CA（runtime-ca）签发的客户端�
 **告警源凭据投影**：
 Quoin 是逻辑告警源及其 Bearer 状态的唯一权威源，只保存高熵凭据 digest。Stele 以自身客户端证书经 mTLS 认证后获取版本化只读 digest 快照并仅在内存缓存；未加载快照时拒绝接收。Stele 提交 Delivery 时携带非秘密 `credential_id` 和快照版本，Quoin 在同一事务中再次检查来源启用状态、凭据有效性和归属；Delivery 与吊销事务按数据库提交顺序裁决，不使用墙钟宽限期。轮换期间一个来源最多同时保留新旧两个有效凭据；新值首次成功使用后进入 Pending Retirement，由 Admin 显式吊销旧值，不设自动 TTL，并持续显示与审计未收口状态。
 
+> **告警归一化层（2026-09-20，ADR-0012）：** [ADR-0012](docs/adr/0012-alert-normalization-layer.md) 在 intake 事务内建立「归一化（插件第三能力 AlertNormalizer：severity 四级词表+序数/title/annotations 冻结）→ 富化（enrichment_rules 静态 mapping，快照冻结溯源）→ 去重（(source,fingerprint,starts_at) 实例幂等，不变）→ 关联（视图多命中全记录）」四段流水线；告警语义成为一等列，视图从归属权威重定位为关联维度；`alerts_recent` 平台只读工具（读 Quoin 自有数据=平台工具，读外部平台=插件工具的归属判据）供给三条 AI 路径的相关告警上下文；business_systems/label_contracts 休眠域整域退役，AI 业务上下文改由富化快照+关联供给。ADR-0008 双归属读模型整体取代。
+
 > **外部平台凭据边界（2026-09-20，ADR-0011）：** 业务平台连接（connections 域）凭据延续 AES-GCM 信封存储，但供给路径改为 Stele 按需获取：Stele 经 `SteleRelay.AcquireConnectionCredential`（CN=stele、mTLS）拉取连接材料并在本地缓存，动态凭证（token 刷新等）生命周期管理归 Stele；Quoin 对外部平台凭据**只写不读**（解密仅为按需投递，自身不使用）。模型供应商凭据不变，仍由 Plinth supervisor 经 FetchCredentialGrant 按 attempt 获取。
 
 **一次性秘密 Reveal**：

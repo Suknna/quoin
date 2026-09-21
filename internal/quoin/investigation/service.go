@@ -42,15 +42,18 @@ const OutputSchemaKind = "investigation_output_v1"
 // RendererVersion identifies the investigation input renderer generation
 // (ARCH-CONTEXT-006). v2 renders the frozen integrations for blank-key
 // (source-level) attempts (ADR-0004); v3 additionally renders Quoin's own
-// recent alert history (frozen lineage) so free-form conversations can see
-// resolved occurrences that instant ALERTS queries can no longer return;
-// v1 snapshots keep their exact historical rebuild path.
-const RendererVersion = "investigation-renderer-v3"
+// recent alert history (frozen lineage); v5 is the ADR-0012 alert-
+// normalization shape — the history is scoped to the correlated views of
+// the session's occurrence sources (same 24h window as initial_analysis),
+// occurrence sources render the frozen normalized semantics, and the
+// business_systems context channel is gone with the retired domain.
+// 首发无历史 attempt：没有旧 renderer 分叉。
+const RendererVersion = "investigation-renderer-v5"
 
 // AgentVersion is the frozen investigation agent generation recorded on
 // the attempt row; the worker binary pins its own copy equal to this.
-// The Keep 提示词迁入 advances the prompt to its own generation without
-// changing the renderer-v3 input shape.
+// The v3 executor identity is unchanged by the ADR-0012 input reshaping:
+// 工具目录与执行语义不变，仅输入快照形状随 renderer-v5 演进。
 const AgentVersion = "investigation-v3"
 
 // Stable operation identities. The user-command names double as the audit
@@ -81,15 +84,14 @@ const (
 
 // Errors the HTTP surface maps onto the frozen status codes.
 var (
-	ErrNotFound              = errors.New("investigation not found")
-	ErrModelProviderMissing  = errors.New("no enabled qualified model provider")
-	ErrCommandReused         = errors.New("client command id reused with a different request")
-	ErrActiveAttempt         = errors.New("an active attempt already owns the investigation")
-	ErrLateResult            = errors.New("result lost the commit-order race")
-	ErrSourceNotFound        = errors.New("investigation source not found")
-	ErrInvalidSource         = errors.New("investigation source invalid")
-	ErrBusinessSystemInvalid = errors.New("investigation business system has no enabled published configuration")
-	ErrMessageInvalid        = errors.New("message content invalid")
+	ErrNotFound             = errors.New("investigation not found")
+	ErrModelProviderMissing = errors.New("no enabled qualified model provider")
+	ErrCommandReused        = errors.New("client command id reused with a different request")
+	ErrActiveAttempt        = errors.New("an active attempt already owns the investigation")
+	ErrLateResult           = errors.New("result lost the commit-order race")
+	ErrSourceNotFound       = errors.New("investigation source not found")
+	ErrInvalidSource        = errors.New("investigation source invalid")
+	ErrMessageInvalid       = errors.New("message content invalid")
 )
 
 // HeadConflictError reports a stale expected_head_message_id fence miss

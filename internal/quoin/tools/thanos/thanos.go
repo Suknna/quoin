@@ -143,9 +143,9 @@ func currentConnectionPair(ctx context.Context, conn execution.Executor, connect
 // per-call grant binding for one resolved source. The grant deliberately
 // reuses the frozen (connection, revision, generation) triple: one binding
 // per attempt and connection authorizes every identical call, while each
-// Tool Call keeps its own auditable association row. businessSystemID=0
-// marks a source-level grant (NULL in the schema).
-func freezeSourceExecution(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, executionArgs any, source frozenSource, generationID, frozenRevisionID, businessSystemID int64) (attempt.ToolGrant, error) {
+// Tool Call keeps its own auditable association row（ADR-0004 来源级授权；
+// business_system 授权列已随 ADR-0012 整域退役）。
+func freezeSourceExecution(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, executionArgs any, source frozenSource, generationID, frozenRevisionID int64) (attempt.ToolGrant, error) {
 	canonical, err := json.Marshal(executionArgs)
 	if err != nil {
 		return attempt.ToolGrant{}, err
@@ -156,22 +156,17 @@ func freezeSourceExecution(ctx context.Context, conn execution.Executor, attempt
 		VALUES(?,?,?,?)`, toolCallID, string(canonical), hex.EncodeToString(digest[:]), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return attempt.ToolGrant{}, err
 	}
-	businessColumn, businessValue := "business_system_id", any(businessSystemID)
-	if businessSystemID == 0 {
-		businessColumn, businessValue = "business_system_id", nil
-	}
 	var grantID int64
 	err = conn.QueryRowContext(ctx, `
 		SELECT id FROM attempt_connection_grants
-		WHERE attempt_id=? AND purpose=? AND `+businessColumn+` IS ?
-		  AND connection_id=? AND connection_revision_id=? AND credential_generation_id=?`,
-		attemptID, QueryToolPurpose, businessValue, source.ConnectionID, frozenRevisionID, generationID).Scan(&grantID)
+		WHERE attempt_id=? AND purpose=? AND connection_id=? AND connection_revision_id=? AND credential_generation_id=?`,
+		attemptID, QueryToolPurpose, source.ConnectionID, frozenRevisionID, generationID).Scan(&grantID)
 	if errors.Is(err, sql.ErrNoRows) {
 		insert, insertErr := conn.ExecContext(ctx, `
-			INSERT INTO attempt_connection_grants(attempt_id,purpose,business_system_id,connection_id,connection_revision_id,
+			INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,
 				credential_generation_id,created_by_tool_call_id,created_at)
-			VALUES(?,?,?,?,?,?,?,?)`,
-			attemptID, QueryToolPurpose, businessValue, source.ConnectionID, frozenRevisionID, generationID, toolCallID, time.Now().UTC().Format(time.RFC3339Nano))
+			VALUES(?,?,?,?,?,?,?)`,
+			attemptID, QueryToolPurpose, source.ConnectionID, frozenRevisionID, generationID, toolCallID, time.Now().UTC().Format(time.RFC3339Nano))
 		if insertErr != nil {
 			return attempt.ToolGrant{}, insertErr
 		}
@@ -263,7 +258,7 @@ func resolveSourceQueryGrant(ctx context.Context, conn execution.Executor, attem
 	if !enabled || revisionID != selected.RevisionID {
 		return sourcePreflight(PreflightNoMapping, fmt.Sprintf("指标接入 %q 已停用或已轮换；请管理员重新启用后发起新的分析。", selected.Name)), nil
 	}
-	grant, err := freezeSourceExecution(ctx, conn, attemptID, toolCallID, map[string]string{"query": query, "sourceRef": selected.Name}, selected, generationID, selected.RevisionID, 0)
+	grant, err := freezeSourceExecution(ctx, conn, attemptID, toolCallID, map[string]string{"query": query, "sourceRef": selected.Name}, selected, generationID, selected.RevisionID)
 	if err != nil {
 		return attempt.ToolResolution{}, err
 	}

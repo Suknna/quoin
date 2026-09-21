@@ -111,67 +111,27 @@ func seedPrincipals(t *testing.T, db *sql.DB) {
 
 var seedCounter int
 
-// seedOccurrence inserts one firing alert occurrence with a published business
-// declaration. Analysis creation must not infer a global metrics connection.
+// seedOccurrence inserts one firing alert occurrence with the ADR-0012
+// normalized semantics frozen on the row (severity/title/annotations/
+// resource). Analysis creation must not infer a global metrics connection;
+// authority is always the frozen integration list.
 func seedOccurrence(t *testing.T, db *sql.DB) int64 {
 	t.Helper()
 	seedCounter++
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	metricsConnectionID, _, _ := seedThanosChain(t, db)
-	contractID := seedActiveAnalysisContract(t, db, now)
-	key := fmt.Sprintf("business-%d", seedCounter)
-	business, err := db.Exec(`INSERT INTO business_systems(key,display_name,enabled,created_at) VALUES(?,?,0,?)`, key, key, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	businessID, _ := business.LastInsertId()
-	declaration, err := json.Marshal(map[string]any{"systemKey": key, "displayName": key, "MetricsConnectionID": metricsConnectionID, "resources": []any{map[string]any{"name": "default", "displayName": "Default", "matchLabels": map[string]string{"business_system": key}, "discoveryMetric": "up", "identityLabels": []string{"instance"}, "allowedMetrics": []string{"up"}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	version, err := db.Exec(`INSERT INTO business_system_config_versions(business_system_id,version_seq,state,yaml_body,parser_version,schema_version,label_contract_version_id,declaration_json,digest,created_at,system_key,display_name,metrics_connection_id,enabled,timezone) VALUES(?,1,'draft','fixture','fixture','v1',?,?,?,?,?,?,?,1,'UTC')`, businessID, contractID, string(declaration), strings.Repeat("b", 64), now, key, key, metricsConnectionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	versionID, _ := version.LastInsertId()
-	if _, err := db.Exec(`UPDATE business_systems SET current_config_version_id=?,display_name=?,enabled=1,timezone='UTC',row_version=row_version+1 WHERE id=?`, versionID, key, businessID); err != nil {
-		t.Fatal(err)
-	}
 	source, err := db.Exec(`INSERT INTO alert_sources(source_key,protocol,enabled,created_at) VALUES(?,'alertmanager',1,?)`, fmt.Sprintf("source-%d", seedCounter), now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sourceID, _ := source.LastInsertId()
-	labels := `{"alertname":"HighErrorRate","severity":"critical","business_system":"` + key + `"}`
-	occurrence, err := db.Exec(`INSERT INTO alert_occurrences(source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,business_system_id,first_seen_at,last_state_change_at) VALUES(?,?,?,'Firing',?,?,?,?,?)`, sourceID, []byte{0, 0, 0, 0, 0, 0, byte(seedCounter % 8), 1}, now, labels, sha256Hex(labels), businessID, now, now)
+	labels := `{"alertname":"HighErrorRate","severity":"critical"}`
+	occurrence, err := db.Exec(`INSERT INTO alert_occurrences(source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,severity,title,annotations_canonical,resource,first_seen_at,last_state_change_at) VALUES(?,?,?,'Firing',?,?,?,'HighErrorRate','{}','',?,?)`,
+		sourceID, []byte{0, 0, 0, 0, 0, 0, byte(seedCounter % 8), 1}, now, labels, sha256Hex(labels), "critical", now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	id, _ := occurrence.LastInsertId()
 	return id
-}
-
-// seedActiveAnalysisContract establishes the Label Contract required by the
-// analysis snapshot. It is intentionally independent of the current business
-// pointer so later publications cannot alter a previously created snapshot.
-func seedActiveAnalysisContract(t *testing.T, db *sql.DB, now string) int64 {
-	t.Helper()
-	var existing int64
-	if err := db.QueryRow(`SELECT id FROM label_contracts WHERE state='active' LIMIT 1`).Scan(&existing); err == nil {
-		return existing
-	}
-	if _, err := db.Exec(`INSERT INTO label_contract_state(id,row_version,updated_at) SELECT 1,1,? WHERE NOT EXISTS (SELECT 1 FROM label_contract_state WHERE id=1)`, now); err != nil {
-		t.Fatal(err)
-	}
-	contract, err := db.Exec(`INSERT INTO label_contracts(version,yaml_body,contract_json,digest,parser_version,schema_version,state,row_version,created_at) VALUES(1,'fixture','{"label_contract":{"business_system_label":"business_system"}}',?,'fixture','v1','draft',1,?)`, strings.Repeat("a", 64), now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	contractID, _ := contract.LastInsertId()
-	if _, err := db.Exec(`INSERT INTO label_contract_activations(contract_id,expected_target_row_version,expected_state_row_version,items_json,created_at) VALUES(?,1,1,'[]',?)`, contractID, now); err != nil {
-		t.Fatal(err)
-	}
-	return contractID
 }
 
 // seedProviderChain inserts one enabled qualified model provider.
@@ -415,57 +375,49 @@ func TestTerminalFaultProjectionSharesAttemptCommitTransaction(t *testing.T) {
 	}
 }
 
-// seedObservationAnnotations attaches one immutable accepted Alertmanager item to
-// an occurrence. The analysis snapshot must receive exactly these supplied
-// annotations instead of inferring meaning from the alert name.
-func seedObservationAnnotations(t *testing.T, db *sql.DB, occurrenceID int64, state string, annotations map[string]string) {
+// seedAnnotatedOccurrence inserts one firing occurrence whose frozen
+// annotation column carries the supplied map（ADR-0012：annotations 来自首观测
+// 冻结列，不再从交付 body 现算）。
+func seedAnnotatedOccurrence(t *testing.T, db *sql.DB, annotations map[string]string) int64 {
 	t.Helper()
+	seedCounter++
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	var sourceID int64
-	if err := db.QueryRow(`SELECT source_id FROM alert_occurrences WHERE id=?`, occurrenceID).Scan(&sourceID); err != nil {
-		t.Fatal(err)
-	}
-	credential, err := db.Exec(`INSERT INTO alert_source_credentials(source_id,digest,state,created_at) VALUES(?,?, 'Active', ?)`, sourceID, make([]byte, 32), now)
+	encoded, err := json.Marshal(annotations)
 	if err != nil {
 		t.Fatal(err)
 	}
-	credentialID, _ := credential.LastInsertId()
-	body, err := json.Marshal(map[string]any{"alerts": []map[string]any{{"annotations": annotations}}})
+	source, err := db.Exec(`INSERT INTO alert_sources(source_key,protocol,enabled,created_at) VALUES(?,'alertmanager',1,?)`, fmt.Sprintf("source-annotated-%d", seedCounter), now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, err := db.Exec(`INSERT INTO alert_deliveries(event_id,source_id,credential_id,credential_snapshot_version,protocol,body,body_size_bytes,integrity,status,received_at,committed_at) VALUES(?,?,?,?, 'alertmanager',?,?, 'complete','processed',?,?)`, fmt.Sprintf("annotation-relay-%d-%s", occurrenceID, state), sourceID, credentialID, 1, body, len(body), now, now)
+	sourceID, _ := source.LastInsertId()
+	labels := `{"alertname":"HighErrorRate","severity":"critical"}`
+	occurrence, err := db.Exec(`INSERT INTO alert_occurrences(source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,severity,title,annotations_canonical,resource,first_seen_at,last_state_change_at) VALUES(?,?,?,'Firing',?,?,?,'HighErrorRate',?,'',?,?)`,
+		sourceID, []byte{0, 0, 0, 0, 0, 0, byte(seedCounter % 8), 3}, now, labels, sha256Hex(labels), "critical", string(encoded), now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	deliveryID, _ := delivery.LastInsertId()
-	item, err := db.Exec(`INSERT INTO alert_delivery_items(delivery_id,item_index,status,fingerprint,starts_at,labels_canonical) VALUES(?,0,'ok',?,?,?)`, deliveryID, make([]byte, 8), now, `{"alertname":"MallGUIAcceptanceProbe"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	itemID, _ := item.LastInsertId()
-	if _, err := db.Exec(`INSERT INTO alert_observations(delivery_id,delivery_item_id,occurrence_id,observed_state,starts_at_source,received_at,committed_at,effect) VALUES(?,?,?,?,?,?,?,?)`, deliveryID, itemID, occurrenceID, state, now, now, now, map[string]string{"firing": "initial_firing", "resolved": "resolved_first"}[state]); err != nil {
-		t.Fatal(err)
-	}
+	id, _ := occurrence.LastInsertId()
+	return id
 }
 
-func TestRebuildInputPreservesSuppliedObservationAnnotations(t *testing.T) {
+func TestRebuildInputPreservesFrozenAnnotations(t *testing.T) {
 	for _, test := range []struct {
 		name        string
-		state       string
 		annotations map[string]string
+		// want 是冻结列序列化后回读的期望形状：'{}' 按 omitempty 渲染为 nil。
+		want map[string]string
 	}{
-		{name: "firing", state: "firing", annotations: map[string]string{"summary": "controlled GUI acceptance probe", "description": "No true fault; this is a controlled test annotation."}},
-		{name: "resolved", state: "resolved", annotations: map[string]string{"summary": "controlled GUI acceptance probe resolved", "description": "No true fault; this is a controlled test annotation."}},
+		{name: "summary", annotations: map[string]string{"summary": "controlled GUI acceptance probe", "description": "No true fault; this is a controlled test annotation."}, want: map[string]string{"summary": "controlled GUI acceptance probe", "description": "No true fault; this is a controlled test annotation."}},
+		{name: "empty", annotations: map[string]string{}, want: nil},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			db, dbPath := newTestDB(t)
 			service := newTestService(t, db, dbPath)
-			occurrenceID := seedOccurrence(t, db)
-			seedObservationAnnotations(t, db, occurrenceID, test.state, test.annotations)
+			occurrenceID := seedAnnotatedOccurrence(t, db, test.annotations)
 			seedProviderChain(t, db)
 
-			created, err := service.Create(commandContext(t), occurrenceID, testOperatorID, "cmd-annotations-"+test.state)
+			created, err := service.Create(commandContext(t), occurrenceID, testOperatorID, "cmd-annotations-"+test.name)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -474,7 +426,7 @@ func TestRebuildInputPreservesSuppliedObservationAnnotations(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Dispatch rebuild is the production fence. It must reproduce the digest
-			// frozen at admission even when Alertmanager supplied annotations.
+			// frozen at admission including the frozen annotation column.
 			if _, err := service.Attempts().DispatchInputFor(context.Background(), created.AttemptID); err != nil {
 				t.Fatalf("annotation-bearing input must dispatch: %v", err)
 			}
@@ -482,73 +434,58 @@ func TestRebuildInputPreservesSuppliedObservationAnnotations(t *testing.T) {
 			if err := json.Unmarshal(canonical, &input); err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(input.Occurrence.Annotations, test.annotations) {
-				t.Fatalf("annotations = %#v, want exact supplied %#v", input.Occurrence.Annotations, test.annotations)
+			if !reflect.DeepEqual(input.Occurrence.Annotations, test.want) {
+				t.Fatalf("annotations = %#v, want exact frozen %#v", input.Occurrence.Annotations, test.want)
+			}
+			if input.Occurrence.Severity != "critical" || input.Occurrence.Title != "HighErrorRate" {
+				t.Fatalf("normalized semantics = %q/%q", input.Occurrence.Severity, input.Occurrence.Title)
 			}
 		})
 	}
 }
 
-// TestRebuildInputRetainsLegacyAnnotationOmission proves the v1 renderer
-// contract remains byte-stable. It lets already-Assigned attempts created
-// before annotations entered the snapshot resume through reconnect replay.
-func TestRebuildInputRetainsLegacyAnnotationOmission(t *testing.T) {
+// TestRebuildInputFreezesRelatedAlertWindow proves the ADR-0012 related-alert
+// window: creation freezes the correlated/same-source 24h window as lineage
+// items, and later arrivals outside the frozen window cannot drift the digest.
+func TestRebuildInputFreezesRelatedAlertWindow(t *testing.T) {
 	db, dbPath := newTestDB(t)
 	service := newTestService(t, db, dbPath)
 	occurrenceID := seedOccurrence(t, db)
-	seedObservationAnnotations(t, db, occurrenceID, "firing", map[string]string{"summary": "new field"})
 	seedProviderChain(t, db)
-	created, err := service.Create(commandContext(t), occurrenceID, testOperatorID, "cmd-legacy-annotations")
+
+	created, err := service.Create(commandContext(t), occurrenceID, testOperatorID, "cmd-related-window")
 	if err != nil {
 		t.Fatal(err)
 	}
-	canonical, err := service.RebuildInput(context.Background(), created.AttemptID)
+	before, err := service.RebuildInput(context.Background(), created.AttemptID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var legacy Input
-	if err := json.Unmarshal(canonical, &legacy); err != nil {
+	var input Input
+	if err := json.Unmarshal(before, &input); err != nil {
 		t.Fatal(err)
 	}
-	legacy.Occurrence.Annotations = nil
-	legacy.BusinessContext.Resources = nil
-	legacyCanonical, err := json.Marshal(legacy)
+	if len(input.Occurrence.RelatedAlerts) != 0 {
+		t.Fatalf("isolated occurrence must freeze an empty window: %+v", input.Occurrence.RelatedAlerts)
+	}
+	// A later same-source occurrence is outside the frozen window (its
+	// first_seen_at is now after the anchor's); the digest must not move.
+	var sourceID int64
+	if err := db.QueryRow(`SELECT source_id FROM alert_occurrences WHERE id=?`, occurrenceID).Scan(&sourceID); err != nil {
+		t.Fatal(err)
+	}
+	late := time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
+	labels := `{"alertname":"LaterAlert"}`
+	if _, err := db.Exec(`INSERT INTO alert_occurrences(source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,severity,title,annotations_canonical,resource,first_seen_at,last_state_change_at) VALUES(?,?,?,'Firing',?,?,?,'LaterAlert','{}','',?,?)`,
+		sourceID, []byte{1, 2, 3, 4, 5, 6, 7, 8}, late, labels, sha256Hex(labels), "warning", late, late); err != nil {
+		t.Fatal(err)
+	}
+	after, err := service.RebuildInput(context.Background(), created.AttemptID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The production schema correctly freezes snapshots. This fixture models an
-	// already-admitted v1 record from before annotations were part of the input.
-	if _, err := db.Exec(`DROP TRIGGER trg_attempt_input_snapshots_no_update`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE attempt_input_snapshots SET renderer_version='initial-analysis-renderer-v1' WHERE attempt_id=?`, created.AttemptID); err != nil {
-		t.Fatal(err)
-	}
-	// Model a pre-cutover snapshot completely: legacy rebuilds retain their
-	// independently frozen Label Contract item, unlike all new attempts.
-	if _, err := db.Exec(`
-		INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,label_contract_version_id)
-		SELECT s.id,(SELECT COALESCE(MAX(item_seq),0)+1 FROM attempt_input_items WHERE snapshot_id=s.id),'label_contract',?,v.label_contract_version_id
-		FROM attempt_input_snapshots s
-		JOIN attempt_input_items i ON i.snapshot_id=s.id AND i.business_system_config_version_id IS NOT NULL
-		JOIN business_system_config_versions v ON v.id=i.business_system_config_version_id
-		WHERE s.attempt_id=?`, strings.Repeat("f", 64), created.AttemptID); err != nil {
-		t.Fatal(err)
-	}
-	legacyCanonical, err = service.RebuildInput(context.Background(), created.AttemptID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyDigest := sha256.Sum256(legacyCanonical)
-	if _, err := db.Exec(`UPDATE attempt_input_snapshots SET content_digest=? WHERE attempt_id=?`, hex.EncodeToString(legacyDigest[:]), created.AttemptID); err != nil {
-		t.Fatal(err)
-	}
-	dispatch, err := service.Attempts().DispatchInputFor(context.Background(), created.AttemptID)
-	if err != nil {
-		t.Fatalf("legacy annotation-free snapshot must resume: %v", err)
-	}
-	if string(dispatch.CanonicalJSON) != string(legacyCanonical) {
-		t.Fatalf("legacy canonical=%s, want=%s", dispatch.CanonicalJSON, legacyCanonical)
+	if string(after) != string(before) {
+		t.Fatalf("frozen related-alert window drifted after a later arrival: %s vs %s", after, before)
 	}
 }
 

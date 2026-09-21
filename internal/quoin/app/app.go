@@ -78,6 +78,7 @@ type apiServer struct {
 	investigations               *investigation.Service
 	inspections                  *inspection.Service
 	views                        *businessview.Service
+	enrichmentRules              *businessview.EnrichmentService
 	observations                 *observation.Service
 	feedbackService              *feedback.Service
 	knowledgeService             *knowledge.Service
@@ -166,6 +167,7 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		investigations:   investigation.NewService(db),
 		inspections:      inspection.NewService(db),
 		views:            businessview.NewService(db),
+		enrichmentRules:  businessview.NewEnrichmentService(db),
 		feedbackService:  feedback.NewService(db),
 		knowledgeService: knowledge.NewService(db),
 		maintenance:      maintenance.NewService(db),
@@ -642,8 +644,8 @@ func (application *apiServer) register(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/maintenance/upgrade/prepare", OperationID: "prepareUpgrade"}, application.prepareUpgrade)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/admin/about", OperationID: "getAdminAbout"}, application.aboutPlatform)
 	application.registerAdminAuthConfigRoute(api)
-	application.registerBusinessContextRoute(api)
 	application.registerAlertRoutes(api)
+	application.registerEnrichmentRuleRoutes(api)
 	application.registerAdminUserRoutes(api)
 	application.registerConnectionRoutes(api)
 	application.registerPluginRoutes(api)

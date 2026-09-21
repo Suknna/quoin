@@ -495,8 +495,6 @@ func terminationReasonOf(reason runtimev1.TerminationReason) string {
 		return "cancelled"
 	case runtimev1.TerminationReason_TERMINATION_REASON_CONNECTION_DISABLED:
 		return "connection_disabled"
-	case runtimev1.TerminationReason_TERMINATION_REASON_BUSINESS_SYSTEM_DISABLED:
-		return "business_system_disabled"
 	case runtimev1.TerminationReason_TERMINATION_REASON_LEASE_EXPIRED:
 		return "lease_expired"
 	case runtimev1.TerminationReason_TERMINATION_REASON_REPLACED:

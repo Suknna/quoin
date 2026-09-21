@@ -20,7 +20,6 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
-	"github.com/Suknna/quoin/internal/quoin/config"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
@@ -36,12 +35,13 @@ const OutputSchemaKind = "initial_analysis_output_v1"
 
 // RendererVersion identifies the input renderer generation both sides
 // agree on (ARCH-CONTEXT-006).
-// Renderer v3 replaced Label Contract context with declaration resource scopes.
-// Renderer v4 makes the declaration optional (ADR-0004): attempts created
-// without an eligible business view freeze the enabled integrations as their
-// source-level authority instead. Rebuild retains v1/v2/v3 paths so
-// historical snapshot bytes stay exact.
-const RendererVersion = "initial-analysis-renderer-v4"
+// Renderer v5 is the ADR-0012 alert-normalization shape: the occurrence
+// carries the frozen unified semantics (severity/title/annotations/resource),
+// first-observation enrichment fields, view correlations and a related-alert
+// window (same correlated views or same source, 24h before first
+// observation); the business_systems declaration context is gone with the
+// retired domain. 首发无历史 attempt：没有旧 renderer 分叉。
+const RendererVersion = "initial-analysis-renderer-v5"
 
 // Errors the HTTP surface maps onto the frozen status codes.
 var (
@@ -306,17 +306,13 @@ func (service *Service) nowText() string { return service.now().Format(time.RFC3
 // pure reads take audit.Reader instead.
 type writer = execution.Executor
 
-// Input is the rendered, immutable input of one analysis. BusinessContext is
-// the published declaration that scopes every metrics observation proposed by
-// this attempt; when no eligible business view exists (ADR-0004) it is absent
-// and Integrations carries the source-level authority instead.
+// Input is the rendered, immutable input of one analysis. The frozen
+// integrations are the attempt's source-level read-only authority
+// (ADR-0004); the occurrence carries the ADR-0012 normalized semantics.
 type Input struct {
-	Occurrence OccurrenceContext `json:"occurrence"`
-	// BusinessContext stays nil exactly when the attempt froze integrations;
-	// the declaration view narrows, it never widens source-level authority.
-	BusinessContext *BusinessContext      `json:"businessContext,omitempty"`
-	Integrations    []RenderedIntegration `json:"integrations,omitempty"`
-	ModelContract   ModelContract         `json:"modelContract"`
+	Occurrence   OccurrenceContext     `json:"occurrence"`
+	Integrations []RenderedIntegration `json:"integrations,omitempty"`
+	ModelContract ModelContract        `json:"modelContract"`
 	// ToolCatalog is the attempt's frozen model tool catalog (ADR-0004);
 	// the snapshot digest covers it via this embedding.
 	ToolCatalog *attempt.FrozenCatalog `json:"toolCatalog,omitempty"`
@@ -330,27 +326,46 @@ type RenderedIntegration struct {
 	Name string `json:"name"`
 }
 
-// BusinessContext is the declaration-derived scope exposed to the model. It
-// excludes connections and secrets; resource policies are frozen inside the
-// version's declaration_json and are the only metrics authority for new work.
-type BusinessContext struct {
-	SystemKey       string                      `json:"systemKey"`
-	ConfigVersionID string                      `json:"configVersionId"`
-	Resources       []config.ResourceProjection `json:"resources,omitempty"`
-	// Historical snapshots retain these fields solely for byte-exact rebuild.
-	LabelContractVersionID string `json:"labelContractVersionId,omitempty"`
-	BusinessSystemLabel    string `json:"businessSystemLabel,omitempty"`
+// OccurrenceContext is the frozen alert context the model receives
+// (ADR-0012): the unified semantics (severity/title/resource), the frozen
+// canonical annotations, the first-observation enrichment fields, the view
+// correlations and the related-alert window are all first-observation
+// frozen facts; state stays a live read like the historical shape.
+type OccurrenceContext struct {
+	ID              string                `json:"id"`
+	State           string                `json:"state"`
+	Severity        string                `json:"severity"`
+	Title           string                `json:"title"`
+	Resource        string                `json:"resource,omitempty"`
+	FirstSeenAt     string                `json:"firstSeenAt"`
+	LastStateChange string                `json:"lastStateChangeAt"`
+	ResolvedAt      *string               `json:"resolvedAt,omitempty"`
+	Labels          map[string]string     `json:"labels"`
+	Annotations     map[string]string     `json:"annotations,omitempty"`
+	// Enrichment 是首观测富化终值（命中规则叠加后的 fields）。
+	Enrichment map[string]string `json:"enrichment,omitempty"`
+	// Correlations 是首观测命中的业务视图快照（多命中全记录）。
+	Correlations []RenderedCorrelation `json:"correlations,omitempty"`
+	// RelatedAlerts 是相关告警窗口：同关联视图或同 source、首观测前 24h
+	// 内的最近 10 条其它 occurrence（创建时冻结为谱系项）。
+	RelatedAlerts []RenderedRelatedAlert `json:"relatedAlerts,omitempty"`
 }
 
-// OccurrenceContext is the frozen alert context the model receives.
-type OccurrenceContext struct {
-	ID              string            `json:"id"`
-	State           string            `json:"state"`
-	FirstSeenAt     string            `json:"firstSeenAt"`
-	LastStateChange string            `json:"lastStateChangeAt"`
-	ResolvedAt      *string           `json:"resolvedAt,omitempty"`
-	Labels          map[string]string `json:"labels"`
-	Annotations     map[string]string `json:"annotations,omitempty"`
+// RenderedCorrelation is one frozen view-correlation snapshot of the
+// occurrence (ADR-0012 Correlate 段：视图改名/退役后不漂移).
+type RenderedCorrelation struct {
+	ViewKey     string `json:"viewKey"`
+	DisplayName string `json:"displayName"`
+}
+
+// RenderedRelatedAlert is one related-alert window entry (immutable
+// projection facts; state is a live read like the main occurrence).
+type RenderedRelatedAlert struct {
+	ID       string `json:"id"`
+	Severity string `json:"severity"`
+	Title    string `json:"title"`
+	State    string `json:"state"`
+	StartsAt string `json:"startsAt"`
 }
 
 // ModelContract is the frozen chat contract of the attempt
@@ -514,43 +529,28 @@ type provider struct {
 	NativeToolCalling bool
 }
 
-// renderInput loads the occurrence context and resolves the current
-// enabled model provider (ARCH-AGENT-003). No enabled provider is a
+// renderInput loads the occurrence context (ADR-0012 normalized semantics,
+// enrichment, correlations and the related-alert window) and resolves the
+// current enabled model provider (ARCH-AGENT-003). No enabled provider is a
 // deterministic 503, not a stored analysis.
 func (service *Service) renderInput(ctx context.Context, tx audit.Reader, occurrenceID int64) (Input, ModelContract, provider, error) {
 	var input Input
-	var labelsJSON string
-	err := tx.QueryRowContext(ctx, `
-		SELECT id,state,first_seen_at,last_state_change_at,resolved_at,labels_canonical
-		FROM alert_occurrences WHERE id=?`, occurrenceID).
-		Scan(&occurrenceID, &input.Occurrence.State, &input.Occurrence.FirstSeenAt, &input.Occurrence.LastStateChange,
-			&input.Occurrence.ResolvedAt, &labelsJSON)
+	if err := loadOccurrenceContext(ctx, tx, occurrenceID, &input.Occurrence); err != nil {
+		return Input{}, ModelContract{}, provider{}, err
+	}
+	related, err := selectRelatedAlerts(ctx, tx, &input.Occurrence)
 	if err != nil {
 		return Input{}, ModelContract{}, provider{}, err
 	}
-	input.Occurrence.ID = strconv.FormatInt(occurrenceID, 10)
-	if err := json.Unmarshal([]byte(labelsJSON), &input.Occurrence.Labels); err != nil {
-		return Input{}, ModelContract{}, provider{}, err
-	}
-	// Creation and dispatch rebuild must project the exact same first accepted
-	// Alertmanager item. Otherwise its frozen digest cannot pass the dispatch
-	// immutability fence after annotations are added to the input contract.
-	if err := populateOccurrenceAnnotations(ctx, tx, occurrenceID, &input.Occurrence); err != nil {
-		return Input{}, ModelContract{}, provider{}, err
-	}
-	// ADR-0004: the business view is descriptive context only; the enabled
-	// integrations are ALWAYS the attempt's source-level authority. A
-	// published declaration can never grant or scope new work.
+	input.Occurrence.RelatedAlerts = related
+	// The enabled integrations are ALWAYS the attempt's source-level
+	// authority (ADR-0004); the retired business_systems declaration context
+	// no longer participates in the input.
 	integrations, err := enabledIntegrations(ctx, tx)
 	if err != nil {
 		return Input{}, ModelContract{}, provider{}, err
 	}
 	input.Integrations = integrations
-	businessContext, err := resolveBusinessContext(ctx, tx, occurrenceID)
-	if err != nil {
-		return Input{}, ModelContract{}, provider{}, err
-	}
-	input.BusinessContext = businessContext
 	selected, err := selectModelProvider(ctx, tx)
 	if err != nil {
 		return Input{}, ModelContract{}, provider{}, err
@@ -562,41 +562,6 @@ func (service *Service) renderInput(ctx context.Context, tx audit.Reader, occurr
 	}
 	input.ModelContract = contract
 	return input, contract, selected, nil
-}
-
-// resolveBusinessContext closes occurrence attribution onto an eligible
-// published declaration. ADR-0004: a missing or structurally empty view is
-// the source-level mainline (nil, nil) — no longer an admission error. A
-// malformed frozen declaration stays a hard error.
-func resolveBusinessContext(ctx context.Context, tx audit.Reader, occurrenceID int64) (*BusinessContext, error) {
-	var configVersionID int64
-	var declarationJSON string
-	err := tx.QueryRowContext(ctx, `
-		SELECT config.id, config.declaration_json
-		FROM alert_occurrences occurrence
-		JOIN business_systems business ON business.id=occurrence.business_system_id
-		JOIN business_system_config_versions config ON config.id=business.current_config_version_id
-		WHERE occurrence.id=? AND business.enabled=1 AND config.state='published'
-		  AND config.published_at IS NOT NULL AND config.declaration_json IS NOT NULL`, occurrenceID).
-		Scan(&configVersionID, &declarationJSON)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var declaration config.BusinessSystemDocument
-	if err := json.Unmarshal([]byte(declarationJSON), &declaration); err != nil {
-		return nil, fmt.Errorf("decode frozen business declaration: %w", err)
-	}
-	if declaration.SystemKey == "" || declaration.MetricsConnectionID <= 0 || len(declaration.Resources) == 0 {
-		return nil, nil
-	}
-	return &BusinessContext{
-		SystemKey:       declaration.SystemKey,
-		ConfigVersionID: strconv.FormatInt(configVersionID, 10),
-		Resources:       append([]config.ResourceProjection(nil), declaration.Resources...),
-	}, nil
 }
 
 // enabledIntegrations lists the admin-enabled observation integrations in
@@ -696,23 +661,25 @@ func insertAttempt(ctx context.Context, tx writer, analysisID int64, digestHex s
 		VALUES(?,1,'occurrence',?,?)`, snapshotID, hex.EncodeToString(occurrenceDigest[:]), occurrenceID); err != nil {
 		return 0, err
 	}
-	// Every attempt freezes the enabled integrations at their current
-	// revisions — the authoritative grant-eligible set (ADR-0004). An
-	// attributed occurrence additionally freezes its business config version
-	// lineage as descriptive model context; it never grants authority.
-	if input.BusinessContext != nil {
-		configVersionID, err := strconv.ParseInt(input.BusinessContext.ConfigVersionID, 10, 64)
-		if err != nil || configVersionID <= 0 {
-			return 0, fmt.Errorf("analysis business configuration context is missing")
+	// ADR-0012：相关告警窗口冻结为谱系项（item_seq 序即窗口顺序），重建按
+	// 谱系回读——后续新告警不改变已冻结窗口的集合。
+	itemCount := int64(1)
+	for _, related := range input.Occurrence.RelatedAlerts {
+		itemCount++
+		relatedID, parseErr := strconv.ParseInt(related.ID, 10, 64)
+		if parseErr != nil {
+			return 0, parseErr
 		}
-		configDigest := sha256.Sum256([]byte("business-system-config-version:" + input.BusinessContext.ConfigVersionID))
+		relatedDigest := sha256.Sum256([]byte("occurrence:" + related.ID))
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,business_system_config_version_id)
-			VALUES(?,2,'business_config',?,?)`, snapshotID, hex.EncodeToString(configDigest[:]), configVersionID); err != nil {
+			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,occurrence_id)
+			VALUES(?,?,'related_occurrence',?,?)`, snapshotID, itemCount, hex.EncodeToString(relatedDigest[:]), relatedID); err != nil {
 			return 0, err
 		}
 	}
-	if err := insertSourceLineageItems(ctx, tx, snapshotID, 3, input.Integrations); err != nil {
+	// Every attempt freezes the enabled integrations at their current
+	// revisions — the authoritative grant-eligible set (ADR-0004).
+	if err := insertSourceLineageItems(ctx, tx, snapshotID, itemCount+1, input.Integrations); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `

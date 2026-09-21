@@ -157,122 +157,10 @@ func TestCreateSourceValidation(t *testing.T) {
 	}
 }
 
-func TestCreateWithBusinessSystemFreezesDirectChatMetricsContext(t *testing.T) {
-	db, dbPath := newTestDB(t)
-	service := newTestService(t, db, dbPath)
-	principalID := seedUser(t, db)
-	ctx := userContext(t, principalID)
-	metricsConnectionID, _, _, _ := seedProviderChain(t, db)
-	context := seedDirectChatBusinessContext(t, db, "mall-live-prometheus", metricsConnectionID)
-
-	created, err := service.CreateWithBusinessSystem(ctx, principalID, "cmd-direct-context", "检查商城延迟", nil, nil, context.key)
-	if err != nil {
-		t.Fatalf("create direct chat: %v", err)
-	}
-	var configID int64
-	var contractItems int
-	if err := db.QueryRow(`
-		SELECT config.business_system_config_version_id,
-		       (SELECT COUNT(*) FROM attempt_input_items legacy WHERE legacy.snapshot_id=snapshot.id AND legacy.label_contract_version_id IS NOT NULL)
-		FROM attempt_input_snapshots snapshot
-		JOIN attempt_input_items config ON config.snapshot_id=snapshot.id AND config.business_system_config_version_id IS NOT NULL
-		WHERE snapshot.attempt_id=?`, created.AttemptID).Scan(&configID, &contractItems); err != nil {
-		t.Fatal(err)
-	}
-	if configID != context.configID || contractItems != 0 {
-		t.Fatalf("frozen config/legacy items=%d/%d want %d/0", configID, contractItems, context.configID)
-	}
-	canonical, err := service.RebuildInput(ctx, created.AttemptID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(canonical), `"businessContext":{"systemKey":"mall-live-prometheus"`) {
-		t.Fatalf("input lacks direct business context: %s", canonical)
-	}
-	// Rebuilding resolves the frozen input items rather than any mutable
-	// business-system pointer, preserving this declared authority at dispatch.
-	if _, err := service.RebuildInput(ctx, created.AttemptID); err != nil {
-		t.Fatalf("rebuild frozen context: %v", err)
-	}
-}
-
-// TestDirectBusinessContextAuthorizesMetricsGrant proves the source-free path
-// uses only the direct Investigation's frozen authoritative config and Label
-// Contract; no occurrence is fabricated to obtain metrics authority.
-func TestDirectBusinessContextAuthorizesMetricsGrant(t *testing.T) {
-	db, dbPath := newTestDB(t)
-	service := newTestService(t, db, dbPath)
-	principalID := seedUser(t, db)
-	ctx := userContext(t, principalID)
-	metricsConnectionID, _, _, _ := seedProviderChain(t, db)
-	business := seedDirectChatBusinessContext(t, db, "mall-live-prometheus", metricsConnectionID)
-	created, err := service.CreateWithBusinessSystem(ctx, principalID, "cmd-direct-metrics", "检查商城延迟", nil, nil, business.key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Scope tests isolate the trigger from the separate connection admission
-	// ladder: retain this trigger and suspend only unrelated closures while
-	// supplying an exact frozen direct-chat provenance tuple.
-	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='trigger' AND name <> 'trg_attempt_connection_grants_thanos_query_scope'`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var triggers []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			rows.Close()
-			t.Fatal(err)
-		}
-		triggers = append(triggers, name)
-	}
-	if err := rows.Close(); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range triggers {
-		if _, err := db.Exec(`DROP TRIGGER ` + name); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// The surviving scope trigger is the unit under test. Disable FK checking
-	// only for synthetic tool-call locators required by the table CHECK.
-	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO attempt_connection_grants(attempt_id,purpose,business_system_id,connection_id,connection_revision_id,credential_generation_id,created_by_tool_call_id,created_at)
-		SELECT ?, 'thanos_query', config.business_system_id, config.metrics_connection_id, connection.current_revision_id, connection.current_credential_generation_id, 1, ?
-		FROM business_system_config_versions config JOIN connections connection ON connection.id=config.metrics_connection_id
-		WHERE config.id=?`, created.AttemptID, testNow(), business.configID); err != nil {
-		t.Fatalf("direct snapshot grant rejected: %v", err)
-	}
-	var occurrences int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM attempt_input_items WHERE snapshot_id=(SELECT id FROM attempt_input_snapshots WHERE attempt_id=?) AND occurrence_id IS NOT NULL`, created.AttemptID).Scan(&occurrences); err != nil || occurrences != 0 {
-		t.Fatalf("direct context occurrence lineage=%d err=%v", occurrences, err)
-	}
-	// A second existing connection cannot be substituted for the selected
-	// metrics connection, even though the direct Investigation has no occurrence.
-	other, err := db.Exec(`INSERT INTO connections(name,type,enabled,created_at) VALUES('unselected','thanos',1,?)`, testNow())
-	if err != nil {
-		t.Fatal(err)
-	}
-	otherID, _ := other.LastInsertId()
-	otherRevision, err := db.Exec(`INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_at) VALUES(?,1,'{}',?)`, otherID, testNow())
-	if err != nil {
-		t.Fatal(err)
-	}
-	otherRevisionID, _ := otherRevision.LastInsertId()
-	otherGeneration, err := db.Exec(`INSERT INTO credential_generations(connection_id,generation_seq,envelope_version,key_binding_revision,nonce,ciphertext,created_at) VALUES(?,1,1,1,?,?,?)`, otherID, make([]byte, 12), make([]byte, 32), testNow())
-	if err != nil {
-		t.Fatal(err)
-	}
-	otherGenerationID, _ := otherGeneration.LastInsertId()
-	if _, err := db.Exec(`INSERT INTO attempt_connection_grants(attempt_id,purpose,business_system_id,connection_id,connection_revision_id,credential_generation_id,created_by_tool_call_id,created_at)
-		SELECT ?, 'thanos_query', business_system_id, ?, ?, ?, 2, ? FROM business_system_config_versions WHERE id=?`, created.AttemptID, otherID, otherRevisionID, otherGenerationID, testNow(), business.configID); err == nil {
-		t.Fatal("unselected direct metrics connection was authorized")
-	}
-}
-
-func TestCreateFreezesTenMostRecentOccurrencesInStableOrder(t *testing.T) {
+// TestCreateFreezesTenMostRecentCorrelatedOccurrencesInStableOrder proves
+// the renderer-v5 history window（ADR-0012）：按会话来源告警的关联视图圈定、
+// 首观测前 24h 窗口、最近 10 条、排除来源自身；谱系冻结集合，digest 可重建。
+func TestCreateFreezesTenMostRecentCorrelatedOccurrencesInStableOrder(t *testing.T) {
 	db, dbPath := newTestDB(t)
 	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
@@ -280,11 +168,16 @@ func TestCreateFreezesTenMostRecentOccurrencesInStableOrder(t *testing.T) {
 	seedProviderChain(t, db)
 
 	sourceID := seedAlertSourceForHistory(t, db, "history-prod")
+	anchor := seedHistoryOccurrence(t, db, sourceID, "Anchor", "2026-09-13T09:00:00Z")
+	seedCorrelation(t, db, anchor, "mall", "商城")
+	// 12 条同视图告警落在来源首观测（09-13T09:00）前 24h 内（09-12T10..21 点）；
+	// 只有最近 10 条进入窗口。
 	for index := 0; index < 12; index++ {
-		firstSeen := fmt.Sprintf("2026-09-%02dT10:00:00Z", index+1)
-		seedHistoryOccurrence(t, db, sourceID, fmt.Sprintf("Alert%02d", index+1), firstSeen)
+		firstSeen := fmt.Sprintf("2026-09-12T%02d:00:00Z", 10+index)
+		item := seedHistoryOccurrence(t, db, sourceID, fmt.Sprintf("Alert%02d", index+1), firstSeen)
+		seedCorrelation(t, db, item, "mall", "商城")
 	}
-	created, err := service.Create(ctx, principalID, "cmd-history-order", "总结最近告警", nil, nil)
+	created, err := service.Create(ctx, principalID, "cmd-history-order", "总结最近告警", nil, []SourceInput{{Type: "occurrence", SourceID: anchor}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,6 +201,12 @@ func TestCreateFreezesTenMostRecentOccurrencesInStableOrder(t *testing.T) {
 			t.Fatalf("history[%d] source=%q", index, occurrence.SourceKey)
 		}
 	}
+	// 来源自身绝不进入历史窗口；可变生命周期事实（state/resolvedAt）不渲染。
+	for _, occurrence := range input.RecentOccurrences {
+		if occurrence.Labels["alertname"] == "Anchor" {
+			t.Fatalf("anchor occurrence leaked into its own history window: %+v", occurrence)
+		}
+	}
 	if strings.Contains(string(canonical), `"state"`) || strings.Contains(string(canonical), `"resolvedAt"`) {
 		t.Fatalf("history rendered mutable occurrence facts: %s", canonical)
 	}
@@ -328,9 +227,6 @@ func TestCreateFreezesTenMostRecentOccurrencesInStableOrder(t *testing.T) {
 	if _, err := db.Exec(`UPDATE alert_occurrences SET state='Resolved',resolved_at=?,last_state_change_at=?,row_version=row_version+1 WHERE id=?`, testNow(), testNow(), newestID); err != nil {
 		t.Fatalf("advance occurrence lifecycle: %v", err)
 	}
-	if _, err := db.Exec(`UPDATE alert_occurrences SET labels_canonical='{"alertname":"rewritten"}',labels_digest=?,row_version=row_version+1 WHERE id=?`, strings.Repeat("0", 64), newestID); err == nil {
-		t.Fatal("immutable history labels were rewritten")
-	}
 	rebuilt, err := service.RebuildInput(ctx, created.AttemptID)
 	if err != nil {
 		t.Fatal(err)
@@ -340,18 +236,20 @@ func TestCreateFreezesTenMostRecentOccurrencesInStableOrder(t *testing.T) {
 	}
 }
 
-func TestRecentOccurrenceHistoryIncludesAllAlertSources(t *testing.T) {
+// TestRecentOccurrenceHistoryEmptyWithoutCorrelations proves the ADR-0012
+// scope rule：会话来源告警没有关联视图时，近期告警上下文为空。
+func TestRecentOccurrenceHistoryEmptyWithoutCorrelations(t *testing.T) {
 	db, dbPath := newTestDB(t)
 	service := newTestService(t, db, dbPath)
 	principalID := seedUser(t, db)
 	ctx := userContext(t, principalID)
 	seedProviderChain(t, db)
 
-	firstSourceID := seedAlertSourceForHistory(t, db, "history-a")
-	secondSourceID := seedAlertSourceForHistory(t, db, "history-b")
-	seedHistoryOccurrence(t, db, firstSourceID, "FromA", "2026-09-15T10:00:00Z")
-	seedHistoryOccurrence(t, db, secondSourceID, "FromB", "2026-09-16T10:00:00Z")
-	created, err := service.Create(ctx, principalID, "cmd-history-sources", "总结最近告警", nil, nil)
+	sourceID := seedAlertSourceForHistory(t, db, "history-a")
+	anchor := seedHistoryOccurrence(t, db, sourceID, "FromA", "2026-09-15T10:00:00Z")
+	// 同 source 的另一条告警存在，但来源没有关联视图——不构成历史上下文。
+	seedHistoryOccurrence(t, db, sourceID, "Uncorrelated", "2026-09-15T11:00:00Z")
+	created, err := service.Create(ctx, principalID, "cmd-history-empty", "总结最近告警", nil, []SourceInput{{Type: "occurrence", SourceID: anchor}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,8 +261,56 @@ func TestRecentOccurrenceHistoryIncludesAllAlertSources(t *testing.T) {
 	if err := json.Unmarshal(canonical, &input); err != nil {
 		t.Fatal(err)
 	}
-	if len(input.RecentOccurrences) != 2 || input.RecentOccurrences[0].SourceKey != "history-b" || input.RecentOccurrences[1].SourceKey != "history-a" {
-		t.Fatalf("history sources/order=%+v", input.RecentOccurrences)
+	if len(input.RecentOccurrences) != 0 {
+		t.Fatalf("uncorrelated session must freeze no history: %+v", input.RecentOccurrences)
+	}
+}
+
+// TestSendAppendsAlertSourcesIdempotently proves the「+ 引入告警」path
+// (ADR-0012)：Send 携带的来源幂等追加（已链接则忽略），新来源并入下一次
+// 模型输入，且来源渲染带归一语义与富化字段。
+func TestSendAppendsAlertSourcesIdempotently(t *testing.T) {
+	db, dbPath := newTestDB(t)
+	service := newTestService(t, db, dbPath)
+	principalID := seedUser(t, db)
+	ctx := userContext(t, principalID)
+	seedProviderChain(t, db)
+
+	first := seedOccurrence(t, db, "FirstAlert")
+	second := seedOccurrence(t, db, "SecondAlert")
+	seedCorrelation(t, db, second, "mall", "商城")
+	if _, err := db.Exec(`INSERT INTO alert_enrichments(occurrence_id,enrichment_json,evaluated_at) VALUES(?,?,?)`, second, `{"fields":{"team":"payments"},"rules":[]}`, testNow()); err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.Create(ctx, principalID, "cmd-send-source-1", "第一条", nil, []SourceInput{{Type: "occurrence", SourceID: first}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closeAttemptSucceeded(t, db, service, created.AttemptID, created.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	expectedHead := secondHead(t, db, created.InvestigationID)
+	sent, err := service.Send(ctx, principalID, "cmd-send-source-2", created.InvestigationID, int64Ptr(expectedHead), "再看这条告警", nil, []SourceInput{{Type: "occurrence", SourceID: second}, {Type: "occurrence", SourceID: first}})
+	if err != nil {
+		t.Fatalf("send with sources: %v", err)
+	}
+	var links int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM investigation_source_links WHERE investigation_id=?`, created.InvestigationID).Scan(&links); err != nil {
+		t.Fatal(err)
+	}
+	if links != 2 {
+		t.Fatalf("source links=%d want 2 (duplicate append ignored)", links)
+	}
+	canonical, err := service.RebuildInput(ctx, sent.AttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 新来源带归一语义与富化终值进入输入。
+	if !strings.Contains(string(canonical), `"severity":"warning"`) ||
+		!strings.Contains(string(canonical), `"title":"SecondAlert"`) ||
+		!strings.Contains(string(canonical), `"team":"payments"`) ||
+		!strings.Contains(string(canonical), `"viewKey":"mall"`) {
+		t.Fatalf("input lacks normalized occurrence source semantics: %s", canonical)
 	}
 }
 
@@ -428,7 +374,7 @@ func TestSendHeadFenceAndActiveAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A stale head conflicts (DATA-INVEST-001).
-	_, err = service.Send(ctx, principalID, "cmd-send-2", first.InvestigationID, nil, "第二条", nil)
+	_, err = service.Send(ctx, principalID, "cmd-send-2", first.InvestigationID, nil, "第二条", nil, nil)
 	var headConflict *HeadConflictError
 	if !errors.As(err, &headConflict) {
 		t.Fatalf("stale head err=%v want HeadConflictError", err)
@@ -437,7 +383,7 @@ func TestSendHeadFenceAndActiveAttempt(t *testing.T) {
 		t.Fatalf("conflict carries head %v want %d", headConflict.CurrentHead, first.MessageID)
 	}
 	// The active attempt blocks concurrent sends (DATA-INVEST-003).
-	_, err = service.Send(ctx, principalID, "cmd-send-3", first.InvestigationID, int64Ptr(first.MessageID), "第二条", nil)
+	_, err = service.Send(ctx, principalID, "cmd-send-3", first.InvestigationID, int64Ptr(first.MessageID), "第二条", nil, nil)
 	if !errors.Is(err, ErrActiveAttempt) {
 		t.Fatalf("active attempt err=%v want ErrActiveAttempt", err)
 	}
@@ -447,7 +393,7 @@ func TestSendHeadFenceAndActiveAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectedHead := secondHead(t, db, first.InvestigationID)
-	second, err := service.Send(ctx, principalID, "cmd-send-4", first.InvestigationID, int64Ptr(expectedHead), "第二条", nil)
+	second, err := service.Send(ctx, principalID, "cmd-send-4", first.InvestigationID, int64Ptr(expectedHead), "第二条", nil, nil)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -467,7 +413,7 @@ func TestSendHeadFenceAndActiveAttempt(t *testing.T) {
 		t.Fatalf("second lineage items=%d want 3", items)
 	}
 	// Replaying the same send returns the original message.
-	replay, err := service.Send(ctx, principalID, "cmd-send-4", first.InvestigationID, int64Ptr(expectedHead), "第二条", nil)
+	replay, err := service.Send(ctx, principalID, "cmd-send-4", first.InvestigationID, int64Ptr(expectedHead), "第二条", nil, nil)
 	if err != nil {
 		t.Fatalf("send replay: %v", err)
 	}

@@ -139,7 +139,7 @@ func newRoutedToolFixture(t *testing.T, preDispatch func(t *testing.T, db *sql.D
 	// tool_calls 的插入闭包要求模型调用已成功且携带完整输出；输出声明两个
 	// 提案（thanos_query@0 供插件路径用例，artifact_read@1 供平台工具用例）。
 	mustExec(t, db, `INSERT INTO model_call_input_items(model_call_id,item_seq,item_role,source_digest,synthetic_kind) VALUES(1,1,'system',?,'system_contract'),(1,2,'system',?,'tool_schema')`, strings.Repeat("1", 64), strings.Repeat("1", 64))
-	mustExec(t, db, `INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(1,1,'{"assistantText":"","finishReason":"tool_calls","tool_calls":[{"id":"call-routed-1","name":"thanos_query","arguments":{"query":"up"}},{"id":"call-routed-2","name":"artifact_read","arguments":{"artifactId":"1","offset":2,"limit":1}}]}',?,'tool_calls',?)`,
+	mustExec(t, db, `INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(1,1,'{"assistantText":"","finishReason":"tool_calls","tool_calls":[{"id":"call-routed-1","name":"thanos_query","arguments":{"query":"up"}},{"id":"call-routed-2","name":"artifact_read","arguments":{"artifactId":"1","offset":2,"limit":1}},{"id":"call-routed-3","name":"alerts_recent","arguments":{"viewKey":"mall"}}]}',?,'tool_calls',?)`,
 		strings.Repeat("6", 64), now)
 	mustExec(t, db, `UPDATE model_calls SET usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}',status='succeeded',ended_at=? WHERE id=1 AND status='running'`, now)
 	arguments := []byte(`{"query":"up"}`)
@@ -377,4 +377,49 @@ func TestQuoinRoutedArtifactReadExecutor(t *testing.T) {
 func sha256SumBytes(body []byte) []byte {
 	sum := sha256.Sum256(body)
 	return sum[:]
+}
+
+// TestQuoinRoutedAlertsRecentExecutor 覆盖 ADR-0012 平台工具 alerts_recent
+// 的进程内执行：只读查询 Quoin 告警库，结果契约（alerts/total/window + 归一
+// 语义字段与 viewKeys）按 occurrence 冻结列投影。
+func TestQuoinRoutedAlertsRecentExecutor(t *testing.T) {
+	fixture := newRoutedToolFixture(t, func(t *testing.T, db *sql.DB) {
+		t.Helper()
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		mustExec(t, db, `INSERT INTO alert_occurrences(id,source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,severity,title,annotations_canonical,resource,first_seen_at,last_state_change_at) VALUES(2,1,?,'2026-09-20T07:30:00Z','Firing','{}',?,'critical','CheckoutLatencyHigh','{"summary":"P95 over threshold"}','checkout:8080',?,?)`,
+			[]byte{0, 0, 0, 0, 0, 0, 1, 2}, strings.Repeat("c", 64), now, now)
+		mustExec(t, db, `INSERT INTO alert_enrichments(occurrence_id,enrichment_json,evaluated_at) VALUES(2,'{"fields":{"team":"payments"},"rules":[]}',?)`, now)
+		mustExec(t, db, `INSERT INTO business_views(id,view_key,display_name,description,connection_id,label_conditions_json,alert_source_keys_json,row_version,created_at,updated_at) VALUES(1,'mall','商城','',NULL,'{}','["routed-source"]',1,?,?)`, now, now)
+		mustExec(t, db, `INSERT INTO alert_occurrence_correlations(occurrence_id,view_id,view_key,display_name,matched_at) VALUES(2,1,'mall','商城',?)`, now)
+	})
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	arguments := []byte(`{"viewKey":"mall","severityMin":"high","hours":168,"limit":5}`)
+	mustExec(t, fixture.db, `INSERT INTO tool_calls(id,attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
+		VALUES(3,1,1,1,2,'call-routed-3','alerts_recent','1',?,?,'worker_local','return_to_model','pending',?)`,
+		string(arguments), hex.EncodeToString(sha256SumBytes(arguments)), now)
+
+	// 前序 tool call 必须先到终态（tool call 开始闭包的顺序围栏）。
+	if ack := fixture.beginRoutedToolCall(t, 1); !ack.GetBeginToolCallAck().GetAccepted() {
+		t.Fatalf("predecessor begin ack=%+v", ack.GetBeginToolCallAck())
+	}
+	fixture.awaitToolCallStatus(t, 1, "succeeded")
+	fixture.resetFrames()
+
+	if ack := fixture.beginRoutedToolCall(t, 3); !ack.GetBeginToolCallAck().GetAccepted() {
+		t.Fatalf("begin ack=%+v", ack.GetBeginToolCallAck())
+	}
+	fixture.awaitToolCallStatus(t, 3, "succeeded")
+	result := fixture.awaitExternalResult(t)
+	payload := result.GetPayload()
+	if payload.GetSchemaKind() != "alerts_recent_result_v1" {
+		t.Fatalf("schema kind=%q", payload.GetSchemaKind())
+	}
+	canonical := string(payload.GetCanonicalJson())
+	for _, expected := range []string{`"total":1`, `"occurrenceId":"2"`, `"severity":"critical"`, `"title":"CheckoutLatencyHigh"`, `"state":"Firing"`, `"viewKeys":["mall"]`} {
+		if !strings.Contains(canonical, expected) {
+			t.Fatalf("canonical=%s missing %s", canonical, expected)
+		}
+	}
+	// viewKey 过滤命中的正是带关联快照的告警；无关联的 fixture occurrence 1
+	// 不在结果里（同 fixture 只有一条命中）。
 }

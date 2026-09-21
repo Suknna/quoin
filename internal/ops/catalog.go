@@ -60,6 +60,8 @@ var enumLabelValues = map[string][]string{
 	},
 	"maintenance_reason": {"restore", "root_key_rebind", "upgrade"},
 	"attempt_termination_reason": {
+		// business_system_disabled 仍在 runtime.proto 封闭词表中（proto 是该
+		// 标签集的机器权威），但 ADR-0012 退役后 Quoin 不再产生该值。
 		"artifact_body_expired", "artifact_commit_failed", "business_system_disabled", "cancelled",
 		"connection_disabled", "context_too_large", "invalid_response", "lease_expired",
 		"provider_unavailable", "rate_limited", "replaced", "revoked",

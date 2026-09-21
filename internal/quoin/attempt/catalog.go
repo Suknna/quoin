@@ -88,6 +88,7 @@ var generationAccepts = map[string]map[string]bool{
 var platformToolNames = map[string]bool{
 	"bash": true, "read": true, "write": true, "grep": true,
 	"artifact_read": true, "artifact_grep": true,
+	"alerts_recent": true,
 }
 
 // ImplementationTable is the frozen by-name index of one assembly's

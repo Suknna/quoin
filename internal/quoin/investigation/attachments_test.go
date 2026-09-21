@@ -171,15 +171,15 @@ func TestAttachmentMessageCombinations(t *testing.T) {
 	}
 	// Duplicate ids reject (uniqueItems).
 	dup := []int64{parseOrFatal(t, first.ID), parseOrFatal(t, first.ID)}
-	if _, err := service.Send(ctx, principal, "combo-dup-00001", created.InvestigationID, int64Ptr(head), "重复", dup); !errors.Is(err, ErrAttachmentInvalidRef) {
+	if _, err := service.Send(ctx, principal, "combo-dup-00001", created.InvestigationID, int64Ptr(head), "重复", dup, nil); !errors.Is(err, ErrAttachmentInvalidRef) {
 		t.Fatalf("duplicate attachment must reject: %v", err)
 	}
 	// Unknown / foreign ids reject.
-	if _, err := service.Send(ctx, principal, "combo-unknown-001", created.InvestigationID, int64Ptr(head), "未知", []int64{999999}); !errors.Is(err, ErrAttachmentInvalidRef) {
+	if _, err := service.Send(ctx, principal, "combo-unknown-001", created.InvestigationID, int64Ptr(head), "未知", []int64{999999}, nil); !errors.Is(err, ErrAttachmentInvalidRef) {
 		t.Fatalf("unknown attachment must reject: %v", err)
 	}
 	// Multi-attachment send persists ordered references.
-	_, err = service.Send(ctx, principal, "combo-multi-0001", created.InvestigationID, int64Ptr(head), "带两个附件", []int64{parseOrFatal(t, second.ID), parseOrFatal(t, first.ID)})
+	_, err = service.Send(ctx, principal, "combo-multi-0001", created.InvestigationID, int64Ptr(head), "带两个附件", []int64{parseOrFatal(t, second.ID), parseOrFatal(t, first.ID)}, nil)
 	if err != nil {
 		t.Fatalf("multi send: %v", err)
 	}

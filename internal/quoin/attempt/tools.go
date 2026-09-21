@@ -95,9 +95,88 @@ var platformTools = []ToolDef{
 	{
 		Name: "artifact_grep", Version: "2", ExecutionMode: "quoin_routed", FailureMode: "return_to_model", ResultSchemaKind: "artifact_grep_result_v1",
 		Description: "在 Artifact 文本内按 RE2 正则搜索；返回有界匹配片段与截断标记。",
-		Arguments:   map[string]ArgumentKind{"artifactId": KindString, "pattern": KindString},
-		Required:    []string{"artifactId", "pattern"},
+		Arguments:    map[string]ArgumentKind{"artifactId": KindString, "pattern": KindString},
+		Required:     []string{"artifactId", "pattern"},
 	},
+ alertsRecentTool(),
+}
+
+// alertsRecentTool 是读取 Quoin 自有告警库的平台工具（ADR-0012 工具归属判据：
+// 读 Quoin 自有数据 = 平台工具，不属于任何插件）。参数带枚举与数值边界，
+// 超出 attempt 简单 Arguments/Required 词表的表达力，因此与插件工具同款
+// 手写 Parameters + ValidateArguments 闭包（拒绝未知字段与越界值）。
+func alertsRecentTool() ToolDef {
+	parameters := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"viewKey": map[string]any{
+				"type":        "string",
+				"description": "按业务视图过滤：只返回首观测时关联到该 viewKey 的告警；缺省不过滤。",
+			},
+			"severityMin": map[string]any{
+				"type":        "string",
+				"enum":        []any{"critical", "high", "warning", "info"},
+				"description": "最低 severity（含）；缺省为 info（不过滤）。",
+			},
+			"hours": map[string]any{
+				"type":        "number",
+				"minimum":     1,
+				"maximum":     168,
+				"description": "时间窗（小时），按告警 startsAt 回看；缺省 24，上限 168。",
+			},
+			"limit": map[string]any{
+				"type":        "number",
+				"minimum":     1,
+				"maximum":     50,
+				"description": "返回条数上限；缺省 10，上限 50。",
+			},
+		},
+	}
+	return ToolDef{
+		Name: "alerts_recent", Version: "1", ExecutionMode: "quoin_routed", FailureMode: "return_to_model",
+		ResultSchemaKind: "alerts_recent_result_v1", Description: "查询 Quoin 告警库中的近期告警（归一化语义）：可按业务视图、最低 severity、时间窗过滤，返回 id/severity/title/state/startsAt/labels 摘要。用于分析时获取相关告警上下文。",
+		Arguments:        map[string]ArgumentKind{"viewKey": KindString, "severityMin": KindString, "hours": KindNumber, "limit": KindNumber},
+		Parameters:       parameters,
+		ValidateArguments: func(raw []byte) error {
+			var arguments map[string]any
+			if err := json.Unmarshal(raw, &arguments); err != nil {
+				return fmt.Errorf("tool alerts_recent arguments unparseable: %w", err)
+			}
+			for key := range arguments {
+				switch key {
+				case "viewKey", "severityMin", "hours", "limit":
+				default:
+					return fmt.Errorf("tool alerts_recent argument %q is not part of the fixed schema", key)
+				}
+			}
+			if value, exists := arguments["viewKey"]; exists {
+				if text, ok := value.(string); !ok || text == "" {
+					return fmt.Errorf("tool alerts_recent argument %q must be a non-empty string", "viewKey")
+				}
+			}
+			if value, exists := arguments["severityMin"]; exists {
+				severity, ok := value.(string)
+				if !ok || !plugins.ValidSeverity(plugins.Severity(severity)) {
+					return fmt.Errorf("tool alerts_recent argument %q must be one of critical/high/warning/info", "severityMin")
+				}
+			}
+			bounds := map[string]struct{ min, max, fallback float64 }{
+				"hours": {1, 168, 24},
+				"limit": {1, 50, 10},
+			}
+			for key, bound := range bounds {
+				value, exists := arguments[key]
+				if !exists || value == nil {
+					continue
+				}
+				number, ok := value.(float64)
+				if !ok || number < bound.min || number > bound.max {
+					return fmt.Errorf("tool alerts_recent argument %q must be a number between %v and %v", key, bound.min, bound.max)
+				}
+			}
+			return nil
+		},
+	}
 }
 
 // PlatformImplementations returns the compiled platform tool table (stable

@@ -107,13 +107,6 @@ func TestNoBusinessRunReport(t *testing.T) {
 	if report.Content != "无业务报告" || len(report.EvidenceIDs) != 1 {
 		t.Fatalf("slice report = %+v", report)
 	}
-	var businessSystems int
-	if err = h.db.QueryRow(`SELECT COUNT(*) FROM business_systems`).Scan(&businessSystems); err != nil {
-		t.Fatal(err)
-	}
-	if businessSystems != 0 {
-		t.Fatalf("slice must work with zero business systems, got %d", businessSystems)
-	}
 }
 
 // TestRangePlanRunSettlesOnFailureAndPartial proves range-template runs can

@@ -42,11 +42,9 @@ type InvestigationSourceSummary struct {
 // InvestigationDetail is the get/create response projection (InvestigationDetail).
 type InvestigationDetail struct {
 	InvestigationSummary
-	MessageCount       int64                        `json:"messageCount"`
-	AttemptCount       int64                        `json:"attemptCount"`
-	Sources            []InvestigationSourceSummary `json:"sources"`
-	BusinessSystemKey  string                       `json:"businessSystemKey,omitempty"`
-	BusinessSystemName string                       `json:"businessSystemName,omitempty"`
+	MessageCount  int64                        `json:"messageCount"`
+	AttemptCount  int64                        `json:"attemptCount"`
+	Sources       []InvestigationSourceSummary `json:"sources"`
 }
 
 // InvestigationMessageItem is the listInvestigationMessages projection (MessageSummary).
@@ -152,16 +150,6 @@ func (service *Service) Get(ctx context.Context, investigationID int64) (Investi
 		return InvestigationDetail{}, err
 	}
 	detail.Sources = sources
-	if err := service.runner.Reader().QueryRowContext(ctx, `
-		SELECT config.system_key, config.display_name
-		FROM execution_attempts attempt
-		JOIN attempt_input_snapshots snapshot ON snapshot.attempt_id=attempt.id
-		JOIN attempt_input_items item ON item.snapshot_id=snapshot.id AND item.business_system_config_version_id IS NOT NULL
-		JOIN business_system_config_versions config ON config.id=item.business_system_config_version_id
-		WHERE attempt.scope_type='investigation' AND attempt.scope_id=?
-		ORDER BY attempt.id LIMIT 1`, investigationID).Scan(&detail.BusinessSystemKey, &detail.BusinessSystemName); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return InvestigationDetail{}, err
-	}
 	title, activity, err := service.deriveHead(ctx, investigationID)
 	if err != nil {
 		return InvestigationDetail{}, err
@@ -316,10 +304,15 @@ func (service *Service) fallbackTitle(ctx context.Context, item InvestigationSum
 }
 
 func (service *Service) occurrenceDisplayName(ctx context.Context, occurrenceID int64) (string, bool) {
+	// ADR-0012：标题优先读归一化 title 列，缺省退回 labels.alertname。
+	var title string
 	var labelsJSON string
 	if err := service.runner.Reader().QueryRowContext(ctx, `
-		SELECT labels_canonical FROM alert_occurrences WHERE id=?`, occurrenceID).Scan(&labelsJSON); err != nil {
+		SELECT title, labels_canonical FROM alert_occurrences WHERE id=?`, occurrenceID).Scan(&title, &labelsJSON); err != nil {
 		return "", false
+	}
+	if title != "" {
+		return title, true
 	}
 	var labels map[string]string
 	if err := json.Unmarshal([]byte(labelsJSON), &labels); err != nil {

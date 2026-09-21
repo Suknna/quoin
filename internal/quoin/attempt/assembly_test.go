@@ -44,10 +44,19 @@ func TestImplementationsComposeSingleSource(t *testing.T) {
 			t.Fatalf("plugin tool %s has no dispatch handler", entry.Definition.Name)
 		}
 	}
-	for _, name := range []string{"bash", "read", "write", "grep", "artifact_read", "artifact_grep"} {
+	// ADR-0012 平台工具全集（7 个）：工作区/Artifact 工具 + alerts_recent。
+	platformTools := []string{"bash", "read", "write", "grep", "artifact_read", "artifact_grep", "alerts_recent"}
+	for _, name := range platformTools {
 		if _, ok := catalogs.Implementations.Lookup(name); !ok {
 			t.Fatalf("platform tool %s missing from the composed table", name)
 		}
+	}
+	definition, _ := catalogs.Implementations.Lookup("alerts_recent")
+	if definition.ExecutionMode != plugins.ModeQuoinRouted || definition.RequiresConnectionGrant || definition.ProducesEvidence || definition.ResultSchemaKind != "alerts_recent_result_v1" {
+		t.Fatalf("alerts_recent contract drifted: %+v", definition)
+	}
+	if definition.Parameters == nil || definition.ValidateArguments == nil {
+		t.Fatal("alerts_recent must carry its frozen parameter schema and ingress validator")
 	}
 }
 

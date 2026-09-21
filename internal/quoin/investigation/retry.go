@@ -113,11 +113,7 @@ func (service *Service) Retry(ctx context.Context, principalID int64, clientComm
 		}
 		// The snapshot's cutoff is the retried message itself: attemptUserMessage
 		// resolves the same message through the frozen lineage at dispatch time.
-		businessContext, err := businessContextForInvestigation(ctx, tx, investigationID)
-		if err != nil {
-			return retryResult{}, execution.Changed, err
-		}
-		if err := service.freezeInputSnapshot(ctx, tx, investigationID, newAttemptID, messageID, attachments, businessContext, selected, now); err != nil {
+		if err := service.freezeInputSnapshot(ctx, tx, investigationID, newAttemptID, messageID, attachments, selected, now); err != nil {
 			return retryResult{}, execution.Changed, err
 		}
 		return retryResult{AttemptID: newAttemptID}, execution.Changed, nil

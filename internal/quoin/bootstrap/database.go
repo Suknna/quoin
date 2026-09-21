@@ -263,7 +263,6 @@ func initializeDatabase(ctx context.Context, db *sql.DB, rootKey []byte) error {
 		{`INSERT INTO schema_state(id,schema_version,schema_digest,upgraded_at) VALUES(1,'v1',?,?)`, []any{hex.EncodeToString(digest[:]), now}},
 		{`INSERT INTO root_key_state(id,binding_revision,verifier_nonce,verifier_ciphertext,bound_at) VALUES(1,1,?,?,?)`, []any{nonce, ciphertext, now}},
 		{`INSERT INTO maintenance_state(id,active,row_version) VALUES(1,0,1)`, nil},
-		{`INSERT INTO label_contract_state(id,row_version,updated_at) VALUES(1,1,?)`, []any{now}},
 		{`INSERT INTO backup_settings(id,enabled,schedule_cron,timezone,retention_count,schedule_enabled_at,row_version,updated_at) VALUES(1,1,'0 0 * * *','UTC',30,?,1,?)`, []any{now, now}},
 		{`INSERT INTO backup_retention_health(id) VALUES(1)`, nil},
 		{`INSERT INTO audit_retention(id,cleanup_enabled,updated_at) VALUES(1,1,?)`, []any{now}},

@@ -53,6 +53,10 @@ func (application *apiServer) configureReadOnly(reader execution.Reader) error {
 	if err != nil {
 		return err
 	}
+	enrichmentRules, err := businessview.NewEnrichmentServiceWithReader(reader, runner)
+	if err != nil {
+		return err
+	}
 	feedbackService, err := feedback.NewServiceWithReader(reader, runner)
 	if err != nil {
 		return err
@@ -95,6 +99,7 @@ func (application *apiServer) configureReadOnly(reader execution.Reader) error {
 	}
 	application.knowledgeService = knowledgeService
 	application.views = views
+	application.enrichmentRules = enrichmentRules
 	application.feedbackService = feedbackService
 	application.alerts = alertService
 	application.platformFaults = alerts.NewPlatformFaultReporter(alertService)

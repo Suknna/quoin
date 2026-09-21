@@ -306,11 +306,32 @@ func seedOccurrence(t *testing.T, db *sql.DB, alertname string) int64 {
 		t.Fatal(err)
 	}
 	sourceID, _ := source.LastInsertId()
-	occurrence, err := db.Exec(`INSERT INTO alert_occurrences(source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,first_seen_at,last_state_change_at) VALUES(?,?,?,'Firing',?,?,?,?)`,
-		sourceID, []byte{byte(testSeedCounter), 0, 0, 0, 0, 0, 0, 1}, now, `{"alertname":"`+alertname+`"}`, strings.Repeat("c", 64), now, now)
+	occurrence, err := db.Exec(`INSERT INTO alert_occurrences(source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,severity,title,annotations_canonical,resource,first_seen_at,last_state_change_at) VALUES(?,?,?,'Firing',?,?,'warning',?,'{}','',?,?)`,
+		sourceID, []byte{byte(testSeedCounter), 0, 0, 0, 0, 0, 0, 1}, now, `{"alertname":"`+alertname+`"}`, strings.Repeat("c", 64), alertname, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	id, _ := occurrence.LastInsertId()
 	return id
+}
+
+// seedCorrelation freezes one view-correlation snapshot on an occurrence
+// (ADR-0012 Correlate 段的测试桩：视图按 key 幂等建立，满足外键与唯一约束)。
+func seedCorrelation(t *testing.T, db *sql.DB, occurrenceID int64, viewKey, displayName string) {
+	t.Helper()
+	now := testNow()
+	var viewID int64
+	err := db.QueryRow(`SELECT id FROM business_views WHERE view_key=?`, viewKey).Scan(&viewID)
+	if err != nil {
+		view, insertErr := db.Exec(`INSERT INTO business_views(view_key,display_name,description,connection_id,label_conditions_json,alert_source_keys_json,row_version,created_at,updated_at) VALUES(?,?,'',NULL,'{}','["any-source"]',1,?,?)`,
+			viewKey, displayName, now, now)
+		if insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		viewID, _ = view.LastInsertId()
+	}
+	if _, err := db.Exec(`INSERT INTO alert_occurrence_correlations(occurrence_id,view_id,view_key,display_name,matched_at) VALUES(?,?,?,?,?)`,
+		occurrenceID, viewID, viewKey, displayName, now); err != nil {
+		t.Fatal(err)
+	}
 }

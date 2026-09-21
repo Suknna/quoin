@@ -186,11 +186,10 @@ func (handler *Handler) listInvestigations(ctx context.Context, input *struct {
 func (handler *Handler) createInvestigation(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Body    struct {
-		ClientCommandID   string            `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
-		Content           string            `json:"content,omitempty"`
-		AttachmentIDs     []string          `json:"attachmentIds,omitempty"`
-		Sources           []sourceInputWire `json:"sources,omitempty"`
-		BusinessSystemKey string            `json:"businessSystemKey,omitempty"`
+		ClientCommandID string            `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+		Content         string            `json:"content,omitempty"`
+		AttachmentIDs   []string          `json:"attachmentIds,omitempty"`
+		Sources         []sourceInputWire `json:"sources,omitempty"`
 	}
 },
 ) (*investigationDetailBody, error) {
@@ -206,7 +205,7 @@ func (handler *Handler) createInvestigation(ctx context.Context, input *struct {
 	if err != nil {
 		return nil, problemUnprocessable("来源引用无效，请返回告警或分析页面重新发起。")
 	}
-	result, err := handler.Service.CreateWithBusinessSystem(ctx, principalID, input.Body.ClientCommandID, input.Body.Content, attachmentIDs, sources, input.Body.BusinessSystemKey)
+	result, err := handler.Service.Create(ctx, principalID, input.Body.ClientCommandID, input.Body.Content, attachmentIDs, sources)
 	if err != nil {
 		return nil, createSendError(err)
 	}
@@ -289,15 +288,17 @@ func (handler *Handler) listInvestigationMessages(ctx context.Context, input *st
 }
 
 // sendInvestigationMessage appends one user turn in a single transaction
-// (DATA-INVEST-001); a stale head or an active attempt conflicts.
+// (DATA-INVEST-001); a stale head or an active attempt conflicts. Sources
+// ride the same command（ADR-0012「+ 引入告警」：幂等追加来源链接）.
 func (handler *Handler) sendInvestigationMessage(ctx context.Context, input *struct {
 	Session         string `cookie:"__Host-quoin-session"`
 	InvestigationID string `path:"investigationId"`
 	Body            struct {
-		ClientCommandID       string   `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
-		Content               string   `json:"content,omitempty"`
-		AttachmentIDs         []string `json:"attachmentIds,omitempty"`
-		ExpectedHeadMessageID *string  `json:"expectedHeadMessageId"`
+		ClientCommandID       string            `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+		Content               string            `json:"content,omitempty"`
+		AttachmentIDs         []string          `json:"attachmentIds,omitempty"`
+		Sources               []sourceInputWire `json:"sources,omitempty"`
+		ExpectedHeadMessageID *string           `json:"expectedHeadMessageId"`
 	}
 },
 ) (*messageBody, error) {
@@ -313,6 +314,10 @@ func (handler *Handler) sendInvestigationMessage(ctx context.Context, input *str
 	if err != nil {
 		return nil, problemUnprocessable("附件引用无效，请重新选择附件后重试。")
 	}
+	sources, err := parseSources(input.Body.Sources)
+	if err != nil {
+		return nil, problemUnprocessable("来源引用无效，请重新选择告警后重试。")
+	}
 	var expectedHead *int64
 	if input.Body.ExpectedHeadMessageID != nil {
 		value, err := strconv.ParseInt(*input.Body.ExpectedHeadMessageID, 10, 64)
@@ -321,7 +326,7 @@ func (handler *Handler) sendInvestigationMessage(ctx context.Context, input *str
 		}
 		expectedHead = &value
 	}
-	result, err := handler.Service.Send(ctx, principalID, input.Body.ClientCommandID, investigationID, expectedHead, input.Body.Content, attachmentIDs)
+	result, err := handler.Service.Send(ctx, principalID, input.Body.ClientCommandID, investigationID, expectedHead, input.Body.Content, attachmentIDs, sources)
 	if err != nil {
 		return nil, sendError(err, investigationID)
 	}
@@ -417,8 +422,6 @@ func createSendError(err error) error {
 		conflict := problem(409, "command_id_reused", "命令 ID 已被其他请求使用，请重新发起。")
 		conflict.Conflict = map[string]any{"code": "command_id_reused"}
 		return conflict
-	case errors.Is(err, investigation.ErrBusinessSystemInvalid):
-		return problemUnprocessable("所选业务系统不可用于新调查，请选择已启用且已发布的系统。")
 	case errors.Is(err, investigation.ErrMessageInvalid):
 		return problemUnprocessable("消息必须包含正文或至少一个附件。")
 	case errors.Is(err, investigation.ErrAttachmentInvalidRef):

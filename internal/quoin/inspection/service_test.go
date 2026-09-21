@@ -245,7 +245,6 @@ func schemaSeed() string {
 	// idle/absolute windows (VerifyExecutionSession re-checks all of these
 	// inside the runner transaction).
 	return strings.Join([]string{
-		`INSERT INTO label_contract_state(id,row_version,updated_at) VALUES(1,1,'` + now + `')`,
 		`INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,row_version,created_at,updated_at)
 		 VALUES (1,'admin','Admin','admin',1,1,'$argon2id$fixture',1,'` + now + `','` + now + `')`,
 		`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at)

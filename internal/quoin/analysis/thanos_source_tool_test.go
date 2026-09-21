@@ -1,11 +1,10 @@
 package analysis
 
 // Source-level thanos_query authorization (ADR-0004): an admin-enabled
-// metrics connection is itself the read-only authority for attempts that
-// froze no business declaration. The declaration mode keeps narrowing an
-// attributed occurrence; it never widens. Routing ambiguity is a
-// recoverable model-visible preflight result, never a silent first-pick or
-// an all-sources fan-out.
+// metrics connection frozen at attempt creation is itself the read-only
+// authority（business_system 授权已随 ADR-0012 整域退役）。Routing ambiguity
+// is a recoverable model-visible preflight result, never a silent first-pick
+// or an all-sources fan-out.
 
 import (
 	"context"
@@ -24,9 +23,8 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
-// seedSourceOccurrence inserts one firing occurrence with no business
-// attribution at all (business_system_id NULL): the ADR-0004 mainline where
-// alerts arrive without any business view.
+// seedSourceOccurrence inserts one firing occurrence（ADR-0012 归一语义列随
+// 行冻结）：来源级主线，告警不携带任何业务视图关联。
 func seedSourceOccurrence(t *testing.T, db *sql.DB) int64 {
 	t.Helper()
 	seedCounter++
@@ -37,8 +35,8 @@ func seedSourceOccurrence(t *testing.T, db *sql.DB) int64 {
 	}
 	sourceID, _ := source.LastInsertId()
 	labels := `{"alertname":"HighErrorRate","severity":"critical"}`
-	occurrence, err := db.Exec(`INSERT INTO alert_occurrences(source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,first_seen_at,last_state_change_at) VALUES(?,?,?,'Firing',?,?,?,?)`,
-		sourceID, []byte{0, 0, 0, 0, 0, 0, byte(seedCounter % 8), 2}, now, labels, sha256Hex(labels), now, now)
+	occurrence, err := db.Exec(`INSERT INTO alert_occurrences(source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,severity,title,annotations_canonical,resource,first_seen_at,last_state_change_at) VALUES(?,?,?,'Firing',?,?,?,'HighErrorRate','{}','',?,?)`,
+		sourceID, []byte{0, 0, 0, 0, 0, 0, byte(seedCounter % 8), 2}, now, labels, sha256Hex(labels), "critical", now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,12 +225,12 @@ func TestThanosSourceGrantResolvesByExplicitName(t *testing.T) {
 		t.Fatalf("resolution=%+v, want one grant", resolution)
 	}
 	var purpose string
-	var grantedConnection, grantedBusiness sql.NullInt64
-	if err := db.QueryRow(`SELECT purpose,connection_id,business_system_id FROM attempt_connection_grants WHERE id=?`, resolution.Grants[0].GrantID).Scan(&purpose, &grantedConnection, &grantedBusiness); err != nil {
+	var grantedConnection int64
+	if err := db.QueryRow(`SELECT purpose,connection_id FROM attempt_connection_grants WHERE id=?`, resolution.Grants[0].GrantID).Scan(&purpose, &grantedConnection); err != nil {
 		t.Fatal(err)
 	}
-	if purpose != "thanos_query" || !grantedConnection.Valid || grantedConnection.Int64 != connectionID || grantedBusiness.Valid {
-		t.Fatalf("grant purpose=%s connection=%v business=%v", purpose, grantedConnection, grantedBusiness)
+	if purpose != "thanos_query" || grantedConnection != connectionID {
+		t.Fatalf("grant purpose=%s connection=%v", purpose, grantedConnection)
 	}
 	var binding int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM tool_call_connection_grants WHERE tool_call_id=? AND connection_grant_id=?`, toolCallID, resolution.Grants[0].GrantID).Scan(&binding); err != nil || binding != 1 {
@@ -366,10 +364,10 @@ func TestThanosSourceModeRejectsBusinessResourceRef(t *testing.T) {
 	}
 }
 
-// TestThanosDeclaredAttemptForeignSourceRefStaysNarrow proves a published
-// declaration grants nothing: an attributed attempt resolves exactly like a
-// source-level one — frozen-list names only.
-func TestThanosDeclaredAttemptForeignSourceRefStaysNarrow(t *testing.T) {
+// TestThanosFrozenListStaysNarrowAfterNewEnablement proves the frozen
+// source list grants nothing wider: an attempt resolves only the sources
+// frozen at creation — a connection enabled afterwards stays outside the list.
+func TestThanosFrozenListStaysNarrowAfterNewEnablement(t *testing.T) {
 	db, dbPath := newTestDB(t)
 	service := newTestService(t, db, dbPath)
 	seedProviderChain(t, db)
@@ -377,14 +375,14 @@ func TestThanosDeclaredAttemptForeignSourceRefStaysNarrow(t *testing.T) {
 	occurrenceID := seedOccurrence(t, db)
 	// The attempt freezes ONLY the sources enabled at creation; the second
 	// connection is enabled afterwards so it is genuinely outside the list.
-	attemptID, callID := runThanosAttempt(t, db, service, occurrenceID, "cmd-declared-foreign-source")
+	attemptID, callID := runThanosAttempt(t, db, service, occurrenceID, "cmd-frozen-foreign-source")
 	additionalID := seedAdditionalThanosChain(t, db)
 	var foreignName string
 	if err := db.QueryRow(`SELECT name FROM connections WHERE id=?`, additionalID).Scan(&foreignName); err != nil {
 		t.Fatal(err)
 	}
-	declaredName := foreignDeclaredName(t, db, occurrenceID)
-	if foreignName == declaredName {
+	frozenName := enabledMetricsNames(t, db)[0]
+	if foreignName == frozenName {
 		t.Fatalf("fixture names must differ: %q", foreignName)
 	}
 	toolCallID := pendingSourceThanosCall(t, db, attemptID, callID, 1, thanosSourceArguments(foreignName, "up", false))
@@ -393,37 +391,19 @@ func TestThanosDeclaredAttemptForeignSourceRefStaysNarrow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolution.PreflightCode != thanos.PreflightTargetNotFound || !strings.Contains(resolution.PreflightDetail, declaredName) {
-		t.Fatalf("resolution=%+v, want target_not_found listing frozen candidate %q", resolution, declaredName)
+	if resolution.PreflightCode != thanos.PreflightTargetNotFound || !strings.Contains(resolution.PreflightDetail, frozenName) {
+		t.Fatalf("resolution=%+v, want target_not_found listing frozen candidate %q", resolution, frozenName)
 	}
 
-	// The declared connection is part of the frozen list, so naming it
-	// explicitly resolves like any other frozen source (fresh attempt, one
+	// The frozen connection itself resolves normally (fresh attempt, one
 	// pending Tool Call each).
-	narrowAttempt, narrowCall := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-declared-matching-source")
-	okCall := pendingSourceThanosCall(t, db, narrowAttempt, narrowCall, 1, thanosSourceArguments(declaredName, "up", false))
+	narrowAttempt, narrowCall := runThanosAttempt(t, db, service, seedOccurrence(t, db), "cmd-frozen-matching-source")
+	okCall := pendingSourceThanosCall(t, db, narrowAttempt, narrowCall, 1, thanosSourceArguments(frozenName, "up", false))
 	okResolution, err := resolveThanosCall(t, db, service, narrowAttempt, okCall)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if okResolution.PreflightCode != "" || len(okResolution.Grants) != 1 {
-		t.Fatalf("declared-source resolution=%+v, want one grant", okResolution)
+		t.Fatalf("frozen-source resolution=%+v, want one grant", okResolution)
 	}
-}
-
-// foreignDeclaredName resolves the metrics connection name the published
-// business declaration attributed to this occurrence references.
-func foreignDeclaredName(t *testing.T, db *sql.DB, occurrenceID int64) string {
-	t.Helper()
-	var name string
-	if err := db.QueryRow(`
-		SELECT c.name
-		FROM alert_occurrences occurrence
-		JOIN business_systems business ON business.id=occurrence.business_system_id
-		JOIN business_system_config_versions config ON config.id=business.current_config_version_id
-		JOIN connections c ON c.id=config.metrics_connection_id
-		WHERE occurrence.id=? AND config.state='published'`, occurrenceID).Scan(&name); err != nil {
-		t.Fatal(err)
-	}
-	return name
 }
