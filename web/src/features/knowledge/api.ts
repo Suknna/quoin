@@ -207,6 +207,24 @@ function commandBody(extra: Record<string, unknown>): string {
 	return JSON.stringify({ clientCommandId: knowledgeCommandId(), ...extra });
 }
 
+export interface CandidateFilter {
+	state?: CandidateState;
+	sourceType?: CandidateSourceType;
+}
+
+export interface ImportBatchFilter {
+	state?: ImportBatchSummary["state"];
+}
+
+function queryString(entries: Record<string, string | undefined>): string {
+	const params = new URLSearchParams();
+	for (const [key, value] of Object.entries(entries)) {
+		if (value) params.set(key, value);
+	}
+	const text = params.toString();
+	return text ? `?${text}` : "";
+}
+
 export const api = {
 	createAnalysisCandidate: (occurrenceId: string, analysisId: string) =>
 		request<CandidateSummary>(
@@ -238,9 +256,13 @@ export const api = {
 				body: commandBody({}),
 			},
 		),
-	listCandidates: (query = "", cursor?: string) =>
+	listCandidates: (filter: CandidateFilter = {}, cursor?: string) =>
 		request<Page<CandidateSummary>>(
-			`/api/v1/knowledge/candidates${query}${cursor ? `${query ? "&" : "?"}cursor=${encodeURIComponent(cursor)}` : ""}`,
+			`/api/v1/knowledge/candidates${queryString({
+				state: filter.state,
+				sourceType: filter.sourceType,
+				cursor,
+			})}`,
 		),
 	getCandidate: (candidateId: string) =>
 		request<CandidateDetail>(`/api/v1/knowledge/candidates/${candidateId}`),
@@ -274,17 +296,17 @@ export const api = {
 		),
 	browse: (cursor?: string) =>
 		request<{ mode: "browse"; items: KnowledgeSummary[]; nextCursor?: string }>(
-			`/api/v1/knowledge${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+			`/api/v1/knowledge${queryString({ cursor })}`,
 		),
 	search: (query: string, cursor?: string) =>
 		request<KnowledgeQueryResult>(
-			`/api/v1/knowledge?q=${encodeURIComponent(query)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+			`/api/v1/knowledge${queryString({ q: query, cursor })}`,
 		),
 	getKnowledge: (knowledgeId: string) =>
 		request<KnowledgeDetail>(`/api/v1/knowledge/items/${knowledgeId}`),
 	listVersions: (knowledgeId: string, cursor?: string) =>
 		request<Page<KnowledgeVersionSummary>>(
-			`/api/v1/knowledge/items/${knowledgeId}/versions${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+			`/api/v1/knowledge/items/${knowledgeId}/versions${queryString({ cursor })}`,
 		),
 	getVersion: (knowledgeId: string, versionId: string) =>
 		request<KnowledgeVersionDetail>(
@@ -296,9 +318,9 @@ export const api = {
 			headers: { "Content-Type": "application/json" },
 			body: commandBody({ text }),
 		}),
-	listImportBatches: (cursor?: string) =>
+	listImportBatches: (filter: ImportBatchFilter = {}, cursor?: string) =>
 		request<Page<ImportBatchSummary>>(
-			`/api/v1/knowledge/import-batches${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+			`/api/v1/knowledge/import-batches${queryString({ state: filter.state, cursor })}`,
 		),
 	getImportBatch: (batchId: string) =>
 		request<ImportBatchDetail>(`/api/v1/knowledge/import-batches/${batchId}`),
