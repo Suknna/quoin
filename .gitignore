@@ -14,3 +14,4 @@ web/test-results/
 !.env.sample
 /.local-lab/
 /.zcode/
+/.zcodeignore
