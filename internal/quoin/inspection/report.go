@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/execution"
@@ -22,6 +23,11 @@ import (
 
 const reportInputKind = "inspection_analysis_v1"
 const reportResultKind = "inspection_report_result_v1"
+
+// reportRendererVersion 是巡检分析输入快照的 renderer 代：v2（知识接入代）
+// 起在 canonical 输入内嵌冻结工具目录；旧 Attempt 的快照仍记录 v1，重建只读
+// 存储文档，不回填目录，字节保持不变。
+const reportRendererVersion = "v2"
 
 type reportModelContract struct {
 	ModelID             string `json:"modelId"`
@@ -184,6 +190,10 @@ type reportInput struct {
 	ArtifactIDs        []int64             `json:"artifactIds"`
 	KnowledgeVersionID []int64             `json:"knowledgeVersionIds"`
 	ModelContract      reportModelContract `json:"modelContract"`
+	// ToolCatalog 是随本次 Attempt 冻结的工具目录（inspection-analysis-v4 起）：
+	// 与 attempt_input_snapshots.tool_catalog_json 同一文档内嵌进 canonical
+	// 输入（digest 覆盖）；旧 Attempt（无目录）重建时保持缺失以维持字节不变。
+	ToolCatalog *attempt.FrozenCatalog `json:"toolCatalog,omitempty"`
 	// Run 冻结的计划绑定上下文（ADR-0004 独立计划 Run）。
 	Plan            *planReportContext `json:"plan,omitempty"`
 	ConnectionName  string             `json:"connectionName,omitempty"`
@@ -418,13 +428,19 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Execu
 	if err != nil {
 		return 0, err
 	}
+	// 知识接入代起冻结本次 Attempt 的工具目录：与派发字节同文档内嵌进
+	// canonical 输入（digest 覆盖），同一文档写入 tool_catalog_json。
+	catalogDocument, catalog, err := attempt.FrozenCatalogJSONForCreation(s.Attempts().Catalogs, attempt.InspectionAgentVersion)
+	if err != nil {
+		return 0, err
+	}
 	input := reportInput{
 		SchemaKind: reportInputKind, AttemptID: analysisID, InspectionRunID: runID,
 		ReportVersion: int64(reportVersion + 1), PlanKey: planKey,
 		EvidenceIDs: evidenceIDs, ArtifactIDs: artifactIDs, KnowledgeVersionID: []int64{},
 		ModelContract: reportModelContract{ModelID: provider.ChatModelID, ContextBudgetTokens: provider.ContextBudget, MaxOutputTokens: provider.MaxOutput},
 		Plan:          planContext, ConnectionName: planConnectionName, TemplateID: planTemplateID, TemplateVersion: planTemplateVersion,
-		Checks: checkItems, ReportInstructionsOverride: reportInstructionsOverride,
+		Checks: checkItems, ReportInstructionsOverride: reportInstructionsOverride, ToolCatalog: catalog,
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
@@ -432,8 +448,8 @@ func (s *Service) createReportAnalysisOn(ctx context.Context, tx execution.Execu
 	}
 	digest := sha256.Sum256(body)
 	snapshot, err := tx.ExecContext(ctx, `
-		INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,inspection_report_version,created_at)
-		VALUES(?,?,?,?,?,?)`, analysisID, reportInputKind, "v1", hex.EncodeToString(digest[:]), input.ReportVersion, now)
+		INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,tool_catalog_json,inspection_report_version,created_at)
+		VALUES(?,?,?,?,?,?,?)`, analysisID, reportInputKind, reportRendererVersion, hex.EncodeToString(digest[:]), string(catalogDocument), input.ReportVersion, now)
 	if err != nil {
 		return 0, err
 	}
@@ -509,6 +525,13 @@ type reportProposal struct {
 // the attempt's persisted correlation, the boot/epoch fence is preserved, and
 // the automatic audit row commits atomically with the ledger INSERT. An
 // identical redelivery replays silently — the first commit's audit stands.
+//
+// 知识引用权威化：ledger 的 knowledge_version_ids 不采纳提案声明的列表，而是
+// 在事务内从本 Attempt 的实际消费记录推导——knowledge_get 执行成功，且其封存
+// 结果进入了报告所依据的那次模型调用（proposal.ModelCallID）的输入谱系
+// （model_call_input_items）；result_digest 同步按权威列表重算，存储值与冻结
+// SQL 闭包的校验一致。提案携带的列表只参与传输完整性摘要校验（防 wire 损
+// 坏），不进入 ledger。
 func (s *Service) CommitReportProposal(ctx context.Context, attemptID int64, bootID string, epoch uint64, raw []byte) error {
 	var proposal reportProposal
 	if err := json.Unmarshal(raw, &proposal); err != nil {
@@ -526,7 +549,7 @@ func (s *Service) CommitReportProposal(ctx context.Context, attemptID int64, boo
 	if err != nil {
 		return err
 	}
-	knowledgeJSON, err := canonicalIDArray(proposal.KnowledgeVersionIDs)
+	declaredKnowledgeJSON, err := canonicalIDArray(proposal.KnowledgeVersionIDs)
 	if err != nil {
 		return err
 	}
@@ -535,12 +558,13 @@ func (s *Service) CommitReportProposal(ctx context.Context, attemptID int64, boo
 	if proposal.EvidenceDigest != evidenceDigest {
 		return fmt.Errorf("inspection report evidence digest does not match its locators")
 	}
-	canonical := fmt.Sprintf("%s|%d|%d|%d|%s|%s|%s|%s|%s|%s|%s",
+	// 传输完整性：摘要按提案自声明字段重算，只证明 wire 载荷未被损坏；知识
+	// 引用的权威裁决在事务内按消费记录另行进行。
+	declaredCanonical := fmt.Sprintf("%s|%d|%d|%d|%s|%s|%s|%s|%s|%s|%s",
 		reportResultKind, attemptID, proposal.InspectionRunID, proposal.ModelCallID, "success",
-		proposal.Content, evidenceJSON, artifactJSON, knowledgeJSON, evidenceDigest, proposal.PromptDigest)
-	resultSum := sha256.Sum256([]byte(canonical))
-	resultDigest := hex.EncodeToString(resultSum[:])
-	if proposal.ResultDigest != resultDigest {
+		proposal.Content, evidenceJSON, artifactJSON, declaredKnowledgeJSON, evidenceDigest, proposal.PromptDigest)
+	declaredSum := sha256.Sum256([]byte(declaredCanonical))
+	if proposal.ResultDigest != hex.EncodeToString(declaredSum[:]) {
 		return fmt.Errorf("inspection report result digest does not match its canonical payload")
 	}
 
@@ -560,12 +584,27 @@ func (s *Service) CommitReportProposal(ctx context.Context, attemptID int64, boo
 		if runID != proposal.InspectionRunID {
 			return struct{}{}, fmt.Errorf("inspection report result identity does not match attempt")
 		}
+		// 权威知识引用：从本 Attempt 成功且被报告模型调用实际消费的
+		// knowledge_get 调用按首次读取顺序去重推导，不信任提案声明。
+		consumed, err := consumedKnowledgeVersionsOn(commandCtx, tx, attemptID, proposal.ModelCallID)
+		if err != nil {
+			return struct{}{}, err
+		}
+		knowledgeJSON, err := canonicalIDArray(consumed)
+		if err != nil {
+			return struct{}{}, err
+		}
+		authoritativeCanonical := fmt.Sprintf("%s|%d|%d|%d|%s|%s|%s|%s|%s|%s|%s",
+			reportResultKind, attemptID, proposal.InspectionRunID, proposal.ModelCallID, "success",
+			proposal.Content, evidenceJSON, artifactJSON, knowledgeJSON, evidenceDigest, proposal.PromptDigest)
+		authoritativeSum := sha256.Sum256([]byte(authoritativeCanonical))
+		authoritativeDigest := hex.EncodeToString(authoritativeSum[:])
 		// Idempotent replay: an already-committed ledger row accepts only the
 		// identical payload (its digest was derived from this exact body).
 		var existingDigest []byte
 		replayErr := tx.QueryRowContext(commandCtx, `SELECT result_digest FROM inspection_report_result_ledgers WHERE attempt_id=?`, attemptID).Scan(&existingDigest)
 		if replayErr == nil {
-			if hex.EncodeToString(existingDigest) == proposal.ResultDigest {
+			if hex.EncodeToString(existingDigest) == authoritativeDigest {
 				return struct{}{}, errResultReplayed
 			}
 			return struct{}{}, fmt.Errorf("inspection report replay digest conflicts")
@@ -577,7 +616,7 @@ func (s *Service) CommitReportProposal(ctx context.Context, attemptID int64, boo
 		// prompt provenance.
 		var callState string
 		var callPrompt string
-		err := tx.QueryRowContext(commandCtx, `
+		err = tx.QueryRowContext(commandCtx, `
 			SELECT status, prompt_digest FROM model_calls WHERE id=? AND attempt_id=?`, proposal.ModelCallID, attemptID).
 			Scan(&callState, &callPrompt)
 		if err != nil {
@@ -606,7 +645,7 @@ func (s *Service) CommitReportProposal(ctx context.Context, attemptID int64, boo
 				attempt_id, inspection_run_id, report_version, model_call_id, result_digest, evidence_digest,
 				content, prompt_digest, evidence_ids_json, artifact_ids_json, knowledge_version_ids_json, created_at)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-			attemptID, runID, reportVersion, proposal.ModelCallID, resultSum[:], evidenceDigest,
+			attemptID, runID, reportVersion, proposal.ModelCallID, authoritativeSum[:], evidenceDigest,
 			proposal.Content, proposal.PromptDigest, evidenceJSON, artifactJSON, knowledgeJSON, s.nowText()); err != nil {
 			return struct{}{}, err
 		}
@@ -619,6 +658,55 @@ func (s *Service) CommitReportProposal(ctx context.Context, attemptID int64, boo
 		return err
 	}
 	return nil
+}
+
+// consumedKnowledgeVersionsOn derives the authoritative knowledge-version
+// citation list of one inspection analysis attempt from its ACTUAL
+// consumption records: a knowledge_get tool call counts only when BOTH its
+// execution succeeded AND its sealed result entered the report-producing
+// model call's input lineage (model_call_input_items, item_role='tool',
+// model_call_id = the report's own model call). 执行成功但结果从未被后续
+// 模型调用消费（如被上下文淘汰）的读取不构成引用依据——报告正文由
+// proposal 的那次模型调用产生，只有它实际看到的工具结果才是报告的知识
+// 依据。Versions are cited in first-read order (tool_calls.id ASC),
+// deduplicated. A version the model never actually read can never be cited; a
+// hand-forged proposal list never reaches the ledger. Malformed arguments are
+// impossible through the validated ingress but are skipped defensively rather
+// than aborting the commit.
+func consumedKnowledgeVersionsOn(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, attemptID, reportModelCallID int64) ([]int64, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT t.arguments_json FROM tool_calls t
+		WHERE t.attempt_id=? AND t.tool_name='knowledge_get' AND t.status='succeeded'
+		  AND EXISTS (SELECT 1 FROM model_call_input_items i
+		              WHERE i.tool_call_id=t.id AND i.item_role='tool' AND i.model_call_id=?)
+		ORDER BY t.id`, attemptID, reportModelCallID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := map[int64]bool{}
+	consumed := []int64{}
+	for rows.Next() {
+		var arguments string
+		if err := rows.Scan(&arguments); err != nil {
+			return nil, err
+		}
+		var parsed struct {
+			VersionID float64 `json:"versionId"`
+		}
+		if err := json.Unmarshal([]byte(arguments), &parsed); err != nil || parsed.VersionID < 1 || parsed.VersionID != math.Trunc(parsed.VersionID) {
+			continue
+		}
+		id := int64(parsed.VersionID)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		consumed = append(consumed, id)
+	}
+	return consumed, rows.Err()
 }
 
 // canonicalIDArray renders the locator array exactly as the frozen SQL json()

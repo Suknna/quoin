@@ -82,6 +82,8 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 			systemPrompt = plinthagent.LegacyInvestigationSystemPrompt
 		case worker.PreviousInvestigationAgentVersion:
 			systemPrompt = plinthagent.PreviousInvestigationSystemPrompt
+		case worker.KeptInvestigationAgentVersion:
+			systemPrompt = plinthagent.KeptInvestigationSystemPrompt
 		case worker.WorkerInvestigationAgentVersion:
 			systemPrompt = plinthagent.InvestigationSystemPrompt
 		default:
@@ -93,6 +95,8 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 		switch input.GetAgentVersion() {
 		case worker.InspectionAnalysisAgentVersion:
 			systemPrompt = plinthagent.InspectionSystemPrompt
+		case worker.KeptInspectionAnalysisAgentVersion:
+			systemPrompt = plinthagent.KeptInspectionSystemPrompt
 		case worker.ReportComplianceInspectionAnalysisAgentVersion:
 			systemPrompt = plinthagent.ReportComplianceInspectionSystemPrompt
 		case worker.PreviousInspectionAnalysisAgentVersion:
@@ -109,6 +113,8 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 		switch input.GetAgentVersion() {
 		case worker.WorkerAgentVersion:
 			systemPrompt = plinthagent.SystemPrompt
+		case worker.PreviousAnalysisAgentVersion:
+			systemPrompt = plinthagent.KeptAnalysisSystemPrompt
 		case worker.LegacyInitialAnalysisAgentVersion:
 			systemPrompt = plinthagent.PreviousAnalysisSystemPrompt
 		default:

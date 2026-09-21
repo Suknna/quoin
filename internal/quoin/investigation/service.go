@@ -47,14 +47,16 @@ const OutputSchemaKind = "investigation_output_v1"
 // the session's occurrence sources (same 24h window as initial_analysis),
 // occurrence sources render the frozen normalized semantics, and the
 // business_systems context channel is gone with the retired domain.
-// 首发无历史 attempt：没有旧 renderer 分叉。
-const RendererVersion = "investigation-renderer-v5"
+// v6 是知识接入代：消息形状不变，冻结工具目录内容新增知识检索工具（输入
+// 正文随目录内容演进，digest 覆盖）。首发无历史 attempt：没有旧 renderer 分叉。
+const RendererVersion = "investigation-renderer-v6"
 
 // AgentVersion is the frozen investigation agent generation recorded on
 // the attempt row; the worker binary pins its own copy equal to this.
-// The v3 executor identity is unchanged by the ADR-0012 input reshaping:
-// 工具目录与执行语义不变，仅输入快照形状随 renderer-v5 演进。
-const AgentVersion = "investigation-v3"
+// The 知识接入 v4 executor identity advances the prompt generation (knowledge
+// retrieval tools + usage rules) and the frozen catalog content; the input
+// snapshot shape itself is unchanged.
+const AgentVersion = "investigation-v4"
 
 // Stable operation identities. The user-command names double as the audit
 // actions the runner persists automatically, matching the previous manual

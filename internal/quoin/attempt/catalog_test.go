@@ -184,13 +184,66 @@ func TestKeepGenerationCatalogsAssemble(t *testing.T) {
 			t.Fatalf("initial-analysis generation %s has no frozen catalog: %v", agentVersion, err)
 		}
 	}
-	for _, agentVersion := range []string{"investigation-v3"} {
-		catalog, err := catalogs.CatalogFor(agentVersion)
-		if err != nil {
+	for _, agentVersion := range []string{"investigation-v3", "investigation-v4"} {
+		if _, err := catalogs.CatalogFor(agentVersion); err != nil {
 			t.Fatalf("investigation generation %s has no frozen catalog: %v", agentVersion, err)
 		}
-		if catalog.SchemaVersion != "investigation-tools-v3" {
-			t.Fatalf("investigation generation %s schema version = %q", agentVersion, catalog.SchemaVersion)
+	}
+	if catalog, err := catalogs.CatalogFor("investigation-v3"); err != nil || catalog.SchemaVersion != "investigation-tools-v3" {
+		t.Fatalf("investigation v3 schema version = %q err=%v", catalog.SchemaVersion, err)
+	}
+	if catalog, err := catalogs.CatalogFor("investigation-v4"); err != nil || catalog.SchemaVersion != "investigation-tools-v4" {
+		t.Fatalf("investigation v4 schema version = %q err=%v", catalog.SchemaVersion, err)
+	}
+}
+
+// 知识接入代：分析/调查/巡检世代的基础目录携带知识检索平台工具；知识抽取
+// 钉住的 initial-analysis-v1 世代（其唯一新 Attempt 消费者）不携带——抽取
+// 候选必须只来自来源材料，不得检索既有知识库。
+func TestKnowledgeToolsFollowAgentGenerations(t *testing.T) {
+	_, catalogs := buildTestCatalogs(t, nil)
+	withKnowledge := []string{AgentVersion, "initial-analysis-v2", "investigation-v3", "investigation-v4", InspectionAgentVersion}
+	for _, agentVersion := range withKnowledge {
+		names := catalogToolNames(t, catalogs, agentVersion)
+		if !names["knowledge_search"] || !names["knowledge_get"] {
+			t.Fatalf("agent %s lost the knowledge retrieval tools: %v", agentVersion, names)
+		}
+	}
+	excluded := catalogToolNames(t, catalogs, KnowledgeAgentVersion)
+	if excluded["knowledge_search"] || excluded["knowledge_get"] {
+		t.Fatalf("knowledge extraction generation must not carry knowledge retrieval tools: %v", excluded)
+	}
+	// v1 世代的基础平台工具面保持不变（目录字节语义不因知识接入漂移）。
+	for _, required := range []string{"bash", "read", "write", "grep", "artifact_read", "artifact_grep", "alerts_recent"} {
+		if !excluded[required] {
+			t.Fatalf("knowledge extraction generation lost platform tool %s", required)
+		}
+	}
+}
+
+// 巡检分析世代首次拥有可冻结目录：inspection-analysis-v4 的目录可冻结、携带
+// 既有平台工具（artifact_read/grep 是读取巡检证据的必经工具）与知识检索工具，
+// 且拥有自己的 schema 版本标签。
+func TestInspectionGenerationCatalogFreezes(t *testing.T) {
+	_, catalogs := buildTestCatalogs(t, nil)
+	names := catalogToolNames(t, catalogs, InspectionAgentVersion)
+	for _, required := range []string{"artifact_read", "artifact_grep", "knowledge_search", "knowledge_get", "alerts_recent"} {
+		if !names[required] {
+			t.Fatalf("inspection generation catalog lost %s: %v", required, names)
+		}
+	}
+	catalog, err := catalogs.CatalogFor(InspectionAgentVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog.SchemaVersion != "inspection-analysis-tools-v1" {
+		t.Fatalf("inspection schema version = %q", catalog.SchemaVersion)
+	}
+	for _, tool := range catalog.Tools {
+		if tool.Name == "knowledge_search" || tool.Name == "knowledge_get" {
+			if tool.ExecutionMode != plugins.ModeQuoinRouted {
+				t.Fatalf("knowledge tool %s execution mode = %q", tool.Name, tool.ExecutionMode)
+			}
 		}
 	}
 }

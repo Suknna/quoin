@@ -86,6 +86,9 @@ type Service struct {
 	// runner 是本族共享的执行器：操作注册进私有注册表，写入只经执行器的受守卫
 	// 事务（台账+审计同事务提交），业务代码拿不到提交权。
 	runner *execution.Runner
+	// attempts 是本族缓存的通用 attempt 服务：组合层把装配目录（Catalogs）
+	// 挂到这一个实例上，派发/模型调用/工具调用闭包都经它解析，绝不每次新建。
+	attempts *attempt.Service
 	// audit 是 runner 的审计写入器（时钟与本族一致）；模块自身不再直接写审计。
 	audit          *audit.Writer
 	artifactWriter func(context.Context, execution.Executor, int64, []byte) (int64, error)
@@ -176,6 +179,11 @@ func (s *Service) SetReader(reader audit.Reader) error {
 		return err
 	}
 	s.reader = reader
+	// The cached attempt child follows the family's reader upgrade so its
+	// read paths never fall back to the write pool.
+	if s.attempts != nil {
+		return s.attempts.SetReader(reader)
+	}
 	return nil
 }
 
@@ -337,18 +345,18 @@ type RunDetail struct {
 	RunID int64  `json:"-"`
 	ID    string `json:"id"`
 	// ConnectionName 是 Run 冻结的来源接入显示名（计划 Run 恒有值）。
-	ConnectionName    *string                  `json:"connectionName,omitempty"`
-	PlanKey           string                   `json:"planKey"`
-	State             string                   `json:"state"`
-	RowVersion        int64                    `json:"rowVersion"`
-	TriggerKind       string                   `json:"triggerKind"`
-	ScheduledFor      *string                  `json:"scheduledFor,omitempty"`
-	EvidenceAt        *string                  `json:"evidenceAt,omitempty"`
-	CreatedAt         string                   `json:"createdAt"`
-	Checks            []CheckResult            `json:"checks"`
-	ReportCount       int                      `json:"reportCount"`
-	AnalysisActive    bool                     `json:"analysisActive"`
-	LatestAnalysis    *InspectionAttemptStatus `json:"latestAnalysis,omitempty"`
+	ConnectionName *string                  `json:"connectionName,omitempty"`
+	PlanKey        string                   `json:"planKey"`
+	State          string                   `json:"state"`
+	RowVersion     int64                    `json:"rowVersion"`
+	TriggerKind    string                   `json:"triggerKind"`
+	ScheduledFor   *string                  `json:"scheduledFor,omitempty"`
+	EvidenceAt     *string                  `json:"evidenceAt,omitempty"`
+	CreatedAt      string                   `json:"createdAt"`
+	Checks         []CheckResult            `json:"checks"`
+	ReportCount    int                      `json:"reportCount"`
+	AnalysisActive bool                     `json:"analysisActive"`
+	LatestAnalysis *InspectionAttemptStatus `json:"latestAnalysis,omitempty"`
 	// FrozenConfig 是 Run 创建时从计划冻结的分析语义投影（名称/检查说明/单位/
 	// 初始报告要求）。
 	FrozenConfig *RunFrozenConfig `json:"frozenConfig,omitempty"`
@@ -441,15 +449,15 @@ func (s *Service) convergeOn(ctx context.Context, tx execution.Executor, runID i
 }
 
 type RunSummary struct {
-	ID                string  `json:"id"`
-	ConnectionName    *string `json:"connectionName,omitempty"`
-	PlanKey           string  `json:"planKey"`
-	State             string  `json:"state"`
-	RowVersion        int64   `json:"rowVersion"`
-	TriggerKind       string  `json:"triggerKind"`
-	ScheduledFor      *string `json:"scheduledFor,omitempty"`
-	EvidenceAt        *string `json:"evidenceAt,omitempty"`
-	CreatedAt         string  `json:"createdAt"`
+	ID             string  `json:"id"`
+	ConnectionName *string `json:"connectionName,omitempty"`
+	PlanKey        string  `json:"planKey"`
+	State          string  `json:"state"`
+	RowVersion     int64   `json:"rowVersion"`
+	TriggerKind    string  `json:"triggerKind"`
+	ScheduledFor   *string `json:"scheduledFor,omitempty"`
+	EvidenceAt     *string `json:"evidenceAt,omitempty"`
+	CreatedAt      string  `json:"createdAt"`
 }
 
 // RuntimeAvailability is sampled by the scheduling runtime at the boundary

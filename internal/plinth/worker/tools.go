@@ -24,10 +24,15 @@ import (
 
 // WorkerAgentVersion is the frozen executor generation this worker binary
 // carries for initial-analysis attempts (DATA-ATTEMPT-001); a unit test pins
-// it equal to the Quoin-side attempt.AgentVersion. The Keep 提示词迁入 bumps
+// it equal to the Quoin-side attempt.AgentVersion. The Keep 提示词迁入 bumped
 // the analysis prompt to its own generation while every older identity stays
-// executable below.
-const WorkerAgentVersion = "initial-analysis-v2"
+// executable below; the 知识接入 generation bumps it again (knowledge
+// retrieval tools + usage rules).
+const WorkerAgentVersion = "initial-analysis-v3"
+
+// PreviousAnalysisAgentVersion retains the Keep-adapted initial-analysis-v2
+// prompt generation for already-created attempts.
+const PreviousAnalysisAgentVersion = "initial-analysis-v2"
 
 // LegacyInitialAnalysisAgentVersion retains execution compatibility for
 // initial-analysis-v1 attempts created before the Keep-adapted prompt
@@ -46,8 +51,13 @@ const KnowledgeExtractionAgentVersion = "initial-analysis-v1"
 // generation. It must equal attempt.InspectionAgentVersion: the dispatch row
 // is created with that identity and verifyStart rejects any mismatch, so an
 // attempt from a different prompt generation can never be rendered with this
-// binary's frozen inspection prompt.
-const InspectionAnalysisAgentVersion = "inspection-analysis-v3"
+// binary's frozen inspection prompt. The 知识接入 generation is also the first
+// to freeze a per-attempt tool catalog for inspection analyses.
+const InspectionAnalysisAgentVersion = "inspection-analysis-v4"
+
+// KeptInspectionAnalysisAgentVersion retains the Keep-adapted
+// inspection-analysis-v3 prompt generation for already-created attempts.
+const KeptInspectionAnalysisAgentVersion = "inspection-analysis-v3"
 
 // ReportComplianceInspectionAnalysisAgentVersion retains the report-compliance
 // inspection prompt generation for already-created attempts.
@@ -58,8 +68,13 @@ const ReportComplianceInspectionAnalysisAgentVersion = "inspection-analysis-v2"
 const PreviousInspectionAnalysisAgentVersion = "inspection-analysis-v1"
 
 // WorkerInvestigationAgentVersion pins the investigation agent generation
-// (mirrors investigation.AgentVersion).
-const WorkerInvestigationAgentVersion = "investigation-v3"
+// (mirrors investigation.AgentVersion). The 知识接入 generation bumps it to v4
+// (knowledge retrieval tools + usage rules).
+const WorkerInvestigationAgentVersion = "investigation-v4"
+
+// KeptInvestigationAgentVersion retains the Keep-adapted investigation-v3
+// prompt generation for already-created attempts.
+const KeptInvestigationAgentVersion = "investigation-v3"
 
 // PreviousInvestigationAgentVersion retains execution compatibility for
 // investigation-v2 attempts created before the Keep-adapted prompt

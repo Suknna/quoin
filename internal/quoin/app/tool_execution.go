@@ -18,15 +18,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/knowledge"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 )
 
@@ -169,6 +172,10 @@ func (service *RuntimeService) executeRoutedToolCall(ctx context.Context, attemp
 		seal = service.invokePluginTool(execCtx, attempts, loaded, entry)
 	} else if toolName == "alerts_recent" {
 		seal = service.invokeAlertsRecentTool(execCtx, attempts, loaded)
+	} else if toolName == "knowledge_search" {
+		seal = service.invokeKnowledgeSearchTool(execCtx, loaded)
+	} else if toolName == "knowledge_get" {
+		seal = service.invokeKnowledgeGetTool(execCtx, loaded)
 	} else if toolName == "artifact_read" || toolName == "artifact_grep" {
 		seal = service.invokeArtifactTool(execCtx, loaded)
 	} else {
@@ -410,10 +417,141 @@ func attachAlertsRecentViewKeys(ctx context.Context, reader interface {
 	return nil
 }
 
+// knowledgeToolSearchWait 有界化一次知识检索的总时长：FTS 恒可用，语义通道
+// 的查询 embedding（真实 attempt 派发）在此时限内未返回则诚实降级为空语义
+// 通道——知识检索绝不无限阻塞 agent 循环，也不占用 quoin_routed 的完整超时。
+const knowledgeToolSearchWait = 15 * time.Second
+
+// knowledgeGetBodyBound 是 knowledge_get 返回正文的有界上限；超长正文截断并
+// 标记 truncated，模型按标记知悉正文不完整（与平台工具既有结果截断语义一致）。
+const knowledgeGetBodyBound = 16 * 1024
+
+// invokeKnowledgeSearchTool 执行平台工具 knowledge_search：复用知识域的
+// 双通道查询服务（FTS5 trigram 精确文本 + embedding cosine 语义），程序不
+// 融合排名、不设阈值，两个通道原样并列返回。语义通道未配置 provider、索引
+// 未就绪或等待超时都是诚实的空通道，不阻塞主流程（合理故障降级）。
+func (service *RuntimeService) invokeKnowledgeSearchTool(ctx context.Context, loaded *routedToolContext) toolCallSeal {
+	if service.Knowledge == nil {
+		return routedFailureSeal(loaded, "knowledge_unavailable", "knowledge domain is not wired")
+	}
+	var arguments map[string]any
+	if err := json.Unmarshal(loaded.arguments, &arguments); err != nil {
+		return routedFailureSeal(loaded, "invalid_arguments", "arguments unparseable: "+err.Error())
+	}
+	query, _ := arguments["query"].(string)
+	if strings.TrimSpace(query) == "" {
+		return routedFailureSeal(loaded, "invalid_arguments", "query 必须是非空字符串")
+	}
+	limit := 5.0
+	if value, ok := arguments["limit"].(float64); ok && value >= 1 && value <= 10 {
+		limit = value
+	}
+	searchCtx, cancel := context.WithTimeout(ctx, knowledgeToolSearchWait)
+	defer cancel()
+	result, _, err := service.Knowledge.Search(searchCtx, query, nil, int(limit))
+	if err != nil {
+		return routedFailureSeal(loaded, "knowledge_search_failed", boundedRoutedDetail(err.Error()))
+	}
+	payload := map[string]any{
+		"success":          true,
+		"query":            query,
+		"note":             "两个通道为独立命中依据，程序不合成统一排名；exactTextMatches 为精确文本匹配、semanticMatches 为语义相似（未配置语义索引或索引未就绪时该通道可为空）。知识是历史经验参考，不代表当前实时状态；命中后用 knowledge_get 按 versionId 读取正文。",
+		"exactTextMatches": knowledgeSearchHits(result.ExactTextMatches, "exact_text", ""),
+		"semanticMatches":  knowledgeSearchHits(result.SemanticMatches, "semantic", ""),
+	}
+	if len(result.SemanticMatches) > 0 {
+		payload["semanticIndexState"] = result.SemanticMatches[0].IndexState
+	}
+	return routedSuccessSeal(loaded, payload)
+}
+
+// knowledgeSearchHits 投影一个通道的命中（保留原始分数与依据，不合成总分）。
+func knowledgeSearchHits(hits []knowledge.SearchHit, basis, indexState string) []map[string]any {
+	projected := make([]map[string]any, 0, len(hits))
+	for _, hit := range hits {
+		item := map[string]any{
+			"knowledgeId": hit.Knowledge.ID,
+			"versionId":   hit.Knowledge.CurrentVersionID,
+			"title":       hit.Knowledge.Title,
+			"versionSeq":  hit.Knowledge.CurrentVersionSeq,
+			"score":       hit.Score,
+			"basis":       basis,
+		}
+		if indexState != "" {
+			item["indexState"] = indexState
+		}
+		projected = append(projected, item)
+	}
+	return projected
+}
+
+// invokeKnowledgeGetTool 执行平台工具 knowledge_get：按 versionId 读取一份
+// 当前合格（current ∧ 未停用 ∧ 来源有效）的知识版本正文，正文有界截断。
+// 已停止复用（exited）或非当前版本的定位符返回稳定错误——停止复用的知识不
+// 能被新检索使用；工具失败是 return_to_model 结果，不阻塞 attempt 主流程。
+func (service *RuntimeService) invokeKnowledgeGetTool(ctx context.Context, loaded *routedToolContext) toolCallSeal {
+	if service.Knowledge == nil {
+		return routedFailureSeal(loaded, "knowledge_unavailable", "knowledge domain is not wired")
+	}
+	var arguments map[string]any
+	if err := json.Unmarshal(loaded.arguments, &arguments); err != nil {
+		return routedFailureSeal(loaded, "invalid_arguments", "arguments unparseable: "+err.Error())
+	}
+	versionLocator, _ := arguments["versionId"].(float64)
+	if versionLocator < 1 || versionLocator != math.Trunc(versionLocator) {
+		return routedFailureSeal(loaded, "invalid_arguments", "versionId 必须是正整数定位符")
+	}
+	detail, eligible, err := service.Knowledge.GetEligibleVersionForRetrieval(ctx, int64(versionLocator))
+	if err != nil {
+		return routedFailureSeal(loaded, "knowledge_get_failed", boundedRoutedDetail(err.Error()))
+	}
+	if !eligible {
+		return routedFailureSeal(loaded, "knowledge_version_ineligible",
+			"该版本不存在、已停止复用或不再是当前版本；停止复用的知识不能被新检索使用，请用 knowledge_search 重新检索当前有效知识")
+	}
+	body, truncated := boundKnowledgeBody(detail.Body)
+	payload := map[string]any{
+		"success": true,
+		"knowledge": map[string]any{
+			"knowledgeId": strconv.FormatInt(detail.KnowledgeID, 10),
+			"versionId":   strconv.FormatInt(detail.VersionID, 10),
+			"versionSeq":  detail.VersionSeq,
+			"title":       detail.Title,
+			"body":        body,
+			"truncated":   truncated,
+			"createdAt":   detail.CreatedAt,
+		},
+	}
+	if len(detail.Scope) > 0 {
+		payload["scope"] = detail.Scope
+	}
+	if len(detail.Conditions) > 0 {
+		payload["conditions"] = detail.Conditions
+	}
+	if len(detail.Limitations) > 0 {
+		payload["limitations"] = detail.Limitations
+	}
+	return routedSuccessSeal(loaded, payload)
+}
+
+// boundKnowledgeBody 有界化知识正文：按字节上限截断并回退到 rune 边界，保留
+// 截断标记。
+func boundKnowledgeBody(body string) (string, bool) {
+	if len(body) <= knowledgeGetBodyBound {
+		return body, false
+	}
+	bounded := body[:knowledgeGetBodyBound]
+	for len(bounded) > 0 && !utf8.ValidString(bounded) {
+		bounded = bounded[:len(bounded)-1]
+	}
+	return bounded + "…（正文超长已截断，此处为前缀）", true
+}
+
 // invokeArtifactTool 执行平台 quoin_routed 工具（artifact_read/artifact_grep）。
 // 参数/结果契约与原 Plinth 执行器一致：读取直接走进程内 ArtifactService
 // 背后的 artifact.Store（不经 gRPC 自调）。
-func (service *RuntimeService) invokeArtifactTool(ctx context.Context, loaded *routedToolContext) toolCallSeal {	if service.Artifacts == nil {
+func (service *RuntimeService) invokeArtifactTool(ctx context.Context, loaded *routedToolContext) toolCallSeal {
+	if service.Artifacts == nil {
 		return routedFailureSeal(loaded, "artifact_store_unavailable", "artifact store is not wired")
 	}
 	var arguments map[string]any

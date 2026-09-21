@@ -61,12 +61,22 @@ func TestVerifyStartAdmitsInspectionGenerations(t *testing.T) {
 	if current.agentVersion != InspectionAnalysisAgentVersion || current.prompt != agent.InspectionSystemPrompt {
 		t.Fatalf("current mode = %s/%q", current.agentVersion, current.prompt)
 	}
-	// 四代 prompt digest 按实际 renderer 区分。
+	// 知识接入前一代（inspection-analysis-v3，Keep 代）保持可执行并绑定冻结
+	// prompt。
+	kept, err := verifyStart(build(KeptInspectionAnalysisAgentVersion))
+	if err != nil {
+		t.Fatalf("kept inspection generation must stay executable: %v", err)
+	}
+	if kept.prompt != agent.KeptInspectionSystemPrompt {
+		t.Fatalf("kept mode = %s/%q", kept.agentVersion, kept.prompt)
+	}
+	// 五代 prompt digest 按实际 renderer 区分。
 	digests := map[string]string{}
 	for name, mode := range map[string]attemptMode{
 		"legacy":           legacy,
 		"initial":          initial,
 		"reportCompliance": compliance,
+		"kept":             kept,
 		"current":          current,
 	} {
 		sum := sha256.Sum256([]byte(mode.prompt))
@@ -104,6 +114,13 @@ func TestVerifyStartAdmitsInvestigationGenerations(t *testing.T) {
 	if previous.prompt != agent.PreviousInvestigationSystemPrompt {
 		t.Fatalf("previous prompt drifted: %q", previous.prompt)
 	}
+	kept, err := verifyStart(build(KeptInvestigationAgentVersion))
+	if err != nil {
+		t.Fatalf("kept investigation generation must stay executable: %v", err)
+	}
+	if kept.prompt != agent.KeptInvestigationSystemPrompt {
+		t.Fatalf("kept prompt drifted: %q", kept.prompt)
+	}
 	current, err := verifyStart(build(WorkerInvestigationAgentVersion))
 	if err != nil {
 		t.Fatalf("current investigation generation must be executable: %v", err)
@@ -111,7 +128,7 @@ func TestVerifyStartAdmitsInvestigationGenerations(t *testing.T) {
 	if current.prompt != agent.InvestigationSystemPrompt {
 		t.Fatalf("current prompt drifted: %q", current.prompt)
 	}
-	if legacy.prompt == previous.prompt || previous.prompt == current.prompt || legacy.prompt == current.prompt {
+	if legacy.prompt == previous.prompt || previous.prompt == kept.prompt || kept.prompt == current.prompt || legacy.prompt == current.prompt {
 		t.Fatal("investigation generations must keep distinct prompt bytes")
 	}
 	if _, err := verifyStart(build("investigation-v9")); err == nil {
@@ -132,6 +149,13 @@ func TestVerifyStartAdmitsInitialAnalysisGenerations(t *testing.T) {
 	if current.prompt != agent.SystemPrompt {
 		t.Fatalf("current mode = %s/%q", current.agentVersion, current.prompt)
 	}
+	kept, err := verifyStart(build(PreviousAnalysisAgentVersion))
+	if err != nil {
+		t.Fatalf("kept initial-analysis generation must stay executable: %v", err)
+	}
+	if kept.prompt != agent.KeptAnalysisSystemPrompt {
+		t.Fatalf("kept mode = %s/%q", kept.agentVersion, kept.prompt)
+	}
 	previous, err := verifyStart(build(LegacyInitialAnalysisAgentVersion))
 	if err != nil {
 		t.Fatalf("previous initial-analysis generation must stay executable: %v", err)
@@ -139,7 +163,7 @@ func TestVerifyStartAdmitsInitialAnalysisGenerations(t *testing.T) {
 	if previous.prompt != agent.PreviousAnalysisSystemPrompt {
 		t.Fatalf("previous mode = %s/%q", previous.agentVersion, previous.prompt)
 	}
-	if current.prompt == previous.prompt {
+	if current.prompt == kept.prompt || kept.prompt == previous.prompt || current.prompt == previous.prompt {
 		t.Fatal("initial-analysis generations must keep distinct prompt bytes")
 	}
 	if _, err := verifyStart(build("initial-analysis-v9")); err == nil {

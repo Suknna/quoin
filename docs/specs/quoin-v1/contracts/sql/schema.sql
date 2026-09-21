@@ -3365,7 +3365,7 @@ BEGIN SELECT RAISE(ABORT, 'model call context item must belong to the same Attem
 -- resurrect retired tool names. Per-agent catalog membership is enforced by
 -- Quoin before this insert; this trigger seals the global name set.
 CREATE TRIGGER trg_tool_call_fixed_name BEFORE INSERT ON tool_calls
-WHEN NEW.tool_name NOT IN ('bash','read','write','grep','artifact_read','artifact_grep','alerts_recent','thanos_query')
+WHEN NEW.tool_name NOT IN ('bash','read','write','grep','artifact_read','artifact_grep','alerts_recent','thanos_query','knowledge_search','knowledge_get')
 BEGIN SELECT RAISE(ABORT, 'tool call name is not in the frozen catalog'); END;
 CREATE TRIGGER trg_tool_call_closure BEFORE INSERT ON tool_calls
 WHEN NEW.status <> 'pending' OR NOT EXISTS (
@@ -3575,9 +3575,19 @@ OR EXISTS (SELECT 1 FROM json_each(NEW.artifact_ids_json) x
                AND (e.artifact_id=x.value
                  OR EXISTS (SELECT 1 FROM artifacts a WHERE a.id=x.value AND a.owner_type='evidence' AND a.owner_id=e.id))
                AND EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id WHERE s.attempt_id=NEW.attempt_id AND i.artifact_id=x.value)))
+-- 知识引用权威化（知识接入代）：报告引用的知识版本不再以创建期冻结的输入项
+-- 裁决（检索在执行期发生，输入项只能在 Queued 态插入），而是要求每个引用都
+-- 对应本 Attempt 一次成功的 knowledge_get 工具调用，且其封存结果进入了报告
+-- 所依据的那次模型调用（NEW.model_call_id）的输入谱系（item_role='tool'）：
+-- 只执行成功但从未被模型消费（如被上下文淘汰）的读取不构成引用依据，模型没
+-- 有真正读取过的知识不能被引用，Quoin 的提交路径也从同一记录权威推导该列表。
 OR EXISTS (SELECT 1 FROM json_each(NEW.knowledge_version_ids_json) x
            WHERE x.type <> 'integer' OR NOT EXISTS (SELECT 1 FROM knowledge_versions k WHERE k.id=x.value
-               AND EXISTS (SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id WHERE s.attempt_id=NEW.attempt_id AND i.knowledge_version_id=k.id)))
+               AND EXISTS (SELECT 1 FROM tool_calls t
+                           WHERE t.attempt_id=NEW.attempt_id AND t.tool_name='knowledge_get' AND t.status='succeeded'
+                             AND json_extract(t.arguments_json,'$.versionId')=x.value
+                             AND EXISTS (SELECT 1 FROM model_call_input_items i
+                                         WHERE i.tool_call_id=t.id AND i.item_role='tool' AND i.model_call_id=NEW.model_call_id))))
 OR (SELECT count(*) FROM json_each(NEW.evidence_ids_json)) <> (SELECT count(DISTINCT value) FROM json_each(NEW.evidence_ids_json))
 OR (SELECT count(*) FROM json_each(NEW.artifact_ids_json)) <> (SELECT count(DISTINCT value) FROM json_each(NEW.artifact_ids_json))
 OR (SELECT count(*) FROM json_each(NEW.knowledge_version_ids_json)) <> (SELECT count(DISTINCT value) FROM json_each(NEW.knowledge_version_ids_json))

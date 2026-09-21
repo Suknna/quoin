@@ -100,22 +100,28 @@ func TestExecutionModesForInputRejectsUnknownMode(t *testing.T) {
 func TestAgentVersionIdentityPins(t *testing.T) {
 	pins := map[string]string{
 		"WorkerAgentVersion":                             WorkerAgentVersion,
+		"PreviousAnalysisAgentVersion":                   PreviousAnalysisAgentVersion,
 		"LegacyInitialAnalysisAgentVersion":              LegacyInitialAnalysisAgentVersion,
 		"KnowledgeExtractionAgentVersion":                KnowledgeExtractionAgentVersion,
 		"InspectionAnalysisAgentVersion":                 InspectionAnalysisAgentVersion,
+		"KeptInspectionAnalysisAgentVersion":             KeptInspectionAnalysisAgentVersion,
 		"ReportComplianceInspectionAnalysisAgentVersion": ReportComplianceInspectionAnalysisAgentVersion,
 		"PreviousInspectionAnalysisAgentVersion":         PreviousInspectionAnalysisAgentVersion,
 		"WorkerInvestigationAgentVersion":                WorkerInvestigationAgentVersion,
+		"KeptInvestigationAgentVersion":                  KeptInvestigationAgentVersion,
 		"PreviousInvestigationAgentVersion":              PreviousInvestigationAgentVersion,
 	}
 	want := map[string]string{
-		"WorkerAgentVersion":                             "initial-analysis-v2",
+		"WorkerAgentVersion":                             "initial-analysis-v3",
+		"PreviousAnalysisAgentVersion":                   "initial-analysis-v2",
 		"LegacyInitialAnalysisAgentVersion":              "initial-analysis-v1",
 		"KnowledgeExtractionAgentVersion":                "initial-analysis-v1",
-		"InspectionAnalysisAgentVersion":                 "inspection-analysis-v3",
+		"InspectionAnalysisAgentVersion":                 "inspection-analysis-v4",
+		"KeptInspectionAnalysisAgentVersion":             "inspection-analysis-v3",
 		"ReportComplianceInspectionAnalysisAgentVersion": "inspection-analysis-v2",
 		"PreviousInspectionAnalysisAgentVersion":         "inspection-analysis-v1",
-		"WorkerInvestigationAgentVersion":                "investigation-v3",
+		"WorkerInvestigationAgentVersion":                "investigation-v4",
+		"KeptInvestigationAgentVersion":                  "investigation-v3",
 		"PreviousInvestigationAgentVersion":              "investigation-v2",
 	}
 	for name, value := range pins {

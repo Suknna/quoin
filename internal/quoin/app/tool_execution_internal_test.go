@@ -28,6 +28,8 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/analysis"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
+	"github.com/Suknna/quoin/internal/quoin/knowledge"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	_ "modernc.org/sqlite"
 )
@@ -136,10 +138,11 @@ func newRoutedToolFixture(t *testing.T, preDispatch func(t *testing.T, db *sql.D
 	mustExec(t, db, `INSERT INTO model_calls(id,attempt_id,call_seq,retry_seq,operation,model_id,connection_grant_id,prompt_renderer_version,agent_version,prompt_digest,tool_schema_version,tool_schema_digest,input_snapshot_digest,rendered_request_digest,context_budget_tokens,max_output_tokens,estimated_input_tokens,status,started_at)
 		VALUES(1,1,1,0,'chat','chat',1,'initial-analysis-renderer-v1','initial-analysis-v2',?,?,?,?,?,4096,1024,0,'running',?)`,
 		strings.Repeat("1", 64), "initial-analysis-tools-v5", strings.Repeat("2", 64), strings.Repeat("3", 64), strings.Repeat("4", 64), strings.Repeat("5", 64), now)
-	// tool_calls 的插入闭包要求模型调用已成功且携带完整输出；输出声明两个
-	// 提案（thanos_query@0 供插件路径用例，artifact_read@1 供平台工具用例）。
+	// tool_calls 的插入闭包要求模型调用已成功且携带完整输出；输出声明各
+	// 用例的提案（thanos_query@0 插件路径，artifact_read@1 平台工具，
+	// alerts_recent@2，knowledge_search@3 / knowledge_get@4/@5 知识工具）。
 	mustExec(t, db, `INSERT INTO model_call_input_items(model_call_id,item_seq,item_role,source_digest,synthetic_kind) VALUES(1,1,'system',?,'system_contract'),(1,2,'system',?,'tool_schema')`, strings.Repeat("1", 64), strings.Repeat("1", 64))
-	mustExec(t, db, `INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(1,1,'{"assistantText":"","finishReason":"tool_calls","tool_calls":[{"id":"call-routed-1","name":"thanos_query","arguments":{"query":"up"}},{"id":"call-routed-2","name":"artifact_read","arguments":{"artifactId":"1","offset":2,"limit":1}},{"id":"call-routed-3","name":"alerts_recent","arguments":{"viewKey":"mall"}}]}',?,'tool_calls',?)`,
+	mustExec(t, db, `INSERT INTO model_call_outputs(model_call_id,complete,response_json,response_digest,finish_reason,created_at) VALUES(1,1,'{"assistantText":"","finishReason":"tool_calls","tool_calls":[{"id":"call-routed-1","name":"thanos_query","arguments":{"query":"up"}},{"id":"call-routed-2","name":"artifact_read","arguments":{"artifactId":"1","offset":2,"limit":1}},{"id":"call-routed-3","name":"alerts_recent","arguments":{"viewKey":"mall"}},{"id":"call-k-search","name":"knowledge_search","arguments":{"query":"连接池"}},{"id":"call-k-get-1","name":"knowledge_get","arguments":{"versionId":301}},{"id":"call-k-get-2","name":"knowledge_get","arguments":{"versionId":302}}]}',?,'tool_calls',?)`,
 		strings.Repeat("6", 64), now)
 	mustExec(t, db, `UPDATE model_calls SET usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}',status='succeeded',ended_at=? WHERE id=1 AND status='running'`, now)
 	arguments := []byte(`{"query":"up"}`)
@@ -422,4 +425,179 @@ func TestQuoinRoutedAlertsRecentExecutor(t *testing.T) {
 	}
 	// viewKey 过滤命中的正是带关联快照的告警；无关联的 fixture occurrence 1
 	// 不在结果里（同 fixture 只有一条命中）。
+}
+
+// seedKnowledgeForTools 在夹具库内播种一份已确认知识（版本 301）与一份已停止
+// 复用知识（版本 302），插入顺序遵循 confirm.go 的生产闭包。
+func seedKnowledgeForTools(t *testing.T, db *sql.DB, versionID int64, title string, exited bool) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	material, err := db.Exec(`INSERT INTO source_materials(kind,digest,size_bytes,content,created_by,created_at) VALUES('knowledge_import',?,?,'导入原文',NULL,?)`, fmt.Sprintf("%064x", versionID), len("导入原文"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialID, _ := material.LastInsertId()
+	batch, err := db.Exec(`INSERT INTO knowledge_import_batches(source_material_id,state,created_by,created_at) VALUES(?,'Processing',NULL,?)`, materialID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchID, _ := batch.LastInsertId()
+	candidate, err := db.Exec(`INSERT INTO knowledge_candidates(import_batch_id,source_type,source_id,state,original_suggestion_json,draft_title,draft_body,created_by,created_at) VALUES(?,'source_material',?,'AwaitingConfirmation','{}',?,?,NULL,?)`, batchID, materialID, title, "数据库连接池打满时先检查慢查询再扩容。", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateID, _ := candidate.LastInsertId()
+	knowledge, err := db.Exec(`INSERT INTO reusable_knowledge(created_by,created_at) VALUES(NULL,?)`, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledgeID, _ := knowledge.LastInsertId()
+	if _, err = db.Exec(`UPDATE knowledge_candidates SET state='Confirmed',confirmed_knowledge_id=?,row_version=row_version+1 WHERE id=?`, knowledgeID, candidateID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO knowledge_versions(id,knowledge_id,version_seq,title,body,source_candidate_id,created_by,created_at) VALUES(?,?,1,?,?,?,NULL,?)`, versionID, knowledgeID, title, "数据库连接池打满时先检查慢查询再扩容。", candidateID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE reusable_knowledge SET current_version_id=?,row_version=row_version+1 WHERE id=?`, versionID, knowledgeID); err != nil {
+		t.Fatal(err)
+	}
+	if exited {
+		if _, err = db.Exec(`INSERT INTO knowledge_version_retrieval_state(knowledge_version_id,exited,exited_at,exit_reason,updated_at) VALUES(?,1,?,'stopped',?)`, versionID, now, now); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if _, err = db.Exec(`INSERT INTO knowledge_version_retrieval_state(knowledge_version_id,updated_at) VALUES(?,?)`, versionID, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`INSERT INTO knowledge_search_docs(knowledge_version_id,title,body) VALUES(?,?,?)`, versionID, title, "数据库连接池打满时先检查慢查询再扩容。"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = db.Exec(`UPDATE knowledge_import_batches SET state='AwaitingConfirmation',row_version=row_version+1 WHERE id=?`, batchID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE knowledge_import_batches SET state='Completed',row_version=row_version+1 WHERE id=?`, batchID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// wireKnowledgeService 构造带只读 reader 的知识域服务并挂到 RuntimeService。
+func wireKnowledgeService(t *testing.T, fixture *routedToolFixture) {
+	t.Helper()
+	runner := execution.NewRunner(fixture.db, execution.NewRegistry(), nil)
+	service, err := knowledge.NewServiceWithReader(fixtureReadOnlyPool(t, fixture.db), fixture.db, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.Knowledge = service
+}
+
+// beginKnowledgeToolCall 播种一条 pending 的知识工具调用并驱动 BeginToolCall。
+func beginKnowledgeToolCall(t *testing.T, fixture *routedToolFixture, toolCallID int64, toolIndex int, providerID, toolName, arguments string) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	mustExec(t, fixture.db, `INSERT INTO tool_calls(id,attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
+		VALUES(?,1,1,1,?,?,?,'1',?,?,'worker_local','return_to_model','pending',?)`,
+		toolCallID, toolIndex, providerID, toolName, arguments, hex.EncodeToString(sha256SumBytes([]byte(arguments))), now)
+	// 前序 tool call 必须先到终态（tool call 开始闭包的顺序围栏）；已终态则
+	// 幂等跳过（同测试内多次播种）。
+	var predecessorStatus string
+	if err := fixture.db.QueryRow(`SELECT status FROM tool_calls WHERE id=1`).Scan(&predecessorStatus); err != nil {
+		t.Fatal(err)
+	}
+	if predecessorStatus != "succeeded" {
+		if ack := fixture.beginRoutedToolCall(t, 1); !ack.GetBeginToolCallAck().GetAccepted() {
+			t.Fatalf("predecessor begin ack=%+v", ack.GetBeginToolCallAck())
+		}
+		fixture.awaitToolCallStatus(t, 1, "succeeded")
+	}
+	fixture.resetFrames()
+	if ack := fixture.beginRoutedToolCall(t, toolCallID); !ack.GetBeginToolCallAck().GetAccepted() {
+		t.Fatalf("begin ack=%+v", ack.GetBeginToolCallAck())
+	}
+}
+
+// TestQuoinRoutedKnowledgeSearchExecutor 覆盖 knowledge_search 的进程内执行：
+// 复用知识域双通道查询（无 embedding 配置时语义通道诚实为空、FTS 命中返回），
+// 结果并列两个通道并携带命中依据与定位符。
+func TestQuoinRoutedKnowledgeSearchExecutor(t *testing.T) {
+	fixture := newRoutedToolFixture(t, func(t *testing.T, db *sql.DB) {
+		seedKnowledgeForTools(t, db, 301, "数据库连接池打满处理", false)
+	})
+	wireKnowledgeService(t, fixture)
+	beginKnowledgeToolCall(t, fixture, 4, 3, "call-k-search", "knowledge_search", `{"query":"连接池","limit":5}`)
+
+	fixture.awaitToolCallStatus(t, 4, "succeeded")
+	result := fixture.awaitExternalResult(t)
+	payload := result.GetPayload()
+	if payload.GetSchemaKind() != "knowledge_search_result_v1" {
+		t.Fatalf("schema kind=%q", payload.GetSchemaKind())
+	}
+	canonical := string(payload.GetCanonicalJson())
+	for _, expected := range []string{
+		`"success":true`,
+		`"exactTextMatches":[{`,
+		`"versionId":"301"`,
+		`"title":"数据库连接池打满处理"`,
+		`"basis":"exact_text"`,
+		`"semanticMatches":[]`,
+	} {
+		if !strings.Contains(canonical, expected) {
+			t.Fatalf("canonical=%s missing %s", canonical, expected)
+		}
+	}
+}
+
+// TestQuoinRoutedKnowledgeGetExecutor 覆盖 knowledge_get 的进程内执行：合格版本
+// 返回正文与定位符；已停止复用版本返回稳定错误 knowledge_version_ineligible
+// （停止复用的知识不能被新检索使用），失败是 return_to_model 结果不阻塞
+// attempt 主流程。
+func TestQuoinRoutedKnowledgeGetExecutor(t *testing.T) {
+	fixture := newRoutedToolFixture(t, func(t *testing.T, db *sql.DB) {
+		seedKnowledgeForTools(t, db, 301, "数据库连接池打满处理", false)
+		seedKnowledgeForTools(t, db, 302, "已停止复用知识", true)
+	})
+	wireKnowledgeService(t, fixture)
+
+	beginKnowledgeToolCall(t, fixture, 5, 4, "call-k-get-1", "knowledge_get", `{"versionId":301}`)
+	fixture.awaitToolCallStatus(t, 5, "succeeded")
+	result := fixture.awaitExternalResult(t)
+	payload := result.GetPayload()
+	if payload.GetSchemaKind() != "knowledge_get_result_v1" {
+		t.Fatalf("schema kind=%q", payload.GetSchemaKind())
+	}
+	canonical := string(payload.GetCanonicalJson())
+	for _, expected := range []string{
+		`"success":true`,
+		`"versionId":"301"`,
+		`"knowledgeId":"1"`,
+		`"truncated":false`,
+		"先检查慢查询再扩容",
+	} {
+		if !strings.Contains(canonical, expected) {
+			t.Fatalf("canonical=%s missing %s", canonical, expected)
+		}
+	}
+
+	beginKnowledgeToolCall(t, fixture, 6, 5, "call-k-get-2", "knowledge_get", `{"versionId":302}`)
+	fixture.awaitToolCallStatus(t, 6, "failed")
+	failed := fixture.awaitExternalResult(t)
+	if failed.GetErrorCode() != "knowledge_version_ineligible" {
+		t.Fatalf("stopped-reuse version error code=%q", failed.GetErrorCode())
+	}
+	if !strings.Contains(string(failed.GetPayload().GetCanonicalJson()), "停止复用") {
+		t.Fatalf("failure payload=%s", failed.GetPayload().GetCanonicalJson())
+	}
+}
+
+// TestQuoinRoutedKnowledgeToolsWithoutDomainWiring：知识域未装配（空 Service）
+// 时工具确定性失败（knowledge_unavailable），不阻塞 attempt 主流程。
+func TestQuoinRoutedKnowledgeToolsWithoutDomainWiring(t *testing.T) {
+	fixture := newRoutedToolFixture(t, nil)
+	beginKnowledgeToolCall(t, fixture, 4, 3, "call-k-search", "knowledge_search", `{"query":"连接池"}`)
+	fixture.awaitToolCallStatus(t, 4, "failed")
+	result := fixture.awaitExternalResult(t)
+	if result.GetErrorCode() != "knowledge_unavailable" {
+		t.Fatalf("error code=%q", result.GetErrorCode())
+	}
 }

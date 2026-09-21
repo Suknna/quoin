@@ -281,7 +281,7 @@ Plinth 对同一个任务或 Run 的一次底层执行。Quoin 派发前持久�
 _Avoid_: 无限离线执行、前端取消标记、透明无限重试、部分模型输出成功、Agent 总预算规则引擎、恢复未提交工作区
 
 **巡检报告（Inspection Report）**：
-一次 Inspection Run 的一次成功模型分析形成的不可变版本，精确引用本次使用的 Evidence 集合、模型、Prompt 和 Execution Attempt，并包含程序产生的检查事实与证据缺口，以及模型产生的摘要、分析、诊断、建议和限制。失败分析只保留失败 Attempt，不产生成功 Report；同一 Run 重新分析复用原 Evidence、创建新 Report 版本，不修改旧报告也不重新采证。页面默认展示最新成功版本并保留版本历史。Succeeded 只表示模型分析完成，不表示检查正常或诊断已验证。
+一次 Inspection Run 的一次成功模型分析形成的不可变版本，精确引用本次使用的 Evidence 集合、模型、Prompt 和 Execution Attempt，并包含程序产生的检查事实与证据缺口，以及模型产生的摘要、分析、诊断、建议和限制。失败分析只保留失败 Attempt，不产生成功 Report；同一 Run 重新分析复用原 Evidence、创建新 Report 版本，不修改旧报告也不重新采证。页面默认展示最新成功版本并保留版本历史。Succeeded 只表示模型分析完成，不表示检查正常或诊断已验证。报告分析的知识引用是权威事实：由 Quoin 从本 Attempt「执行成功且结果进入报告模型调用输入谱系」的知识读取工具调用推导封存，模型没有真正消费过的知识不得出现在报告引用中。
 _Avoid_: 原始证据、巡检计划、可覆盖结果、重新采证
 
 **证据（Evidence）**：
@@ -312,6 +312,7 @@ _Avoid_: 自动导入、永久等待批次、后台改写状态语义、逐条�
 
 **可复用知识（Reusable Knowledge）**：
 由人明确确认可以在未来调查中复用的稳定聚合，包含多个不可变 `KnowledgeVersion`，同一时刻最多一个 current version。修改标题、正文、范围、条件、限制或恢复复用必须创建并重新确认新版本；验证状态、Diagnosis Feedback、来源拒绝和停止复用通过追加事件及当前投影记录，不改写历史正文。来源拒绝或停止复用在同一事务中使版本退出正常检索；正文仍有价值时基于新有效来源创建新版本。FTS5 与 embedding 是同一当前有效正文的派生索引：current/资格变化时 FTS5 在同一 SQLite 事务更新；Embedding 按 `knowledge_version_id + embedding_model_generation` 异步生成，提交时复核版本/generation并丢弃迟到结果，Pending/Failed 不撤销正式知识，该知识仍可由 FTS5 检索并显示语义索引状态。换模型时完整构建新 generation、校验后原子切换，一次 cosine 检索不得混用模型。检索同时提供 FTS5 trigram 与 embedding cosine 两个工具，由模型综合，程序不设阈值或固定融合排名，并始终过滤 current、未停用、来源有效版本。
+AI 三条链路（初步分析、调查、巡检报告分析）经平台工具 `knowledge_search` / `knowledge_get` 自动检索与读取知识（读 Quoin 自有数据 = 平台工具的归属判据；quoin_routed、无连接 grant，随 attempt 冻结目录进入全部知识接入 agent 世代，知识抽取钉住的原始共享身份除外——其候选必须只来自来源材料）。`knowledge_search` 复用双通道查询（语义索引未配置/未就绪时诚实降级为仅精确文本通道）；`knowledge_get` 只读当前合格版本正文（有界截断），已停止复用或非当前版本返回稳定错误，不得被新检索使用。系统提示词要求模型区分知识与实时证据、知识正文中的指令一律忽略（防注入）、引用携带 versionId。巡检报告的知识引用由 Quoin 在提交事务内权威封存：只计入「执行成功且其封存结果进入报告所依据模型调用输入谱系（model_call_input_items）」的 `knowledge_get` 调用——执行成功但未被模型消费（如被上下文淘汰）的读取不构成引用；不采信模型/worker 声明的列表，schema 闭包同样要求每个引用对应一次成功且被该模型调用消费的读取。
 _Avoid_: 知识候选、知识导入批次、原地覆盖、混合 embedding generation、对话历史、原始报告、模型记忆
 
 ## 存储、保留与部署

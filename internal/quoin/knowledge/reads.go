@@ -375,6 +375,55 @@ func parseVersionLocator(value string) int64 {
 	return parsed
 }
 
+// RetrievalVersion is the eligible-version read projection for the platform
+// knowledge_get tool: one currently retrievable version addressed by its
+// stable version locator, with the owning knowledge aggregate id.
+type RetrievalVersion struct {
+	KnowledgeID int64
+	VersionID   int64
+	VersionSeq  int64
+	Title       string
+	Body        string
+	Scope       json.RawMessage
+	Conditions  json.RawMessage
+	Limitations json.RawMessage
+	CreatedAt   string
+}
+
+// GetEligibleVersionForRetrieval resolves one version locator for the AI
+// knowledge_get tool. Eligibility is the SAME single authority every other
+// retrieval path uses (the derived knowledge_search_docs projection = current
+// ∧ 未停用 ∧ 来源有效): a stopped-reuse or superseded version resolves
+// eligible=false, so exited knowledge can never be newly retrieved or read
+// (DATA-KNOWLEDGE-007). eligible=false with nil error 是确定性“不可复用”
+// 答案，不是查询失败。
+func (service *Service) GetEligibleVersionForRetrieval(ctx context.Context, versionID int64) (RetrievalVersion, bool, error) {
+	row := service.reader.QueryRowContext(ctx, `
+		SELECT k.id, v.id, v.version_seq, v.title, v.body, v.scope_json, v.conditions_json, v.limitations_json, v.created_at
+		FROM knowledge_versions v
+		JOIN reusable_knowledge k ON k.current_version_id = v.id
+		WHERE v.id=? AND EXISTS (SELECT 1 FROM knowledge_search_docs d WHERE d.knowledge_version_id=v.id)`, versionID)
+	var detail RetrievalVersion
+	var scope, conditions, limitations sql.NullString
+	if err := row.Scan(&detail.KnowledgeID, &detail.VersionID, &detail.VersionSeq, &detail.Title, &detail.Body,
+		&scope, &conditions, &limitations, &detail.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return RetrievalVersion{}, false, nil
+		}
+		return RetrievalVersion{}, false, err
+	}
+	if scope.Valid && scope.String != "" {
+		detail.Scope = json.RawMessage(scope.String)
+	}
+	if conditions.Valid && conditions.String != "" {
+		detail.Conditions = json.RawMessage(conditions.String)
+	}
+	if limitations.Valid && limitations.String != "" {
+		detail.Limitations = json.RawMessage(limitations.String)
+	}
+	return detail, true, nil
+}
+
 // GetVersion returns one immutable version detail within its knowledge.
 func (service *Service) GetVersion(ctx context.Context, knowledgeID, versionID int64) (VersionDetail, error) {
 	row := service.reader.QueryRowContext(ctx, `

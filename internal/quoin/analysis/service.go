@@ -40,8 +40,10 @@ const OutputSchemaKind = "initial_analysis_output_v1"
 // first-observation enrichment fields, view correlations and a related-alert
 // window (same correlated views or same source, 24h before first
 // observation); the business_systems declaration context is gone with the
-// retired domain. 首发无历史 attempt：没有旧 renderer 分叉。
-const RendererVersion = "initial-analysis-renderer-v5"
+// retired domain. Renderer v6 是知识接入代：消息形状不变，冻结工具目录内容
+// 新增知识检索工具（输入正文随目录内容演进，digest 覆盖）。
+// 首发无历史 attempt：没有旧 renderer 分叉。
+const RendererVersion = "initial-analysis-renderer-v6"
 
 // Errors the HTTP surface maps onto the frozen status codes.
 var (
@@ -310,9 +312,9 @@ type writer = execution.Executor
 // integrations are the attempt's source-level read-only authority
 // (ADR-0004); the occurrence carries the ADR-0012 normalized semantics.
 type Input struct {
-	Occurrence   OccurrenceContext     `json:"occurrence"`
-	Integrations []RenderedIntegration `json:"integrations,omitempty"`
-	ModelContract ModelContract        `json:"modelContract"`
+	Occurrence    OccurrenceContext     `json:"occurrence"`
+	Integrations  []RenderedIntegration `json:"integrations,omitempty"`
+	ModelContract ModelContract         `json:"modelContract"`
 	// ToolCatalog is the attempt's frozen model tool catalog (ADR-0004);
 	// the snapshot digest covers it via this embedding.
 	ToolCatalog *attempt.FrozenCatalog `json:"toolCatalog,omitempty"`
@@ -332,16 +334,16 @@ type RenderedIntegration struct {
 // correlations and the related-alert window are all first-observation
 // frozen facts; state stays a live read like the historical shape.
 type OccurrenceContext struct {
-	ID              string                `json:"id"`
-	State           string                `json:"state"`
-	Severity        string                `json:"severity"`
-	Title           string                `json:"title"`
-	Resource        string                `json:"resource,omitempty"`
-	FirstSeenAt     string                `json:"firstSeenAt"`
-	LastStateChange string                `json:"lastStateChangeAt"`
-	ResolvedAt      *string               `json:"resolvedAt,omitempty"`
-	Labels          map[string]string     `json:"labels"`
-	Annotations     map[string]string     `json:"annotations,omitempty"`
+	ID              string            `json:"id"`
+	State           string            `json:"state"`
+	Severity        string            `json:"severity"`
+	Title           string            `json:"title"`
+	Resource        string            `json:"resource,omitempty"`
+	FirstSeenAt     string            `json:"firstSeenAt"`
+	LastStateChange string            `json:"lastStateChangeAt"`
+	ResolvedAt      *string           `json:"resolvedAt,omitempty"`
+	Labels          map[string]string `json:"labels"`
+	Annotations     map[string]string `json:"annotations,omitempty"`
 	// Enrichment 是首观测富化终值（命中规则叠加后的 fields）。
 	Enrichment map[string]string `json:"enrichment,omitempty"`
 	// Correlations 是首观测命中的业务视图快照（多命中全记录）。

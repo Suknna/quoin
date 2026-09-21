@@ -76,6 +76,23 @@ var initialAnalysisMode = attemptMode{
 	},
 }
 
+// keptInitialAnalysisMode renders the frozen initial-analysis-v2 (Keep) prompt
+// for attempts created before the 知识接入 generation; the message shape
+// is byte-identical and only the system prompt differs.
+var keptInitialAnalysisMode = attemptMode{
+	schemaKind:       "initial_analysis_v1",
+	agentVersion:     PreviousAnalysisAgentVersion,
+	outputSchemaKind: OutputSchemaKind,
+	prompt:           agent.KeptAnalysisSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildKeptInitialMessages(input)
+	},
+}
+
 // previousInitialAnalysisMode renders the frozen initial-analysis-v1 prompt
 // for attempts created before the Keep-adapted generation; the message shape
 // is byte-identical and only the system prompt differs.
@@ -102,6 +119,23 @@ var inspectionAnalysisMode = attemptMode{
 			return nil, err
 		}
 		return agent.BuildInspectionMessages(input)
+	},
+}
+
+// keptInspectionAnalysisMode renders the frozen inspection-analysis-v3 (Keep)
+// prompt for attempts created before the 知识接入 generation. These attempts
+// predate per-attempt catalog freezing for inspection analyses, so their
+// dispatch could not resolve a tool catalog anyway; the mode only keeps the
+// identity executable for in-flight reconciled rows.
+var keptInspectionAnalysisMode = attemptMode{
+	schemaKind: "inspection_analysis_v1", agentVersion: KeptInspectionAnalysisAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
+	prompt: agent.KeptInspectionSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseInspectionInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildInspectionMessagesWithPrompt(input, agent.KeptInspectionSystemPrompt)
 	},
 }
 
@@ -170,6 +204,23 @@ var investigationMode = attemptMode{
 			return nil, err
 		}
 		return agent.BuildInvestigationMessages(input)
+	},
+}
+
+// keptInvestigationMode renders the frozen investigation-v3 (Keep) prompt
+// under the identical renderer-v4 message shape for attempts created before
+// the 知识接入 generation.
+var keptInvestigationMode = attemptMode{
+	schemaKind:       "investigation_v1",
+	agentVersion:     KeptInvestigationAgentVersion,
+	outputSchemaKind: InvestigationOutputSchemaKind,
+	prompt:           agent.KeptInvestigationSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseInvestigationInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildKeptInvestigationMessages(input)
 	},
 }
 
@@ -275,6 +326,8 @@ func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
 		switch start.GetAgentVersion() {
 		case WorkerAgentVersion:
 			mode = initialAnalysisMode
+		case PreviousAnalysisAgentVersion:
+			mode = keptInitialAnalysisMode
 		case LegacyInitialAnalysisAgentVersion:
 			mode = previousInitialAnalysisMode
 		default:
@@ -284,6 +337,8 @@ func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
 		switch start.GetAgentVersion() {
 		case WorkerInvestigationAgentVersion:
 			mode = investigationMode
+		case KeptInvestigationAgentVersion:
+			mode = keptInvestigationMode
 		case PreviousInvestigationAgentVersion:
 			mode = previousInvestigationMode
 		case LegacyInvestigationAgentVersion:
@@ -293,11 +348,13 @@ func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
 		}
 	case inspectionAnalysisMode.schemaKind:
 		// 巡检分析有明确的代际组合：旧共享身份渲染最初的冻结 prompt，第一代与
-		// report-compliance 代各绑定自己的冻结 prompt，新身份渲染当前 prompt；
-		// 其余身份一律拒绝。
+		// report-compliance 代各绑定自己的冻结 prompt，知识接入代起冻结工具目录
+		// 并渲染当前 prompt；其余身份一律拒绝。
 		switch start.GetAgentVersion() {
 		case InspectionAnalysisAgentVersion:
 			mode = inspectionAnalysisMode
+		case KeptInspectionAnalysisAgentVersion:
+			mode = keptInspectionAnalysisMode
 		case ReportComplianceInspectionAnalysisAgentVersion:
 			mode = reportComplianceInspectionAnalysisMode
 		case PreviousInspectionAnalysisAgentVersion:

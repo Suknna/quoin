@@ -17,11 +17,19 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 )
 
-// Attempts exposes the generic attempt service for dispatch and fencing. The
-// fresh instance inherits this family's read-only reader so its read paths
-// (chat contract lookups, dispatch projections) never fall back to the write
-// pool; the write pool stays private to its runner transactions.
+// Attempts exposes the generic attempt service for dispatch and fencing.
+// The instance is created once and cached: composition wires the assembled
+// tool catalogs onto THIS instance (app/plugins.go), and every later caller
+// (dispatch, model-call ingress, tool-call sealing) must resolve through the
+// same assembly — a fresh per-call service would silently fall back to the
+// process-default catalogs. The instance inherits this family's read-only
+// reader so its read paths (chat contract lookups, dispatch projections)
+// never fall back to the write pool; the write pool stays private to its
+// runner transactions.
 func (s *Service) Attempts() *attempt.Service {
+	if s.attempts != nil {
+		return s.attempts
+	}
 	attempts := attempt.NewService(s.db)
 	attempts.SnapshotRebuilder = s.rebuildAttemptInput
 	if s.reader != nil {
@@ -29,6 +37,7 @@ func (s *Service) Attempts() *attempt.Service {
 			panic("inspection: wire attempt reader: " + err.Error())
 		}
 	}
+	s.attempts = attempts
 	return attempts
 }
 
@@ -247,11 +256,24 @@ func (s *Service) rebuildAnalysisInput(ctx context.Context, attemptID int64) ([]
 	if requirementsErr != nil && !errors.Is(requirementsErr, sql.ErrNoRows) {
 		return nil, requirementsErr
 	}
+	// 冻结工具目录：只读存储文档（tool_catalog_json），旧 Attempt（无目录）
+	// 保持缺失以维持重建字节不变；存在时与创建时内嵌的文档逐字节一致。
+	// 读取走注入的只读能力（audit-design：读路径不得落回写池），未装配即
+	// fail closed。
+	reader, err := s.readReader()
+	if err != nil {
+		return nil, err
+	}
+	toolCatalog, err := attempt.FrozenToolCatalogDoc(ctx, reader, attemptID)
+	if err != nil {
+		return nil, err
+	}
 	input := reportInput{
 		SchemaKind: reportInputKind, AttemptID: attemptID, InspectionRunID: runID.Int64,
 		ReportVersion: reportVersion, PlanKey: planKey,
 		EvidenceIDs: evidenceIDs, ArtifactIDs: artifactIDs, KnowledgeVersionID: []int64{},
 		ModelContract: reportModelContract{ModelID: modelID, ContextBudgetTokens: contextBudget, MaxOutputTokens: maxOutput},
+		ToolCatalog:   toolCatalog,
 	}
 	if hasRequirements && override.Valid {
 		input.ReportInstructionsOverride = &override.String

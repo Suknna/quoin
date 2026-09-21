@@ -76,11 +76,16 @@ type FrozenTool struct {
 // location is accepted here; adding a plugin never touches this table. The
 // Keep 提示词迁入 generations (initial-analysis-v2 / investigation-v3) accept
 // exactly the locations of their predecessors — a prompt generation never
-// changes the tool surface.
+// changes the tool surface. 知识接入代（initial-analysis-v3 /
+// investigation-v4 / inspection-analysis-v4）首次为巡检分析冻结目录并沿用
+// 全部平台工具。
 var generationAccepts = map[string]map[string]bool{
-	"initial-analysis-v1": {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
-	"initial-analysis-v2": {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
-	"investigation-v3":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"initial-analysis-v1":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"initial-analysis-v2":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"initial-analysis-v3":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"investigation-v3":       {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"investigation-v4":       {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"inspection-analysis-v4": {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 }
 
 // platformToolNames are the compiled tools no plugin owns (workspace and
@@ -88,7 +93,27 @@ var generationAccepts = map[string]map[string]bool{
 var platformToolNames = map[string]bool{
 	"bash": true, "read": true, "write": true, "grep": true,
 	"artifact_read": true, "artifact_grep": true,
-	"alerts_recent": true,
+	"alerts_recent": true, "knowledge_search": true, "knowledge_get": true,
+}
+
+// knowledgeToolNames 是知识库检索平台工具。它们进入除 initial-analysis-v1
+// 外的全部世代：v1 是知识抽取（knowledge_extraction）钉住的原始共享身份，
+// 其候选必须只来自来源材料——抽取代理不得检索既有知识库来“完善”草稿。
+var knowledgeToolNames = map[string]bool{
+	"knowledge_search": true,
+	"knowledge_get":    true,
+}
+
+// generationCarriesKnowledgeTool reports whether one agent generation's base
+// catalog carries the knowledge retrieval platform tools.
+func generationCarriesKnowledgeTool(agentVersion string) bool {
+	return !knowledgeExcludedGenerations[agentVersion]
+}
+
+// knowledgeExcludedGenerations lists the agent identities whose NEW attempts
+// must not see knowledge retrieval tools.
+var knowledgeExcludedGenerations = map[string]bool{
+	"initial-analysis-v1": true,
 }
 
 // ImplementationTable is the frozen by-name index of one assembly's
@@ -249,6 +274,9 @@ func BuildCatalogs(registry *plugins.Registry, enabledPluginIDs []string) (*Cata
 			AgentVersion:  agentVersion,
 		}
 		for _, def := range PlatformImplementations() {
+			if knowledgeToolNames[def.Name] && !generationCarriesKnowledgeTool(agentVersion) {
+				continue
+			}
 			catalog.Tools = append(catalog.Tools, frozenToolFromDefinition(def))
 		}
 		addedTools := map[string]bool{}
@@ -289,6 +317,14 @@ func catalogSchemaVersionFor(agentVersion string) string {
 		// The investigation catalog generation keeps its own provenance label
 		// distinct from the initial-analysis one.
 		return "investigation-tools-v3"
+	}
+	if agentVersion == "investigation-v4" {
+		// 知识接入的调查目录代：沿用独立 provenance 标签，随代递增。
+		return "investigation-tools-v4"
+	}
+	if agentVersion == "inspection-analysis-v4" {
+		// 巡检分析首次按 attempt 冻结目录：拥有自己的 provenance 标签。
+		return "inspection-analysis-tools-v1"
 	}
 	return ToolSchemaVersion
 }
