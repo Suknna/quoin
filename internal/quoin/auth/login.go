@@ -84,7 +84,22 @@ func (service *Service) LoginWithPassword(ctx context.Context, username, passwor
 		actor.ID = entry.User.ID
 	}
 	meta, exists := execution.FromContext(ctx)
-	if !exists {
+	if exists {
+		// 准入层为公开请求预置 system/0（admission finalize）：登录审计的
+		// actor 必须是被尝试账号（上面预解析；未知用户名保持 system），
+		// 关联/来源/会话证明保持准入链不变。
+		attached, attachErr := execution.ReplaceMetadata(ctx, execution.Metadata{
+			CorrelationID: meta.CorrelationID,
+			Actor:         actor,
+			Initiator:     actor,
+			Source:        meta.Source,
+			Session:       meta.Session,
+		})
+		if attachErr != nil {
+			return LoginResult{}, attachErr
+		}
+		ctx = attached
+	} else {
 		correlation, err := execution.NewCorrelationID()
 		if err != nil {
 			return LoginResult{}, err

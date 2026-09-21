@@ -190,7 +190,23 @@ func (application *apiServer) downloadArtifactContent(writer http.ResponseWriter
 	writer.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
 	writer.Header().Set("ETag", `"`+meta.SHA256+`"`)
 	writer.WriteHeader(http.StatusOK)
-	if _, err := io.Copy(writer, file); err != nil {
+	body := io.Reader(file)
+	if meta.Sensitive {
+		// CONTEXT「敏感内容下载」：活动流绑定该 Session——撤销、禁用或降级
+		// 时立即中止剩余发送（与备份下载同一围栏：每 32KiB 重新验会话与
+		// 角色，授权失效前最多再放行一个有界块）。
+		body = &authorizedBackupReader{reader: file, check: func() error {
+			current, checkErr := application.auth.Authenticate(request.Context(), cookie)
+			if checkErr != nil {
+				return checkErr
+			}
+			if current.User.Role != "admin" {
+				return errors.New("sensitive artifact download requires the administrator role")
+			}
+			return nil
+		}}
+	}
+	if _, err := io.Copy(writer, body); err != nil {
 		// The head is already out; a mid-body transport error cannot be
 		// re-expressed as a status code (HTTP-FILE-007 forbids silent
 		// truncation, so the log carries the locator for diagnosis).

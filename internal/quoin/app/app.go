@@ -370,7 +370,17 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	if err != nil {
 		return err
 	}
-	serverSet.relay = grpc.NewServer(grpc.KeepaliveEnforcementPolicy(runtimeRelayKeepalivePolicy()), grpc.Creds(runtimeTLSCreds))
+	// relay 拦截器同时承担请求指标（CONTEXT 审计豁免类别的有界指标载体）
+	// 与 panic recovery：gRPC 没有内建恢复，handler panic 会击穿整个控制面。
+	relayMetrics, err := serverSet.ops.RequestMetrics()
+	if err != nil {
+		return fmt.Errorf("relay request metrics: %w", err)
+	}
+	serverSet.relay = grpc.NewServer(
+		grpc.KeepaliveEnforcementPolicy(runtimeRelayKeepalivePolicy()), grpc.Creds(runtimeTLSCreds),
+		grpc.ChainUnaryInterceptor(relayMetricsInterceptor(relayMetrics)),
+		grpc.ChainStreamInterceptor(relayStreamMetricsInterceptor(relayMetrics)),
+	)
 	// ADR-0011：Stele 网关流与出向编排。网关只持有自己的流投影（无发送
 	// 依赖），先构建再装配 relay 与控制服务。
 	steleGateway := NewSteleGateway()
@@ -544,7 +554,14 @@ func newMaintenanceServers(application *apiServer, config contract.QuoinConfig, 
 		return nil, err
 	}
 	opsServer.SetReadiness(sharedops.Readiness{Component: "quoin", Release: buildinfo.Release, Mode: "maintenance", AcceptingWork: false, Reason: sharedops.Maintenance})
-	return &servers{public: &http.Server{Addr: ":8080", Handler: public, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}, ops: opsServer}, nil
+	// 维护面与正常面同一埋点（CONTEXT「审计与执行溯源」的有界指标载体）：
+	// 维护窗口内匿名登录失败与 CSRF 拒绝同样只有这一个量化面。
+	metrics, err := opsServer.RequestMetrics()
+	if err != nil {
+		return nil, fmt.Errorf("http request metrics: %w", err)
+	}
+	handler := requestMetricsMiddleware(metrics, public)
+	return &servers{public: &http.Server{Addr: ":8080", Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}, ops: opsServer}, nil
 }
 
 func (application *apiServer) newServers(config contract.QuoinConfig) (*servers, error) {
@@ -561,7 +578,14 @@ func (application *apiServer) newServers(config contract.QuoinConfig) (*servers,
 	if err != nil {
 		return nil, err
 	}
-	return &servers{public: &http.Server{Addr: ":8080", Handler: gate, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}, ops: opsServer, upgradeGate: gate}, nil
+	// HTTP 请求指标（CONTEXT 审计豁免类别的有界指标载体）：计数全部 /api/
+	// 请求，含匿名失败、CSRF 拒绝与 429——它们在审计表之外唯一的量化面。
+	metrics, err := opsServer.RequestMetrics()
+	if err != nil {
+		return nil, fmt.Errorf("http request metrics: %w", err)
+	}
+	handler := requestMetricsMiddleware(metrics, gate)
+	return &servers{public: &http.Server{Addr: ":8080", Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}, ops: opsServer, upgradeGate: gate}, nil
 }
 
 // NewHandler builds Quoin's backend-only public surface. The independent
@@ -715,7 +739,8 @@ func (application *apiServer) register(api huma.API) {
 	inspectionHandler.Register(api)
 	// 业务视图（ADR-0004）：可选组织能力，仅 Admin 可管理。
 	viewHandler := &businessview.Handler{
-		Views: application.views,
+		Views:       application.views,
+		ReadSession: application.auth.Authenticate,
 		Authenticate: func(ctx context.Context, cookie string) (int64, error) {
 			session, err := application.authenticateAdmin(ctx, cookie, "管理业务视图")
 			if err != nil {

@@ -281,6 +281,61 @@ func (server *Server) ArtifactGCSuccessProjector() (func(float64), error) {
 	return metric.Set, nil
 }
 
+// RequestMetrics 是 HTTP/gRPC 请求指标 family 的具型访问器（与
+// BackupMetrics 同一约定：具型访问器而不是 registry 逃逸口）。CONTEXT
+// 「审计与执行溯源」把匿名失败、CSRF 拒绝、无效组件身份与 429 的可见性
+// 放在有界指标上——这些 family 由 catalog 预初始化，这里把计数入口交给
+// 公共 HTTP 中间件与 relay 拦截器。
+type RequestMetrics struct {
+	HTTPRequests *prometheus.CounterVec
+	HTTPDuration *prometheus.HistogramVec
+	GRPCRequests *prometheus.CounterVec
+	GRPCDuration *prometheus.HistogramVec
+}
+
+// RequestMetrics returns the catalog's HTTP/gRPC request families as typed
+// accessors so the public middleware and relay interceptors can count
+// requests without touching the registry.
+func (server *Server) RequestMetrics() (*RequestMetrics, error) {
+	if server.state.Component != "quoin" {
+		return nil, errors.New("request metrics belong to quoin only")
+	}
+	counterVec := func(name string) (*prometheus.CounterVec, error) {
+		vec, ok := server.collectors[name].(*prometheus.CounterVec)
+		if !ok {
+			return nil, fmt.Errorf("metrics catalog is missing counter vec %s", name)
+		}
+		return vec, nil
+	}
+	histVec := func(name string) (*prometheus.HistogramVec, error) {
+		vec, ok := server.collectors[name].(*prometheus.HistogramVec)
+		if !ok {
+			return nil, fmt.Errorf("metrics catalog is missing histogram vec %s", name)
+		}
+		return vec, nil
+	}
+	httpRequests, err := counterVec("quoin_http_requests_total")
+	if err != nil {
+		return nil, err
+	}
+	httpDuration, err := histVec("quoin_http_request_duration_seconds")
+	if err != nil {
+		return nil, err
+	}
+	grpcRequests, err := counterVec("quoin_grpc_server_requests_total")
+	if err != nil {
+		return nil, err
+	}
+	grpcDuration, err := histVec("quoin_grpc_server_request_duration_seconds")
+	if err != nil {
+		return nil, err
+	}
+	return &RequestMetrics{
+		HTTPRequests: httpRequests, HTTPDuration: httpDuration,
+		GRPCRequests: grpcRequests, GRPCDuration: grpcDuration,
+	}, nil
+}
+
 // SetMaintenanceReason projects the per-reason quoin_maintenance gauge from
 // the SQL maintenance authority. Empty reason resets every series to 0.
 func (server *Server) SetMaintenanceReason(reason string, active bool) {

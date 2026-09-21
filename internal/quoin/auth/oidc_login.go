@@ -38,14 +38,36 @@ func (service *Service) ResolveOIDCIdentity(ctx context.Context, identity OIDCId
 	if identity.Issuer == "" || identity.Subject == "" {
 		return 0, fmt.Errorf("%w: issuer and subject are required", ErrOIDCRejected)
 	}
-	if _, exists := execution.FromContext(ctx); !exists {
+	// 预解析审计 actor（与 LoginWithPassword 同一约定）：既有身份归属被
+	// 解析账号，首次 JIT 建档归属 system。准入层为公开请求预置的
+	// system/0 不得原样进入审计（admission finalize）。
+	actor := execution.Principal{Kind: execution.PrincipalSystem}
+	var resolvedID int64
+	if err := service.read().QueryRowContext(ctx, `SELECT user_id FROM identities WHERE issuer=? AND subject=?`, identity.Issuer, identity.Subject).Scan(&resolvedID); err == nil {
+		actor = execution.Principal{Kind: execution.PrincipalUser, ID: resolvedID}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	if meta, exists := execution.FromContext(ctx); exists {
+		attached, attachErr := execution.ReplaceMetadata(ctx, execution.Metadata{
+			CorrelationID: meta.CorrelationID,
+			Actor:         actor,
+			Initiator:     actor,
+			Source:        meta.Source,
+			Session:       meta.Session,
+		})
+		if attachErr != nil {
+			return 0, attachErr
+		}
+		ctx = attached
+	} else {
 		correlation, err := execution.NewCorrelationID()
 		if err != nil {
 			return 0, err
 		}
 		attached, attachErr := execution.WithMetadata(ctx, execution.Metadata{
 			CorrelationID: correlation,
-			Actor:         execution.Principal{Kind: execution.PrincipalSystem},
+			Actor:         actor,
 			Source:        execution.Source{Kind: execution.SourceInternal},
 		})
 		if attachErr != nil {
@@ -131,7 +153,23 @@ func (service *Service) CompleteOIDCLogin(ctx context.Context, issuer, subject, 
 	if err != nil {
 		return LoginResult{}, err
 	}
-	if _, exists := execution.FromContext(ctx); !exists {
+	if meta, exists := execution.FromContext(ctx); exists {
+		// 准入层为公开请求预置 system/0：OIDC 登录审计归属已解析账号，
+		// 关联/来源/会话证明保持准入链不变（ResolveOIDCIdentity 的预解析
+		// 可能是 system（JIT），这里以最终解析结果为准）。
+		actor := execution.Principal{Kind: execution.PrincipalUser, ID: userID}
+		attached, attachErr := execution.ReplaceMetadata(ctx, execution.Metadata{
+			CorrelationID: meta.CorrelationID,
+			Actor:         actor,
+			Initiator:     actor,
+			Source:        meta.Source,
+			Session:       meta.Session,
+		})
+		if attachErr != nil {
+			return LoginResult{}, attachErr
+		}
+		ctx = attached
+	} else {
 		correlation, err := execution.NewCorrelationID()
 		if err != nil {
 			return LoginResult{}, err

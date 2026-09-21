@@ -208,6 +208,7 @@ paths:
       tags:
       - adminops
       operationId: listBusinessViews
+      description: 所有完整登录会话可读取筛选列表；Operator 仅获得 viewKey/displayName，其他字段为零值；详情与写操作仍仅 Admin。
       responses:
         '200':
           description: 实际持久化的结果。
@@ -5501,7 +5502,7 @@ components:
           description: 告警源的人类稳定 key；列表不得以 sourceId 作为主要识别信息。
         kind:
           type: string
-          enum: [identity_conflict, fingerprint_mismatch, delivery_truncated, normalizer_missing]
+          enum: [identity_conflict, fingerprint_mismatch, delivery_truncated, normalizer_missing, credential_denied]
           description: normalizer_missing（ADR-0012）：来源协议无 AlertNormalizer 或归一化失败，首观测以缺省语义冻结；来源级问题，不指向具体条目。
         deliveryId:
           $ref: '#/components/schemas/LocatorId'
@@ -6299,6 +6300,8 @@ components:
       type: object
       required: [name, type, enabled, rowVersion, config]
       properties:
+        lastProbe:
+          $ref: '#/components/schemas/ConnectionLastProbe'
         name:
           $ref: '#/components/schemas/StableKey'
         type:
@@ -6321,6 +6324,8 @@ components:
       type: object
       required: [name, type, enabled, rowVersion, config]
       properties:
+        lastProbe:
+          $ref: '#/components/schemas/ConnectionLastProbe'
         name:
           $ref: '#/components/schemas/StableKey'
         type:
@@ -6344,6 +6349,8 @@ components:
       type: object
       required: [name, type, enabled, rowVersion, config]
       properties:
+        lastProbe:
+          $ref: '#/components/schemas/ConnectionLastProbe'
         name:
           $ref: '#/components/schemas/StableKey'
         type:
@@ -6368,6 +6375,18 @@ components:
         enableQualificationProbeResult:
           $ref: '#/components/schemas/ConnectionProbeResult'
           description: 服务端按同一 immutable enable event 解析的 typed result；不得隐式选择最新成功 probe。
+    ConnectionLastProbe:
+      type: object
+      required: [id, outcome, finishedAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/LocatorId'
+        outcome:
+          type: string
+          enum: [passed, failed, cancelled, interrupted]
+        finishedAt:
+          type: string
+          format: date-time
     ConnectionProbeResult:
       type: object
       required: [id, attemptId, connectionType, connectionRevisionId, credentialGenerationId, rootBindingRevision, actionSetId, actionSetVersion, probeContractDigest, outcome, resultDigest, startedAt, finishedAt, details]

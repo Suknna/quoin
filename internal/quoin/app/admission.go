@@ -189,7 +189,7 @@ func accessDeclarationTable() map[string]operations.Declaration {
 
 	// 业务视图（Admin）。
 	add(
-		declaration("listBusinessViews", http.MethodGet, "/api/v1/business-views", operations.LevelAdmin, operations.KindQuery, "business_view"),
+		declaration("listBusinessViews", http.MethodGet, "/api/v1/business-views", operations.LevelSession, operations.KindQuery, "business_view"),
 		declaration("createBusinessView", http.MethodPost, "/api/v1/business-views", operations.LevelAdmin, operations.KindCommand, "business_view"),
 		declaration("getBusinessView", http.MethodGet, "/api/v1/business-views/{viewKey}", operations.LevelAdmin, operations.KindQuery, "business_view"),
 		declaration("updateBusinessView", http.MethodPut, "/api/v1/business-views/{viewKey}", operations.LevelAdmin, operations.KindCommand, "business_view"),

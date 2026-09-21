@@ -137,7 +137,14 @@ func connectionError(err error) error {
 	}
 }
 
+type lastProbeJSON struct {
+	ID         string `json:"id"`
+	Outcome    string `json:"outcome"`
+	FinishedAt string `json:"finishedAt"`
+}
+
 type connectionSummaryJSON struct {
+	LastProbe            *lastProbeJSON  `json:"lastProbe,omitempty"`
 	ID                   string          `json:"id"`
 	Name                 string          `json:"name"`
 	Type                 string          `json:"type"`
@@ -154,6 +161,9 @@ func renderConnection(summary connections.Summary) connectionSummaryJSON {
 		ID: strconv.FormatInt(summary.ID, 10), Name: summary.Name, Type: summary.Type, Enabled: summary.Enabled,
 		RevalidationRequired: summary.RevalidationRequired,
 		RowVersion:           summary.RowVersion, Config: summary.Config,
+	}
+	if summary.LastProbe != nil {
+		rendered.LastProbe = &lastProbeJSON{ID: strconv.FormatInt(summary.LastProbe.ID, 10), Outcome: summary.LastProbe.Outcome, FinishedAt: summary.LastProbe.FinishedAt}
 	}
 	if summary.CurrentRevisionID > 0 {
 		rendered.CurrentRevisionID = strconv.FormatInt(summary.CurrentRevisionID, 10)
@@ -186,7 +196,8 @@ func (application *apiServer) listConnections(ctx context.Context, input *struct
 		Items      []connectionSummaryJSON `json:"items"`
 		NextCursor string                  `json:"nextCursor,omitempty"`
 	}
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取连接列表"); err != nil {
 		return nil, err
 	}
@@ -221,7 +232,8 @@ func (application *apiServer) createConnection(ctx context.Context, input *struc
 }) (*struct {
 	Status int `header:"-"`
 	Body   connectionSummaryJSON
-}, error) {
+}, error,
+) {
 	session, err := application.authenticateAdmin(ctx, input.Session, "创建连接")
 	if err != nil {
 		return nil, err
@@ -249,7 +261,8 @@ func (application *apiServer) getConnection(ctx context.Context, input *struct {
 }) (*struct {
 	CacheControl string               `header:"Cache-Control"`
 	Body         connectionDetailJSON `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取连接详情"); err != nil {
 		return nil, err
 	}
@@ -284,7 +297,8 @@ func (application *apiServer) probeConnection(ctx context.Context, input *struct
 		AttemptID string `json:"id"`
 		State     string `json:"state"`
 	}
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "发起连接探测"); err != nil {
 		return nil, err
 	}
@@ -318,7 +332,8 @@ func (application *apiServer) enableConnection(ctx context.Context, input *struc
 	}
 }) (*struct {
 	Body connectionSummaryJSON
-}, error) {
+}, error,
+) {
 	session, err := application.authenticateAdmin(ctx, input.Session, "启用连接")
 	if err != nil {
 		return nil, err
@@ -349,7 +364,8 @@ func (application *apiServer) disableConnection(ctx context.Context, input *stru
 	}
 }) (*struct {
 	Body connectionSummaryJSON
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "停用连接"); err != nil {
 		return nil, err
 	}
@@ -420,7 +436,8 @@ func (application *apiServer) getConnectionProbeAttempt(ctx context.Context, inp
 }) (*struct {
 	CacheControl string             `header:"Cache-Control"`
 	Body         attemptSummaryJSON `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取探测任务"); err != nil {
 		return nil, err
 	}
@@ -452,7 +469,8 @@ func (application *apiServer) cancelConnectionProbeAttempt(ctx context.Context, 
 	}
 }) (*struct {
 	Body attemptSummaryJSON `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "取消探测任务"); err != nil {
 		return nil, err
 	}
@@ -530,7 +548,8 @@ func (application *apiServer) listConnectionProbeResults(ctx context.Context, in
 		Items      []probeResultJSONRow `json:"items"`
 		NextCursor string               `json:"nextCursor,omitempty"`
 	}
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取探测结果"); err != nil {
 		return nil, err
 	}
@@ -589,7 +608,8 @@ func (application *apiServer) listConnectionRevisions(ctx context.Context, input
 		Items      []revisionJSONRow `json:"items"`
 		NextCursor string            `json:"nextCursor,omitempty"`
 	}
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取连接 revision 历史"); err != nil {
 		return nil, err
 	}
@@ -638,7 +658,8 @@ func (application *apiServer) listCredentialGenerations(ctx context.Context, inp
 		Items      []generationJSONRow `json:"items"`
 		NextCursor string              `json:"nextCursor,omitempty"`
 	}
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "读取凭据 generation 历史"); err != nil {
 		return nil, err
 	}
@@ -693,7 +714,8 @@ func (application *apiServer) discoverProviderModels(ctx context.Context, input 
 		} `json:"items"`
 		Detail string `json:"detail,omitempty"`
 	}
-}, error) {
+}, error,
+) {
 	if _, err := application.authenticateAdmin(ctx, input.Session, "发现模型列表"); err != nil {
 		return nil, err
 	}
@@ -736,7 +758,8 @@ func (application *apiServer) rotateConnectionCredential(ctx context.Context, in
 	}
 }) (*struct {
 	Body connectionDetailJSON `json:"body"`
-}, error) {
+}, error,
+) {
 	session, err := application.authenticateAdmin(ctx, input.Session, "轮换连接凭据")
 	if err != nil {
 		return nil, err

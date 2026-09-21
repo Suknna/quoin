@@ -57,7 +57,14 @@ func (e *RowVersionError) Unwrap() error { return ErrRowVersion }
 // Summary is the ConnectionSummary projection (non-secret, typed config).
 // Summary round-trips through JSON for the command-replay projection, so
 // every field carries a stable tag (replays must restore the original ids).
+type LastProbe struct {
+	ID         int64  `json:"id"`
+	Outcome    string `json:"outcome"`
+	FinishedAt string `json:"finishedAt"`
+}
+
 type Summary struct {
+	LastProbe            *LastProbe      `json:"lastProbe,omitempty"`
 	ID                   int64           `json:"id"`
 	Name                 string          `json:"name"`
 	Type                 string          `json:"type"`
@@ -439,7 +446,8 @@ func getSummaryOn(ctx context.Context, reader audit.Reader, name string) (Summar
 	row := reader.QueryRowContext(ctx, `
 		SELECT c.id,c.name,c.type,c.enabled,c.revalidation_required,
 		       COALESCE(c.current_revision_id,0),COALESCE(c.current_credential_generation_id,0),c.row_version,c.created_at,
-		       COALESCE((SELECT config_json FROM connection_revisions WHERE id=c.current_revision_id),'{}')
+		       COALESCE((SELECT config_json FROM connection_revisions WHERE id=c.current_revision_id),'{}'),
+ COALESCE((SELECT json_object('id',p.id,'outcome',p.outcome,'finishedAt',p.finished_at) FROM connection_probe_results p WHERE p.connection_id=c.id ORDER BY p.id DESC LIMIT 1),'null')
 		FROM connections c WHERE c.name=?`, name)
 	return scanSummary(row)
 }
@@ -453,8 +461,8 @@ func (service *Service) Get(ctx context.Context, name string) (Summary, error) {
 func scanSummary(row *sql.Row) (Summary, error) {
 	var summary Summary
 	var enabled, revalidation int
-	var config string
-	if err := row.Scan(&summary.ID, &summary.Name, &summary.Type, &enabled, &revalidation, &summary.CurrentRevisionID, &summary.CurrentGenerationID, &summary.RowVersion, &summary.CreatedAt, &config); err != nil {
+	var config, lastProbe string
+	if err := row.Scan(&summary.ID, &summary.Name, &summary.Type, &enabled, &revalidation, &summary.CurrentRevisionID, &summary.CurrentGenerationID, &summary.RowVersion, &summary.CreatedAt, &config, &lastProbe); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Summary{}, ErrNotFound
 		}
@@ -463,6 +471,9 @@ func scanSummary(row *sql.Row) (Summary, error) {
 	summary.Enabled = enabled == 1
 	summary.RevalidationRequired = revalidation == 1
 	summary.Config = json.RawMessage(config)
+	if err := json.Unmarshal([]byte(lastProbe), &summary.LastProbe); err != nil {
+		return Summary{}, err
+	}
 	return summary, nil
 }
 
@@ -474,7 +485,8 @@ func (service *Service) List(ctx context.Context, after string, limit int) ([]Su
 	rows, err := service.reader.QueryContext(ctx, `
 		SELECT c.id,c.name,c.type,c.enabled,c.revalidation_required,
 		       COALESCE(c.current_revision_id,0),COALESCE(c.current_credential_generation_id,0),c.row_version,c.created_at,
-		       COALESCE((SELECT config_json FROM connection_revisions WHERE id=c.current_revision_id),'{}')
+		       COALESCE((SELECT config_json FROM connection_revisions WHERE id=c.current_revision_id),'{}'),
+ COALESCE((SELECT json_object('id',p.id,'outcome',p.outcome,'finishedAt',p.finished_at) FROM connection_probe_results p WHERE p.connection_id=c.id ORDER BY p.id DESC LIMIT 1),'null')
 		FROM connections c WHERE c.name>? ORDER BY c.name LIMIT ?`, after, limit+1)
 	if err != nil {
 		return nil, false, err
@@ -484,13 +496,16 @@ func (service *Service) List(ctx context.Context, after string, limit int) ([]Su
 	for rows.Next() {
 		var summary Summary
 		var enabled, revalidation int
-		var config string
-		if err := rows.Scan(&summary.ID, &summary.Name, &summary.Type, &enabled, &revalidation, &summary.CurrentRevisionID, &summary.CurrentGenerationID, &summary.RowVersion, &summary.CreatedAt, &config); err != nil {
+		var config, lastProbe string
+		if err := rows.Scan(&summary.ID, &summary.Name, &summary.Type, &enabled, &revalidation, &summary.CurrentRevisionID, &summary.CurrentGenerationID, &summary.RowVersion, &summary.CreatedAt, &config, &lastProbe); err != nil {
 			return nil, false, err
 		}
 		summary.Enabled = enabled == 1
 		summary.RevalidationRequired = revalidation == 1
 		summary.Config = json.RawMessage(config)
+		if err := json.Unmarshal([]byte(lastProbe), &summary.LastProbe); err != nil {
+			return nil, false, err
+		}
 		summaries = append(summaries, summary)
 	}
 	more := false

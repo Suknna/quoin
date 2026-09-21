@@ -16,6 +16,7 @@ type Handler struct {
 	Views *Service
 	// Authenticate 仅 Admin 可管理业务视图（Operator 无管理入口）。
 	Authenticate func(ctx context.Context, cookie string) (int64, error)
+	ReadSession  func(ctx context.Context, cookie string) (auth.Session, error)
 }
 
 type problemError struct {
@@ -75,13 +76,26 @@ func (h *Handler) listViews(ctx context.Context, input *struct {
 }) (*struct {
 	CacheControl string      `header:"Cache-Control"`
 	Body         viewListing `json:"body"`
-}, error) {
-	if _, err := h.admin(ctx, input.Session); err != nil {
+}, error,
+) {
+	admin := true
+	if h.ReadSession != nil {
+		session, err := h.ReadSession(ctx, input.Session)
+		if err != nil {
+			return nil, err
+		}
+		admin = session.User.Role == "admin"
+	} else if _, err := h.admin(ctx, input.Session); err != nil {
 		return nil, err
 	}
 	items, err := h.Views.ListViews(ctx)
 	if err != nil {
 		return nil, mapError(err)
+	}
+	if !admin {
+		for i, item := range items {
+			items[i] = View{ViewKey: item.ViewKey, DisplayName: item.DisplayName}
+		}
 	}
 	return &struct {
 		CacheControl string      `header:"Cache-Control"`
@@ -95,7 +109,8 @@ func (h *Handler) getView(ctx context.Context, input *struct {
 }) (*struct {
 	CacheControl string       `header:"Cache-Control"`
 	Body         BusinessView `json:"body"`
-}, error) {
+}, error,
+) {
 	if _, err := h.admin(ctx, input.Session); err != nil {
 		return nil, err
 	}
@@ -138,7 +153,8 @@ func (h *Handler) createView(ctx context.Context, input *struct {
 	Status       int          `header:"-"`
 	CacheControl string       `header:"Cache-Control"`
 	Body         BusinessView `json:"body"`
-}, error) {
+}, error,
+) {
 	principal, err := h.admin(ctx, input.Session)
 	if err != nil {
 		return nil, err
@@ -166,7 +182,8 @@ func (h *Handler) updateView(ctx context.Context, input *struct {
 }) (*struct {
 	CacheControl string       `header:"Cache-Control"`
 	Body         BusinessView `json:"body"`
-}, error) {
+}, error,
+) {
 	principal, err := h.admin(ctx, input.Session)
 	if err != nil {
 		return nil, err

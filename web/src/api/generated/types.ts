@@ -52,7 +52,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** 可选业务视图列表 */
+        /**
+         * 可选业务视图列表
+         * @description 所有完整登录会话可读取筛选列表；Operator 仅获得 viewKey/displayName，其他字段为零值；详情与写操作仍仅 Admin。
+         */
         get: operations["listBusinessViews"];
         put?: never;
         /** 创建业务视图 */
@@ -2656,7 +2659,7 @@ export interface components {
              * @description normalizer_missing（ADR-0012）：来源协议无 AlertNormalizer 或归一化失败，首观测以缺省语义冻结；来源级问题，不指向具体条目。
              * @enum {string}
              */
-            kind?: "identity_conflict" | "fingerprint_mismatch" | "delivery_truncated" | "normalizer_missing";
+            kind?: "identity_conflict" | "fingerprint_mismatch" | "delivery_truncated" | "normalizer_missing" | "credential_denied";
             deliveryId?: components["schemas"]["LocatorId"];
             deliveryItemId?: components["schemas"]["LocatorId"];
             firstSeenAt?: components["schemas"]["Timestamp"];
@@ -3046,6 +3049,7 @@ export interface components {
         /** @description 连接响应按 type 封闭：外层 type 与 config 变体由同一对象强制一致，客户端不会读到相互矛盾的 type/config 组合（HTTP-COMMAND-010）。 */
         ConnectionSummary: components["schemas"]["PrometheusConnectionSummary"] | components["schemas"]["ThanosConnectionSummary"] | components["schemas"]["ModelProviderConnectionSummary"];
         PrometheusConnectionSummary: {
+            lastProbe?: components["schemas"]["ConnectionLastProbe"];
             name: components["schemas"]["StableKey"];
             /** @constant */
             type: "prometheus";
@@ -3057,6 +3061,7 @@ export interface components {
             config: components["schemas"]["PrometheusConnectionNonSecret"];
         };
         ThanosConnectionSummary: {
+            lastProbe?: components["schemas"]["ConnectionLastProbe"];
             name: components["schemas"]["StableKey"];
             /** @constant */
             type: "thanos";
@@ -3069,6 +3074,7 @@ export interface components {
             config: components["schemas"]["ThanosConnectionNonSecret"];
         };
         ModelProviderConnectionSummary: {
+            lastProbe?: components["schemas"]["ConnectionLastProbe"];
             name: components["schemas"]["StableKey"];
             /** @constant */
             type: "model_provider";
@@ -3082,6 +3088,13 @@ export interface components {
             enableQualificationProbeResultId?: components["schemas"]["LocatorId"];
             /** @description 服务端按同一 immutable enable event 解析的 typed result；不得隐式选择最新成功 probe。 */
             enableQualificationProbeResult?: components["schemas"]["ConnectionProbeResult"];
+        };
+        ConnectionLastProbe: {
+            id: components["schemas"]["LocatorId"];
+            /** @enum {string} */
+            outcome: "passed" | "failed" | "cancelled" | "interrupted";
+            /** Format: date-time */
+            finishedAt: string;
         };
         /** @description connectionType 与 details 变体必须一致；该闭合由服务端 typed child 表与 JSON Schema fixtures 共同校验。 */
         ConnectionProbeResult: {
@@ -3822,6 +3835,7 @@ export type ConnectionSummary = components['schemas']['ConnectionSummary'];
 export type PrometheusConnectionSummary = components['schemas']['PrometheusConnectionSummary'];
 export type ThanosConnectionSummary = components['schemas']['ThanosConnectionSummary'];
 export type ModelProviderConnectionSummary = components['schemas']['ModelProviderConnectionSummary'];
+export type ConnectionLastProbe = components['schemas']['ConnectionLastProbe'];
 export type ConnectionProbeResult = components['schemas']['ConnectionProbeResult'];
 export type PrometheusConnectionProbeDetails = components['schemas']['PrometheusConnectionProbeDetails'];
 export type ThanosConnectionProbeDetails = components['schemas']['ThanosConnectionProbeDetails'];

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/Suknna/quoin/internal/quoin/auth"
+	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
 func TestAuditTargetsNameTheDeclaredAuthority(t *testing.T) {
@@ -97,4 +98,63 @@ func TestAuditTargetsNameTheDeclaredAuthority(t *testing.T) {
 
 func errIsUnauthenticated(err error) bool {
 	return errors.Is(err, auth.ErrUnauthenticated)
+}
+
+// HTTP 主路径（准入层为公开请求预置 system/0 actor）的登录审计归属：本地
+// 与 OIDC 登录的 actor 都必须是被尝试/已解析账号，而不是准入占位身份；
+// 未知用户名归属 system（不发明用户 id）。
+func TestLoginAuditActorOnHTTPPath(t *testing.T) {
+	service, db := newAuthService(t)
+	_, _ = initializeAdminDrive(t, service)
+	admin := mustSession(t, service)
+	ctx := context.Background()
+
+	// 模拟准入层 finalize 注入的公开请求 metadata（admission.go:341-347）。
+	admissionCtx, err := execution.WithMetadata(ctx, execution.Metadata{
+		CorrelationID: "corr-http-login",
+		Actor:         execution.Principal{Kind: execution.PrincipalSystem, ID: 0},
+		Initiator:     execution.Principal{Kind: execution.PrincipalSystem, ID: 0},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-http-login"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.LoginWithPassword(admissionCtx, "admin", fixtureAdminPassword, "UA"); err != nil {
+		t.Fatal(err)
+	}
+	var actorType string
+	var actorID int64
+	if err := db.QueryRowContext(ctx, `SELECT actor_type, actor_id FROM audit_events WHERE action='auth.login.local' ORDER BY id DESC LIMIT 1`).Scan(&actorType, &actorID); err != nil {
+		t.Fatal(err)
+	}
+	if actorType != "user" || actorID != admin.User.ID {
+		t.Fatalf("HTTP-path local login audit actor=(%s,%d), want (user,%d)", actorType, actorID, admin.User.ID)
+	}
+	// 关联保持准入链，不被重 rooting。
+	var correlation string
+	if err := db.QueryRowContext(ctx, `SELECT correlation_id FROM audit_events WHERE action='auth.login.local' ORDER BY id DESC LIMIT 1`).Scan(&correlation); err != nil {
+		t.Fatal(err)
+	}
+	if correlation != "corr-http-login" {
+		t.Fatalf("correlation=%q, want the admission correlation", correlation)
+	}
+
+	// 失败路径同样归属被尝试账号。
+	admissionCtx2, err := execution.WithMetadata(ctx, execution.Metadata{
+		CorrelationID: "corr-http-login-fail",
+		Actor:         execution.Principal{Kind: execution.PrincipalSystem, ID: 0},
+		Source:        execution.Source{Kind: execution.SourceHTTP, RequestID: "req-http-login-fail"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.LoginWithPassword(admissionCtx2, "admin", "wrong password value!", "UA"); !errIsUnauthenticated(err) {
+		t.Fatalf("wrong password must be rejected, got %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT actor_type, actor_id FROM audit_events WHERE action='auth.login.local' AND outcome='failure' ORDER BY id DESC LIMIT 1`).Scan(&actorType, &actorID); err != nil {
+		t.Fatal(err)
+	}
+	if actorType != "user" || actorID != admin.User.ID {
+		t.Fatalf("HTTP-path failed login audit actor=(%s,%d), want (user,%d)", actorType, actorID, admin.User.ID)
+	}
 }
