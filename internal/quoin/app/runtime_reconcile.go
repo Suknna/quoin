@@ -4,8 +4,8 @@ package app
 // stream (T12, RUNTIME-TASK-005/006/007, RUNTIME-CANCEL-003): new-boot
 // interruption, same-boot reconcile (ReconcileRequest → ReconcileReport),
 // heartbeat lease renewal, Cancelling convergence when a stream ends, the
-// periodic lease sweeper and the idempotent re-dispatch of Assigned
-// attempts the runtime never accepted. Commit order stays with SQLite.
+// periodic lease sweeper, and the sealed-tool-result replay for attempts
+// the runtime still owns. Commit order stays with SQLite.
 // Recovery mutations (recovery-loss freeze, unstarted exploration closes)
 // run through execution.Execute: the audit commits inside the runner
 // transaction under the attempt's restored durable scope, failures roll the
@@ -25,7 +25,6 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // reconcileTimeout bounds the wait for ReconcileReport after a same-boot
@@ -509,6 +508,12 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 					sharedops.LogEvent("quoin", "error", "reconcile.accept_restore", fmt.Sprintf("attempt=%d %v", view.ID, err))
 				}
 			}
+			// The runtime still owns this attempt: replay every sealed
+			// quoin_routed tool result on the current stream. A first send
+			// lost in the disconnect window leaves the worker's waiter
+			// blocked forever otherwise (the waiter survives the reconnect
+			// exactly for this replay).
+			service.resendSealedExternalToolResults(ctx, attempts, view.ID)
 			continue
 		}
 		switch view.State {
@@ -521,14 +526,17 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 				sharedops.LogEvent("quoin", "info", "reconcile.local_type_loss", fmt.Sprintf("attempt=%d", view.ID))
 				continue
 			}
-			// Never accepted by the runtime: idempotent re-dispatch with
-			// the frozen binding (RUNTIME-TASK-005).
-			err := service.reDispatchAgentAttempt(ctx, view)
-			if err != nil {
-				sharedops.LogEvent("quoin", "error", "reconcile.redispatch", fmt.Sprintf("attempt=%d %v", view.ID, err))
-			} else {
-				sharedops.LogEvent("quoin", "info", "reconcile.redispatched", fmt.Sprintf("attempt=%d", view.ID))
-			}
+			// Never accepted by the runtime. The old idempotent re-dispatch
+			// rode the frozen binding, whose epoch predates this reconnect:
+			// SendToFenced requires the live stream's epoch, so the frame
+			// could never be delivered, and even a delivered re-dispatch
+			// would bind the new worker to an epoch the result-commit fence
+			// no longer accepts. Converge as loss exactly like an unreported
+			// Running attempt instead of hanging silently; the operator
+			// retries from the owning scope (RUNTIME-TASK-005 contract-level
+			// redelivery is tracked separately).
+			service.finalizeLoss(ctx, view, "lease_expired")
+			sharedops.LogEvent("quoin", "info", "reconcile.lost_assigned", fmt.Sprintf("attempt=%d", view.ID))
 		case "Running":
 			// The runtime lost the attempt (worker/supervisor task gone):
 			// frozen Interrupted semantics, no worker-memory resume.
@@ -544,97 +552,6 @@ func (service *RuntimeService) alignReconcileReport(ctx context.Context, bootID 
 			sharedops.LogEvent("quoin", "error", "reconcile.lease_renew", err.Error())
 		}
 	}
-}
-
-// reDispatchAgentAttempt re-sends the DispatchAttempt frame for one Assigned
-// agent attempt with its frozen binding (the schema forbids rebinding;
-// the accept fence matches the boot, RUNTIME-TASK-005). Locally-executed
-// types never ride this path (ADR-0011).
-func (service *RuntimeService) reDispatchAgentAttempt(ctx context.Context, view attempt.View) error {
-	attempts := service.attemptsService()
-	if view.AttemptType == "inspection_analysis" && service.Inspections != nil {
-		attempts = service.Inspections.Attempts()
-	}
-	if view.AttemptType == "knowledge_extraction" && service.Knowledge != nil {
-		attempts = service.Knowledge.Attempts()
-	}
-	if attempts == nil {
-		return fmt.Errorf("attempt service not wired for %s", view.AttemptType)
-	}
-	input, err := attempts.DispatchInputFor(ctx, view.ID)
-	if err != nil {
-		return err
-	}
-	// Re-dispatch echoes the stored association exactly like the first
-	// dispatch: the persisted row stays the single correlation authority
-	// (ADR-0006). The database follows the attempts-service selection above.
-	var correlationDB audit.Reader
-	if service.Analyses != nil {
-		correlationDB = service.Analyses.Reader()
-	}
-	if view.AttemptType == "inspection_analysis" && service.Inspections != nil {
-		correlationDB = service.Inspections.Reader()
-	}
-	if view.AttemptType == "knowledge_extraction" && service.Knowledge != nil {
-		correlationDB = service.Knowledge.Reader()
-	}
-	operationCorrelationID, err := dispatchOperationCorrelation(ctx, correlationDB, view.ID)
-	if err != nil {
-		return err
-	}
-	var artifactRefs []*runtimev1.ArtifactRef
-	for _, ref := range input.ArtifactRefs {
-		artifactRefs = append(artifactRefs, &runtimev1.ArtifactRef{
-			ArtifactId: ref.ArtifactID, Role: ref.Role, MediaType: ref.MediaType,
-			SizeBytes: uint64(ref.SizeBytes), Sha256: ref.SHA256, BodyExpired: ref.BodyExpired,
-		})
-	}
-	var grants []*runtimev1.ConnectionGrant
-	for _, grant := range input.Grants {
-		grants = append(grants, &runtimev1.ConnectionGrant{
-			GrantId: grant.GrantID, ConnectionRevisionId: grant.ConnectionRevisionID,
-			CredentialGenerationId: grant.CredentialGenerationID, Purpose: grant.Purpose,
-			ConnectionProbeResultId: grant.ConnectionProbeResultID,
-		})
-	}
-	bindingEpoch := uint64(0)
-	if view.ConnectionEpoch != nil {
-		bindingEpoch = uint64(*view.ConnectionEpoch)
-	}
-	bindingBoot := ""
-	if view.BootID != nil {
-		bindingBoot = *view.BootID
-	}
-	attemptWire := runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS
-	scopeWire := runtimev1.ScopeType_SCOPE_TYPE_ANALYSIS
-	if view.AttemptType == "investigation" {
-		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION
-		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_INVESTIGATION
-	} else if view.AttemptType == "knowledge_extraction" {
-		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION
-		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_KNOWLEDGE_IMPORT_BATCH
-	} else if view.AttemptType == "inspection_analysis" && view.ScopeType == "run" {
-		attemptWire = runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS
-		scopeWire = runtimev1.ScopeType_SCOPE_TYPE_RUN
-	}
-	return service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
-		ConnectionEpoch: bindingEpoch,
-		CorrelationId:   uint64(view.ID),
-		BootId:          bindingBoot,
-		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
-			AttemptId:              view.ID,
-			AttemptType:            attemptWire,
-			ScopeType:              scopeWire,
-			ScopeId:                view.ScopeID,
-			OperationCorrelationId: operationCorrelationID,
-			LeaseDeadline:          timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
-			Input: &runtimev1.AttemptInputSnapshot{
-				SchemaKind: input.SchemaKind, CanonicalJson: input.CanonicalJSON,
-				ContentDigest: input.ContentDigest, ArtifactRefs: artifactRefs,
-				ConnectionGrants: grants, AgentVersion: input.AgentVersion,
-			},
-		}},
-	})
 }
 
 // onPlinthStreamEnded preserves Cancelling attempts bound to the ended stream.

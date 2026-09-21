@@ -132,9 +132,8 @@ func newRoutedToolFixture(t *testing.T, preDispatch func(t *testing.T, db *sql.D
 	mustExec(t, db, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id=?,connection_epoch=1,lease_until=?,runtime_release_version='routed-test',row_version=row_version+1 WHERE id=1`, fixture.bootID, lease)
 	mustExec(t, db, `UPDATE execution_attempts SET state='Running',accepted_at=?,started_at=?,row_version=row_version+1 WHERE id=1`, now, now)
 
-	// 物理模型调用 + pending tool call。execution_mode 列受既有 SQL CHECK
-	// 约束（'quoin_routed' 词表迁移属 schema 契约侧）；编排分流以 attempt
-	// 冻结目录为权威，不受该列值影响。
+	// 物理模型调用 + pending tool call（execution_mode 与生产一致取
+	// definition 的 quoin_routed；编排分流仍以 attempt 冻结目录为权威）。
 	mustExec(t, db, `INSERT INTO model_calls(id,attempt_id,call_seq,retry_seq,operation,model_id,connection_grant_id,prompt_renderer_version,agent_version,prompt_digest,tool_schema_version,tool_schema_digest,input_snapshot_digest,rendered_request_digest,context_budget_tokens,max_output_tokens,estimated_input_tokens,status,started_at)
 		VALUES(1,1,1,0,'chat','chat',1,'initial-analysis-renderer-v1','initial-analysis-v2',?,?,?,?,?,4096,1024,0,'running',?)`,
 		strings.Repeat("1", 64), "initial-analysis-tools-v5", strings.Repeat("2", 64), strings.Repeat("3", 64), strings.Repeat("4", 64), strings.Repeat("5", 64), now)
@@ -147,7 +146,7 @@ func newRoutedToolFixture(t *testing.T, preDispatch func(t *testing.T, db *sql.D
 	mustExec(t, db, `UPDATE model_calls SET usage_json='{"input_tokens":1,"output_tokens":1,"total_tokens":2}',status='succeeded',ended_at=? WHERE id=1 AND status='running'`, now)
 	arguments := []byte(`{"query":"up"}`)
 	mustExec(t, db, `INSERT INTO tool_calls(id,attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
-		VALUES(1,1,1,1,0,'call-routed-1','thanos_query','4',?,?,'worker_local','return_to_model','pending',?)`,
+		VALUES(1,1,1,1,0,'call-routed-1','thanos_query','4',?,?,'quoin_routed','return_to_model','pending',?)`,
 		string(arguments), hex.EncodeToString(sha256SumBytes(arguments)), now)
 
 	// 只读 reader（编排路径的 schema/catalog 读经此缝）。
@@ -176,6 +175,10 @@ func newRoutedToolFixture(t *testing.T, preDispatch func(t *testing.T, db *sql.D
 			return nil
 		},
 	}
+	// 结果帧经当前活动流下发（deliverExternalToolResult 查 Slots.View）：
+	// fixture 挂一条与 attempt 绑定同 boot/epoch 的流，等价于生产里未发生
+	// 过重连的路径。
+	fixture.service.Slots.AttachStream(qruntime.SlotPlinth, fixture.bootID, 1)
 	return fixture
 }
 
@@ -349,7 +352,7 @@ func TestQuoinRoutedArtifactReadExecutor(t *testing.T) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	arguments := []byte(`{"artifactId":"1","offset":2,"limit":1}`)
 	mustExec(t, fixture.db, `INSERT INTO tool_calls(id,attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
-		VALUES(2,1,1,1,1,'call-routed-2','artifact_read','2',?,?,'worker_local','return_to_model','pending',?)`,
+		VALUES(2,1,1,1,1,'call-routed-2','artifact_read','2',?,?,'quoin_routed','return_to_model','pending',?)`,
 		string(arguments), hex.EncodeToString(sha256SumBytes(arguments)), now)
 
 	// 前序 tool call（thanos_query@0）必须先到终态，artifact 工具才能开始
@@ -398,7 +401,7 @@ func TestQuoinRoutedAlertsRecentExecutor(t *testing.T) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	arguments := []byte(`{"viewKey":"mall","severityMin":"high","hours":168,"limit":5}`)
 	mustExec(t, fixture.db, `INSERT INTO tool_calls(id,attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
-		VALUES(3,1,1,1,2,'call-routed-3','alerts_recent','1',?,?,'worker_local','return_to_model','pending',?)`,
+		VALUES(3,1,1,1,2,'call-routed-3','alerts_recent','1',?,?,'quoin_routed','return_to_model','pending',?)`,
 		string(arguments), hex.EncodeToString(sha256SumBytes(arguments)), now)
 
 	// 前序 tool call 必须先到终态（tool call 开始闭包的顺序围栏）。
@@ -497,7 +500,7 @@ func beginKnowledgeToolCall(t *testing.T, fixture *routedToolFixture, toolCallID
 	t.Helper()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	mustExec(t, fixture.db, `INSERT INTO tool_calls(id,attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
-		VALUES(?,1,1,1,?,?,?,'1',?,?,'worker_local','return_to_model','pending',?)`,
+		VALUES(?,1,1,1,?,?,?,'1',?,?,'quoin_routed','return_to_model','pending',?)`,
 		toolCallID, toolIndex, providerID, toolName, arguments, hex.EncodeToString(sha256SumBytes([]byte(arguments))), now)
 	// 前序 tool call 必须先到终态（tool call 开始闭包的顺序围栏）；已终态则
 	// 幂等跳过（同测试内多次播种）。
@@ -599,5 +602,116 @@ func TestQuoinRoutedKnowledgeToolsWithoutDomainWiring(t *testing.T) {
 	result := fixture.awaitExternalResult(t)
 	if result.GetErrorCode() != "knowledge_unavailable" {
 		t.Fatalf("error code=%q", result.GetErrorCode())
+	}
+}
+
+// TestReconcileResendsSealedToolResultsOnCurrentStream 覆盖断流窗口丢失首发
+// 的收敛：同 boot 重连（epoch 1 → 2）后，对账确认 attempt 仍活跃时补发其已
+// 封存 quoin_routed 结果，且补发帧携带当前流的 boot/epoch（行内旧 epoch 的
+// 帧会被 SendToFenced 围栏拒绝，永远不可达）。
+func TestReconcileResendsSealedToolResultsOnCurrentStream(t *testing.T) {
+	fixture := newRoutedToolFixture(t, nil)
+	if ack := fixture.beginRoutedToolCall(t, 1); !ack.GetBeginToolCallAck().GetAccepted() {
+		t.Fatalf("begin ack=%+v", ack.GetBeginToolCallAck())
+	}
+	fixture.awaitToolCallStatus(t, 1, "succeeded")
+	first := fixture.awaitExternalResult(t)
+	if first.GetOutcome() != runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_SUCCEEDED {
+		t.Fatalf("first outcome=%v", first.GetOutcome())
+	}
+	// 同 boot 重连：当前流 epoch 前进到 2，attempt 行内仍是派发时的旧绑定。
+	fixture.service.Slots.AttachStream(qruntime.SlotPlinth, fixture.bootID, 2)
+	fixture.resetFrames()
+
+	boot := fixture.bootID
+	rowEpoch := int64(1)
+	fixture.service.alignReconcileReport(context.Background(), fixture.bootID, []attempt.View{{
+		ID: fixture.attemptID, AttemptType: "initial_analysis", ScopeType: "analysis", ScopeID: 1,
+		State: "Running", BootID: &boot, ConnectionEpoch: &rowEpoch,
+	}}, []int64{fixture.attemptID})
+
+	resent := fixture.awaitExternalResult(t)
+	if resent.GetOutcome() != runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_SUCCEEDED {
+		t.Fatalf("resent outcome=%v", resent.GetOutcome())
+	}
+	if !strings.Contains(string(resent.GetPayload().GetCanonicalJson()), `"output":"routed-fixture"`) {
+		t.Fatalf("resent payload=%s", resent.GetPayload().GetCanonicalJson())
+	}
+	fixture.framesMu.Lock()
+	for _, envelope := range fixture.frames {
+		if envelope.GetExternalToolResult() == nil {
+			continue
+		}
+		if envelope.GetBootId() != fixture.bootID || envelope.GetConnectionEpoch() != 2 {
+			fixture.framesMu.Unlock()
+			t.Fatalf("resent frame rides boot=%q epoch=%d, want current stream %q epoch 2",
+				envelope.GetBootId(), envelope.GetConnectionEpoch(), fixture.bootID)
+		}
+	}
+	fixture.framesMu.Unlock()
+	// 幂等：第二次对账补发的帧与第一次内容一致（Plinth 侧无 waiter 只审计丢弃）。
+	fixture.resetFrames()
+	fixture.service.alignReconcileReport(context.Background(), fixture.bootID, []attempt.View{{
+		ID: fixture.attemptID, AttemptType: "initial_analysis", ScopeType: "analysis", ScopeID: 1,
+		State: "Running", BootID: &boot, ConnectionEpoch: &rowEpoch,
+	}}, []int64{fixture.attemptID})
+	again := fixture.awaitExternalResult(t)
+	if string(again.GetPayload().GetCanonicalJson()) != string(resent.GetPayload().GetCanonicalJson()) {
+		t.Fatal("resend is not byte-identical across reconcile rounds")
+	}
+}
+
+// TestReconcileUnreportedAssignedAgentAttemptConvergesAsLoss 覆盖从未被
+// runtime 接受的 agent attempt：旧重派发携带行内旧 epoch，必然被当前流的
+// 发送围栏拒绝——对账改为确定性 loss 收口（Interrupted），不再静默悬挂。
+func TestReconcileUnreportedAssignedAgentAttemptConvergesAsLoss(t *testing.T) {
+	fixture := newRoutedToolFixture(t, func(t *testing.T, db *sql.DB) {
+		t.Helper()
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		lease := time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano)
+		// 播种一个独立的 Assigned attempt（id=2，挂在独立 occurrence 上：
+		// 同一 occurrence 同时最多一个 active 分析）：派发绑定一旦写入即
+		// 不可变，不能从 Running 回置，只能按真实派发路径成形。
+		mustExec(t, db, `INSERT INTO alert_occurrences(id,source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,first_seen_at,last_state_change_at) VALUES(2,1,?,?,'Firing','{}',?,?,?)`,
+			[]byte{0, 0, 0, 0, 0, 0, 1, 3}, now, strings.Repeat("c", 64), now, now)
+		mustExec(t, db, `INSERT INTO initial_analyses(id,occurrence_id,state,input_snapshot_digest,created_by,created_at) VALUES(2,2,'Queued',?,NULL,?)`, strings.Repeat("b", 64), now)
+		mustExec(t, db, `INSERT INTO execution_attempts(id,attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at) VALUES(2,'initial_analysis','analysis',2,'Queued','routed-test','initial-analysis-v2',?)`, now)
+		mustExec(t, db, `INSERT INTO attempt_input_snapshots(id,attempt_id,schema_kind,renderer_version,content_digest,tool_catalog_json,created_at)
+			SELECT 2,2,schema_kind,renderer_version,?,tool_catalog_json,? FROM attempt_input_snapshots WHERE id=1`,
+			strings.Repeat("b", 64), now)
+		mustExec(t, db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,occurrence_id) VALUES(2,1,'user',?,2)`, strings.Repeat("d", 64))
+		mustExec(t, db, `INSERT INTO attempt_connection_grants(id,attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at) VALUES(2,2,'chat_model',1,1,1,1,?)`, now)
+		mustExec(t, db, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='routed-boot',connection_epoch=1,lease_until=?,runtime_release_version='routed-test',row_version=row_version+1 WHERE id=2`, lease)
+	})
+	fixture.resetFrames()
+
+	boot := fixture.bootID
+	rowEpoch := int64(1)
+	fixture.service.alignReconcileReport(context.Background(), fixture.bootID, []attempt.View{{
+		ID: 2, AttemptType: "initial_analysis", ScopeType: "analysis", ScopeID: 2,
+		State: "Assigned", BootID: &boot, ConnectionEpoch: &rowEpoch,
+	}}, nil)
+
+	var state, reason string
+	if err := fixture.db.QueryRow(`SELECT state,termination_reason FROM execution_attempts WHERE id=2`).Scan(&state, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if state != "Interrupted" || reason != "lease_expired" {
+		t.Fatalf("unreported Assigned attempt=(%s,%s), want (Interrupted,lease_expired)", state, reason)
+	}
+	var analysisState string
+	if err := fixture.db.QueryRow(`SELECT state FROM initial_analyses WHERE id=2`).Scan(&analysisState); err != nil {
+		t.Fatal(err)
+	}
+	if analysisState != "Interrupted" {
+		t.Fatalf("owning analysis state=%s, want Interrupted", analysisState)
+	}
+	// 不再发出任何 DispatchAttempt 帧（旧重派发已退役）。
+	fixture.framesMu.Lock()
+	defer fixture.framesMu.Unlock()
+	for _, envelope := range fixture.frames {
+		if envelope.GetDispatchAttempt() != nil {
+			t.Fatalf("re-dispatch frame must not be sent anymore: %+v", envelope.GetDispatchAttempt())
+		}
 	}
 }

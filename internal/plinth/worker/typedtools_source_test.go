@@ -15,6 +15,7 @@ import (
 
 	workerv1 "github.com/Suknna/quoin/internal/gen/proto/plinth/worker/v1"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
+	plinthruntime "github.com/Suknna/quoin/internal/plinth/runtime"
 )
 
 // fakeToolCallChannel exercises the BeginToolCall -> CompleteToolCall
@@ -47,13 +48,18 @@ type fakeExternalResultChannel struct {
 	mu      sync.Mutex
 	waiting []int64
 	result  *runtimev1.ExternalToolResult
+	err     error
 }
 
 func (fake *fakeExternalResultChannel) AwaitExternalToolResult(ctx context.Context, toolCallID int64) (*runtimev1.ExternalToolResult, error) {
 	fake.mu.Lock()
 	fake.waiting = append(fake.waiting, toolCallID)
 	result := fake.result
+	err := fake.err
 	fake.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	if result == nil {
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -177,6 +183,37 @@ func TestQuoinRoutedToolAbandonsOnContextCancel(t *testing.T) {
 	}
 	if waited := external.awaited(); len(waited) != 1 || waited[0] != 75 {
 		t.Fatalf("external wait=%v, want [75]", waited)
+	}
+}
+
+// 结果帧在等待上限内未送达(首发与重连补发均未覆盖):worker 合成确定性
+// 失败 ToolResult 让 agent 循环继续,而不是无限阻塞;真实封存结果以 Quoin
+// 时间线为准。
+func TestQuoinRoutedToolSynthesizesFailureOnDeliveryTimeout(t *testing.T) {
+	control := &fakeToolCallChannel{}
+	external := &fakeExternalResultChannel{err: plinthruntime.ErrExternalToolResultTimeout}
+	meta := toolMeta{name: "thanos_query", mode: "TOOL_EXECUTION_MODE_QUOIN_ROUTED"}
+	runner := &Runner{toolCalls: control, externalResults: external, tools: map[int64]toolMeta{78: meta}}
+	var buffer bytes.Buffer
+	if err := runner.executeTool(context.Background(), NewFrameWriter(&buffer), 41, 78, meta); err != nil {
+		t.Fatal(err)
+	}
+	result := readWorkerToolResult(t, &buffer)
+	if result.GetSuccess() {
+		t.Fatal("delivery timeout must compose a failure ToolResult")
+	}
+	if result.GetErrorCode() != "result_delivery_timeout" {
+		t.Fatalf("error code=%q, want result_delivery_timeout", result.GetErrorCode())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(result.GetResultJson(), &payload); err != nil {
+		t.Fatalf("synthesized timeout payload must be valid JSON: %v", err)
+	}
+	if payload["success"] != false || payload["errorCode"] != "result_delivery_timeout" {
+		t.Fatalf("synthesized timeout payload drifted: %s", result.GetResultJson())
+	}
+	if len(control.completes) != 0 {
+		t.Fatalf("completions=%d, want 0 (Quoin seals quoin_routed tools)", len(control.completes))
 	}
 }
 

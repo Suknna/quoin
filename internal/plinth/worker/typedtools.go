@@ -11,12 +11,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 
 	workerv1 "github.com/Suknna/quoin/internal/gen/proto/plinth/worker/v1"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
+	plinthruntime "github.com/Suknna/quoin/internal/plinth/runtime"
 )
 
 // executeTool persists pending->running and answers ToolCallStarted
@@ -64,7 +66,10 @@ func (runner *Runner) executeTool(ctx context.Context, writer *FrameWriter, atte
 //   - SUCCEEDED:result_json 即 payload.canonical_json(已封存的 committed
 //     payload),携带 artifact 引用与确定性 evidence ids;
 //   - FAILED/CANCELLED:组装失败形态(result_json 优先用 Quoin 的 payload,
-//     缺失时本地合成 return_to_model 失败形状),worker 侧已有处理。
+//     缺失时本地合成 return_to_model 失败形状),worker 侧已有处理;
+//   - 等待超时(ExternalResultTimeout):Quoin 已封存但结果帧在首发与重连
+//     补发后仍未送达——合成确定性失败结果让 agent 循环继续,而不是无限
+//     阻塞 attempt;账实以 Quoin ledger 为准,本帧只是模型可见的收敛形状。
 //
 // CompleteToolCall 不由 Plinth 发送——Quoin 已是这类工具的权威封存方。
 // 等待期间 attempt 取消或 worker 退出时,ctx 结束会清理 waiter 并放弃
@@ -72,7 +77,18 @@ func (runner *Runner) executeTool(ctx context.Context, writer *FrameWriter, atte
 func (runner *Runner) awaitQuoinRoutedTool(ctx context.Context, writer *FrameWriter, attemptID, toolCallID int64) error {
 	result, err := runner.externalResultSource().AwaitExternalToolResult(ctx, toolCallID)
 	if err != nil {
-		return err
+		if !errors.Is(err, plinthruntime.ErrExternalToolResultTimeout) {
+			return err
+		}
+		toolResult := &workerv1.ToolResult{
+			ToolCallId: toolCallID, Success: false,
+			ErrorCode:   "result_delivery_timeout",
+			ErrorDetail: "Quoin 已封存该调用,但结果帧在等待上限内未送达(首发与重连补发均未覆盖);真实封存结果以 Quoin 时间线为准",
+		}
+		toolResult.ResultJson, _ = json.Marshal(map[string]any{
+			"success": false, "errorCode": toolResult.ErrorCode, "errorDetail": toolResult.ErrorDetail,
+		})
+		return writer.Send(&workerv1.WorkerEnvelope{AttemptId: attemptID, Msg: &workerv1.WorkerEnvelope_ToolResult{ToolResult: toolResult}})
 	}
 	toolResult := &workerv1.ToolResult{
 		ToolCallId: toolCallID,

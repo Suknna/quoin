@@ -111,7 +111,25 @@ type ChannelConfig struct {
 	QuoinRuntimeClientCertificateFile string
 	QuoinRuntimeClientPrivateKeyFile  string
 	StateDirectory                    string
+	// ExternalResultTimeout bounds a worker's wait for one QUOIN_ROUTED tool
+	// result (ADR-0011). Quoin's own routed execution caps at 60s and the
+	// reconnect reconcile replays sealed results on attach, so a result that
+	// still has not arrived after this window is treated as lost; zero selects
+	// defaultExternalResultTimeout.
+	ExternalResultTimeout time.Duration
 	// CatalogDigest/catalogVersion stay empty for plinth (RUNTIME-CTRL-010).
+}
+
+// defaultExternalResultTimeout 是 QUOIN_ROUTED 结果等待的默认上限：Quoin 侧
+// 执行上限 60s，留出一次重连对账补发的余量。
+const defaultExternalResultTimeout = 90 * time.Second
+
+// externalResultTimeout 返回生效的等待上限。
+func (channel *Channel) externalResultTimeout() time.Duration {
+	if channel.Config.ExternalResultTimeout > 0 {
+		return channel.Config.ExternalResultTimeout
+	}
+	return defaultExternalResultTimeout
 }
 
 func NewChannel(config ChannelConfig) (*Channel, error) {
@@ -185,25 +203,13 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 	channel.outboundMu.Lock()
 	channel.outboundSeq = 1 // Hello consumed id 1
 	channel.outboundMu.Unlock()
-	heartbeat := time.NewTicker(10 * time.Second)
-	defer heartbeat.Stop()
-	go func() {
-		seq := uint64(0)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-heartbeat.C:
-				seq++
-				if err := channel.sendEnvelope(&runtimev1.ControlEnvelope{
-					ConnectionEpoch: channel.epoch, BootId: channel.bootID,
-					Msg: &runtimev1.ControlEnvelope_Heartbeat{Heartbeat: &runtimev1.Heartbeat{Seq: seq}},
-				}); err != nil {
-					return
-				}
-			}
-		}
-	}()
+	// The heartbeat goroutine belongs to THIS connection: sendEnvelope always
+	// targets the current sendStream, so without a per-connection stop the
+	// goroutine of a replaced stream keeps ticking onto its successor and
+	// every successful reconnect leaks one more sender.
+	heartbeatStop := make(chan struct{})
+	defer close(heartbeatStop)
+	go channel.runHeartbeats(ctx, heartbeatStop)
 	sink := &FrameSink{channel: channel}
 	for {
 		envelope, err := stream.Recv()
@@ -214,6 +220,32 @@ func (channel *Channel) RunConnect(ctx context.Context, readiness *sharedops.Ser
 			return fmt.Errorf("控制流结束: %w", err)
 		}
 		channel.dispatchServerFrame(ctx, sink, client, envelope)
+	}
+}
+
+// runHeartbeats 发送周期性心跳直到所属连接结束（stop 关闭）、进程上下文
+// 结束或发送失败。连接级 stop 是该 goroutine 的主要退出信号：sendEnvelope
+// 始终指向当前 sendStream，没有它旧连接的 goroutine 会把心跳打到继任流上，
+// 每次成功重连净泄漏一个发送者。
+func (channel *Channel) runHeartbeats(ctx context.Context, stop <-chan struct{}) {
+	heartbeat := time.NewTicker(10 * time.Second)
+	defer heartbeat.Stop()
+	seq := uint64(0)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		case <-heartbeat.C:
+			seq++
+			if err := channel.sendEnvelope(&runtimev1.ControlEnvelope{
+				ConnectionEpoch: channel.epoch, BootId: channel.bootID,
+				Msg: &runtimev1.ControlEnvelope_Heartbeat{Heartbeat: &runtimev1.Heartbeat{Seq: seq}},
+			}); err != nil {
+				return
+			}
+		}
 	}
 }
 
@@ -656,12 +688,18 @@ func (channel *Channel) HasAnyPendingResult() bool {
 	return len(channel.pending) > 0
 }
 
+// ErrExternalToolResultTimeout 表示 QUOIN_ROUTED 工具结果在等待上限内
+// 未送达（首发丢失且重连对账补发也未覆盖）。worker 把它收敛为模型可见的
+// 失败 ToolResult，而不是无限阻塞整个 attempt。
+var ErrExternalToolResultTimeout = errors.New("external tool result delivery timeout")
+
 // AwaitExternalToolResult 注册一个按 tool_call_id 等待 QUOIN_ROUTED 工具
-// 结果的 waiter 并阻塞到 Quoin 的 ExternalToolResult 帧到达、调用方上下文
-// 结束(attempt 取消/worker 退出)或进程关闭为止。上下文结束时 waiter 被
-// 就地清理并放弃结果(Quoin 已封存,Plinth 侧无需也不应再消费)。
-// waiter 生命周期跨流:同 boot 重连后 Quoin 重发的结果仍能送达,重放语义
-// 由 Quoin 的幂等封存保证。
+// 结果的 waiter 并阻塞到 Quoin 的 ExternalToolResult 帧到达、等待超过
+// ExternalResultTimeout、调用方上下文结束(attempt 取消/worker 退出)或进程
+// 关闭为止。超时与上下文结束时 waiter 被就地清理：Quoin 已封存，迟到帧
+// 只审计丢弃，账实以 Quoin ledger 为准。
+// waiter 生命周期跨流:同 boot 重连后 Quoin 经重连对账补发的结果仍能送达,
+// 重放语义由 Quoin 的幂等封存保证。
 func (channel *Channel) AwaitExternalToolResult(ctx context.Context, toolCallID int64) (*runtimev1.ExternalToolResult, error) {
 	waiter := make(chan *runtimev1.ExternalToolResult, 1)
 	channel.externalMu.Lock()
@@ -670,9 +708,14 @@ func (channel *Channel) AwaitExternalToolResult(ctx context.Context, toolCallID 
 	}
 	channel.externalWaiters[toolCallID] = waiter
 	channel.externalMu.Unlock()
+	timer := time.NewTimer(channel.externalResultTimeout())
+	defer timer.Stop()
 	select {
 	case result := <-waiter:
 		return result, nil
+	case <-timer.C:
+		channel.abandonExternalToolResult(toolCallID, waiter)
+		return nil, ErrExternalToolResultTimeout
 	case <-ctx.Done():
 		channel.abandonExternalToolResult(toolCallID, waiter)
 		return nil, ctx.Err()

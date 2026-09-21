@@ -378,7 +378,8 @@ func (service *RuntimeService) invokeAlertsRecentTool(ctx context.Context, attem
 // （按 matched_at 稳定序；无关联为空数组）。
 func attachAlertsRecentViewKeys(ctx context.Context, reader interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-}, results []alertsRecentRow) error {
+}, results []alertsRecentRow,
+) error {
 	if len(results) == 0 {
 		return nil
 	}
@@ -678,30 +679,158 @@ func (service *RuntimeService) routedSpillFunc(loaded *routedToolContext) plugin
 	}
 }
 
-// sendExternalToolResult 把封存结果经 Control 流推给 Plinth（boot/epoch
-// 围栏与现有下发帧一致；Plinth supervisor 转发 worker 继续 agent 循环）。
-// 下发失败只审计不重试：ledger 已是权威，Plinth 侧重连/对账由既有机制
-// 收敛。
+// sendExternalToolResult 把封存结果经 Control 流推给 Plinth（Plinth
+// supervisor 转发 worker 继续 agent 循环）。帧走当前活动流（见
+// deliverExternalToolResult）；首发失败由重连对账补发收敛。
 func (service *RuntimeService) sendExternalToolResult(ctx context.Context, loaded *routedToolContext, seal toolCallSeal, receipt sealReceipt) {
-	outcome := runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_FAILED
-	switch seal.outcome {
+	service.deliverExternalToolResult(ctx, externalToolResultFrame(
+		loaded.attemptID, loaded.toolCallID, seal.outcome,
+		receipt.committedPayload, receipt.artifactRef, receipt.evidenceIDs,
+		seal.errorCode, seal.errorDetail,
+	))
+}
+
+// externalToolResultFrame 组装一帧 ExternalToolResult（首发与重连补发共用）。
+func externalToolResultFrame(attemptID, toolCallID int64, outcome string, payload *runtimev1.ResultPayload, artifactRef *runtimev1.ArtifactRef, evidenceIDs []int64, errorCode, errorDetail string) *runtimev1.ExternalToolResult {
+	wire := runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_FAILED
+	switch outcome {
 	case "succeeded":
-		outcome = runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_SUCCEEDED
+		wire = runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_SUCCEEDED
 	case "cancelled":
-		outcome = runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_CANCELLED
+		wire = runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_CANCELLED
 	}
-	frame := &runtimev1.ExternalToolResult{
-		AttemptId: loaded.attemptID, ToolCallId: loaded.toolCallID, Outcome: outcome,
-		Payload: receipt.committedPayload, ArtifactRef: receipt.artifactRef,
-		EvidenceIds: receipt.evidenceIDs, ErrorCode: seal.errorCode, ErrorDetail: seal.errorDetail,
+	return &runtimev1.ExternalToolResult{
+		AttemptId: attemptID, ToolCallId: toolCallID, Outcome: wire,
+		Payload: payload, ArtifactRef: artifactRef,
+		EvidenceIds: evidenceIDs, ErrorCode: errorCode, ErrorDetail: errorDetail,
+	}
+}
+
+// deliverExternalToolResult 在当前活动流上发出一帧结果。attempt 行内冻结的
+// boot/epoch 只服务持久围栏（封存、Artifact 上传、grant）；外发帧必须走
+// 当前流——同 boot 重连会推进 epoch，旧 epoch 的信封必然被 SendToFenced
+// 拒绝（dispatchCancelRouted 已确立同一分工）。流断开时由重连对账的
+// resendSealedExternalToolResults 从 ledger 补发，此处只记诊断。
+func (service *RuntimeService) deliverExternalToolResult(ctx context.Context, frame *runtimev1.ExternalToolResult) {
+	view, err := service.Slots.View(ctx, qruntime.SlotPlinth)
+	if err != nil || !view.Connected || view.ConnectionEpoch == nil {
+		sharedops.LogEvent("quoin", "info", "toolcall.external_result_deferred",
+			fmt.Sprintf("attempt=%d tool_call=%d: stream down, reconcile resend owns delivery", frame.GetAttemptId(), frame.GetToolCallId()))
+		return
 	}
 	if err := service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
-		ConnectionEpoch: loaded.epoch, CorrelationId: uint64(loaded.attemptID), BootId: loaded.bootID,
+		ConnectionEpoch: *view.ConnectionEpoch, CorrelationId: uint64(frame.GetAttemptId()), BootId: view.BootID,
 		Msg: &runtimev1.ControlEnvelope_ExternalToolResult{ExternalToolResult: frame},
 	}); err != nil {
 		sharedops.LogEvent("quoin", "error", "toolcall.external_result_send_failed",
-			fmt.Sprintf("attempt=%d tool_call=%d: %v", loaded.attemptID, loaded.toolCallID, err))
+			fmt.Sprintf("attempt=%d tool_call=%d: %v", frame.GetAttemptId(), frame.GetToolCallId(), err))
 	}
+}
+
+// resendSealedExternalToolResults 补发一个 attempt 全部已终态的 quoin_routed
+// 工具结果。Plinth 的 waiter 挂在 Channel 上跨流存活，协议本就期待 Quoin 在
+// 重连对账确认 attempt 仍活跃后重发（首发帧可能丢在断流窗口）。幂等：已
+// 被 worker 消费的 tool_call 在 Plinth 侧没有 waiter，重复帧只审计丢弃；
+// Quoin 的封存围栏也拒绝任何二次写入。帧经当前活动流下发。
+func (service *RuntimeService) resendSealedExternalToolResults(ctx context.Context, attempts *attempt.Service, attemptID int64) {
+	if attempts == nil {
+		return
+	}
+	rows, err := attempts.Reader().QueryContext(ctx, `
+		SELECT id,status,result_json,result_artifact_id,error_detail FROM tool_calls
+		WHERE attempt_id=? AND execution_mode='quoin_routed' AND status IN ('succeeded','failed','cancelled')
+		ORDER BY id`, attemptID)
+	if err != nil {
+		sharedops.LogEvent("quoin", "error", "toolcall.resend_scan_failed", fmt.Sprintf("attempt=%d: %v", attemptID, err))
+		return
+	}
+	type sealedCall struct {
+		id          int64
+		status      string
+		resultJSON  sql.NullString
+		artifactID  sql.NullInt64
+		errorDetail sql.NullString
+	}
+	var calls []sealedCall
+	for rows.Next() {
+		var call sealedCall
+		if err := rows.Scan(&call.id, &call.status, &call.resultJSON, &call.artifactID, &call.errorDetail); err != nil {
+			_ = rows.Close()
+			sharedops.LogEvent("quoin", "error", "toolcall.resend_scan_failed", fmt.Sprintf("attempt=%d: %v", attemptID, err))
+			return
+		}
+		calls = append(calls, call)
+	}
+	if err := rows.Close(); err != nil || rows.Err() != nil {
+		sharedops.LogEvent("quoin", "error", "toolcall.resend_scan_failed", fmt.Sprintf("attempt=%d: close=%v err=%v", attemptID, err, rows.Err()))
+		return
+	}
+	for _, call := range calls {
+		var payload *runtimev1.ResultPayload
+		if call.resultJSON.Valid && call.resultJSON.String != "" {
+			canonical := []byte(call.resultJSON.String)
+			schemaKind, schemaErr := attempts.ExpectedToolResultSchema(ctx, call.id)
+			if schemaErr != nil {
+				sharedops.LogEvent("quoin", "error", "toolcall.resend_schema_failed", fmt.Sprintf("attempt=%d tool_call=%d: %v", attemptID, call.id, schemaErr))
+				continue
+			}
+			digest := sha256.Sum256(canonical)
+			payload = &runtimev1.ResultPayload{SchemaKind: schemaKind, CanonicalJson: canonical, ContentDigest: digest[:]}
+		}
+		var artifactRef *runtimev1.ArtifactRef
+		if call.artifactID.Valid && call.artifactID.Int64 != 0 {
+			if service.Artifacts == nil {
+				sharedops.LogEvent("quoin", "error", "toolcall.resend_artifact_failed", fmt.Sprintf("attempt=%d tool_call=%d: artifact store is not wired", attemptID, call.id))
+				continue
+			}
+			ref, refErr := service.Artifacts.RefFor(ctx, attemptID, call.artifactID.Int64)
+			if refErr != nil {
+				sharedops.LogEvent("quoin", "error", "toolcall.resend_artifact_failed", fmt.Sprintf("attempt=%d tool_call=%d: %v", attemptID, call.id, refErr))
+				continue
+			}
+			artifactRef = &runtimev1.ArtifactRef{
+				ArtifactId: ref.ArtifactID, Role: "tool_result", MediaType: ref.MediaType,
+				SizeBytes: uint64(ref.SizeBytes), Sha256: ref.SHA256, BodyExpired: ref.BodyExpired,
+			}
+		}
+		evidenceIDs, evErr := service.toolCallEvidenceIDs(ctx, attempts, call.id)
+		if evErr != nil {
+			sharedops.LogEvent("quoin", "error", "toolcall.resend_evidence_failed", fmt.Sprintf("attempt=%d tool_call=%d: %v", attemptID, call.id, evErr))
+			continue
+		}
+		errorCode := ""
+		if payload != nil {
+			var decoded struct {
+				ErrorCode string `json:"errorCode"`
+			}
+			// 失败封存的 errorCode 只在载荷内持久化（tool_calls 无此列）；
+			// 成功载荷没有该字段，解析失败按空码处理。
+			_ = json.Unmarshal(payload.GetCanonicalJson(), &decoded)
+			errorCode = decoded.ErrorCode
+		}
+		service.deliverExternalToolResult(ctx, externalToolResultFrame(
+			attemptID, call.id, call.status, payload, artifactRef, evidenceIDs,
+			errorCode, call.errorDetail.String,
+		))
+	}
+}
+
+// toolCallEvidenceIDs 重建一次封存时提交的确定性 Evidence 引用序列。
+func (service *RuntimeService) toolCallEvidenceIDs(ctx context.Context, attempts *attempt.Service, toolCallID int64) ([]int64, error) {
+	rows, err := attempts.Reader().QueryContext(ctx, `SELECT id FROM evidence WHERE tool_call_id=? ORDER BY id`, toolCallID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // routedFailureSeal 组装一次确定性失败封存：结构化失败载荷（success=false）

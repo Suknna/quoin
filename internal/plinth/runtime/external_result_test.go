@@ -6,6 +6,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -125,5 +126,60 @@ func TestDispatchServerFrameExternalToolResult(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("dispatchServerFrame did not route ExternalToolResult")
+	}
+}
+
+// 等待超过 ExternalResultTimeout：waiter 被清理并返回
+// ErrExternalToolResultTimeout（worker 据此合成失败 ToolResult 收敛 attempt，
+// 而不是无限阻塞）；超时后到达的迟到帧只审计丢弃。
+func TestExternalToolResultWaitTimeout(t *testing.T) {
+	channel := &Channel{Config: ChannelConfig{ExternalResultTimeout: 30 * time.Millisecond}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := channel.AwaitExternalToolResult(context.Background(), 76)
+		done <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		channel.externalMu.Lock()
+		registered := len(channel.externalWaiters) > 0
+		channel.externalMu.Unlock()
+		if registered || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrExternalToolResultTimeout) {
+			t.Fatalf("wait error=%v, want ErrExternalToolResultTimeout", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wait did not time out within the configured bound")
+	}
+	channel.externalMu.Lock()
+	remaining := len(channel.externalWaiters)
+	channel.externalMu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("waiter must be cleaned on timeout, %d remain", remaining)
+	}
+	// 超时后到达的迟到帧没有 waiter：丢弃即可（Quoin 幂等封存）。
+	channel.deliverExternalToolResult(&runtimev1.ExternalToolResult{ToolCallId: 76, Outcome: runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_SUCCEEDED})
+}
+
+// 心跳 goroutine 随所属连接的 stop 信号退出（重连不泄漏发送者）。
+func TestHeartbeatLoopExitsOnConnectionStop(t *testing.T) {
+	channel, _ := newTestChannel(t)
+	stop := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		channel.runHeartbeats(context.Background(), stop)
+		close(exited)
+	}()
+	close(stop)
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeat goroutine did not exit on connection stop")
 	}
 }
