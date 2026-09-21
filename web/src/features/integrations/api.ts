@@ -1,14 +1,14 @@
 import { newClientCommandId, request } from "@/api/workbench";
 import {
-	disableConnection,
-	enableConnection,
-	rotateConnection,
-} from "@/features/settings/platform/connections/api";
-import {
 	type AlertSourceCredentialMetadata,
 	createAlertSource,
 	revealCredential,
 } from "@/features/alerts/api";
+import {
+	disableConnection,
+	enableConnection,
+	rotateConnection,
+} from "@/features/settings/platform/connections/api";
 import type { IntegrationCatalogItem, IntegrationInstance } from "./types";
 
 export async function listIntegrationPlugins(): Promise<
@@ -148,7 +148,7 @@ export async function probeMetricsInstance(
 			body: JSON.stringify({ clientCommandId: newClientCommandId() }),
 		},
 	);
-	for (let poll = 0; poll < 30; poll += 1) {
+	for (let poll = 0; poll < 240; poll += 1) {
 		const detail = await request<{
 			state: string;
 			endedAt?: string;
@@ -194,7 +194,7 @@ export async function probeMetricsInstance(
 		}
 		await new Promise((resolve) => setTimeout(resolve, 500));
 	}
-	return { outcome: "failed", details: { reason: "probe_timeout" } };
+	throw new Error("验证仍在进行，可稍后在接入详情查看结果；本次等待结束不代表验证失败。");
 }
 
 /** Reuses the shared connection command wrappers, preserving row-version fencing. */

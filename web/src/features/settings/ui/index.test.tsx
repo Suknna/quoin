@@ -111,8 +111,14 @@ describe("settings module", () => {
 		expect(screen.getByText("管理员")).toBeInTheDocument();
 		expect(screen.queryByText("退出登录")).not.toBeInTheDocument();
 		expect(await screen.findByText("a***@example.test")).toBeInTheDocument();
-		// Admins manage their own channels through the inline change flow.
-		expect(screen.getByRole("button", { name: "更换" })).toBeInTheDocument();
+		// The inline self-service change flow retired with OTP (ADR-0010):
+		// channels are displayed read-only here and administered in Users.
+		expect(
+			screen.queryByRole("button", { name: "更换" }),
+		).not.toBeInTheDocument();
+		expect(
+			screen.getByText(/收码渠道由管理员在用户管理页维护/),
+		).toBeInTheDocument();
 		// The unified navigation highlights the active page.
 		expect(screen.getByRole("button", { name: "个人资料" })).toHaveAttribute(
 			"aria-current",
@@ -136,7 +142,7 @@ describe("settings module", () => {
 		expect(
 			screen.queryByRole("button", { name: "更换" }),
 		).not.toBeInTheDocument();
-		expect(screen.getByText(/收码渠道由管理员维护/)).toBeInTheDocument();
+		expect(screen.getByText(/收码渠道由管理员在用户管理页维护/)).toBeInTheDocument();
 	});
 
 	it("validates confirmation, changes the password, refreshes authoritative user state, and clears secrets", async () => {

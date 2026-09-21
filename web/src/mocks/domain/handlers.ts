@@ -1490,9 +1490,6 @@ export const domainHandlers = [
 				components: [
 					{
 						slot: "plinth",
-						state: "registered",
-						currentGeneration: 1,
-						rowVersion: 1,
 						connected: true,
 						lastSeenAt: "2026-09-09T09:30:00.000Z",
 						releaseVersion: long ?? "mock-plinth",

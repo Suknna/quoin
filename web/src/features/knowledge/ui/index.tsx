@@ -59,6 +59,8 @@ export function useKnowledgeModule(
 		Awaited<ReturnType<typeof api.browse>>["items"]
 	>([]);
 	const [next, setNext] = useState<string>();
+ const [candidates,setCandidates]=useState<Awaited<ReturnType<typeof api.listCandidates>>["items"]>([]);
+ const [imports,setImports]=useState<Awaited<ReturnType<typeof api.listImportBatches>>["items"]>([]);
 	const [error, setError] = useState("");
 	const [loading, setLoading] = useState(true);
 	// The coordinator supplies absolute workspace routes; remove the module prefix
@@ -88,6 +90,8 @@ export function useKnowledgeModule(
 	}
 	useEffect(() => {
 		void load();
+ void Promise.resolve().then(() => api.listCandidates()).then(page => setCandidates(page.items)).catch(reason => setError(messageOf(reason,"无法读取待确认知识。")));
+ void Promise.resolve().then(() => api.listImportBatches()).then(page => setImports(page.items)).catch(reason => setError(messageOf(reason,"无法读取导入批次。")));
 	}, []);
 	async function search() {
 		const value = query.trim();
@@ -160,6 +164,10 @@ export function useKnowledgeModule(
 						/>
 					</>
 				)}
+ <h3 className="text-sm font-medium">待确认</h3>
+ <EntityList items={candidates.map(item => ({id:item.id,title:item.draftTitle || `候选 ${item.id}`,subtitle:item.state}))} columns={["title","subtitle"]} onSelect={row => props.navigate(`/knowledge/candidates/${row.id}`)} emptyTitle="暂无待确认候选。" />
+ <h3 className="text-sm font-medium">导入批次</h3>
+ <EntityList items={imports.map(item => ({id:item.id,title:`导入 ${item.id}`,subtitle:item.state}))} columns={["title","subtitle"]} onSelect={row => props.navigate(`/knowledge/imports/${row.id}`)} emptyTitle="暂无导入批次。" />
 			</div>
 		</ScrollArea>
 	);

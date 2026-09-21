@@ -95,7 +95,6 @@ export function About({ suspended }: { suspended: boolean }) {
 						<DataTable
 							columns={[
 								{ label: "组件" },
-								{ label: "注册" },
 								{ label: "连接" },
 								{ label: "版本" },
 								{ label: "最近事实" },
@@ -106,17 +105,6 @@ export function About({ suspended }: { suspended: boolean }) {
 								<TableRow key={component.slot}>
 									<TableCell className="font-medium">
 										{component.slot}
-									</TableCell>
-									<TableCell>
-										<Badge
-											variant={
-												component.state === "registered"
-													? "secondary"
-													: "outline"
-											}
-										>
-											{component.state}
-										</Badge>
 									</TableCell>
 									<TableCell>
 										<Badge

@@ -1,3 +1,4 @@
+import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 /* eslint-disable react-refresh/only-export-components -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
 
 import {
@@ -104,11 +105,14 @@ export function useInvestigationsModule(
 	const route = parseRoute(props.route);
 	const id = route.pathname.match(/^\/investigations\/([^/]+)$/)?.[1];
 	const [items, setItems] = useState<InvestigationSummary[]>([]);
+ const [nextCursor,setNextCursor]=useState<string>();
+ const [loadingMore,setLoadingMore]=useState(false);
 	const [error, setError] = useState("");
 	const load = useCallback(async () => {
 		if (props.suspended) return;
 		try {
-			setItems((await api.list()).items);
+			const page = await api.list();
+ setItems(page.items); setNextCursor(page.nextCursor);
 			setError("");
 		} catch (reason) {
 			setError(messageOf(reason, "无法加载调查。"));
@@ -153,6 +157,9 @@ export function useInvestigationsModule(
 				}
 				emptyTitle="尚无对话。"
 			/>
+ <LoadMoreButton hasMore={!!nextCursor} loading={loadingMore} onLoadMore={() => {
+ setLoadingMore(true); void api.list(nextCursor).then(page => {setItems(current => [...current,...page.items]);setNextCursor(page.nextCursor);}).catch(reason => setError(messageOf(reason,"无法加载调查。"))).finally(() => setLoadingMore(false));
+ }} />
 		</aside>
 	);
 	// The AI SRE landing route is a draft-only conversation workspace: it must not

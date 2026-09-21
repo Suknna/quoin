@@ -1,3 +1,4 @@
+import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 /* eslint-disable react-refresh/only-export-components -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
 
 import { LoaderCircle } from "lucide-react";
@@ -226,6 +227,8 @@ export function useInspectionsModule(
 		creatingPlan || editPlanKey ? hintPrefill : undefined;
 	const [plans, setPlans] = useState<InspectionPlan[]>([]);
 	const [runs, setRuns] = useState<InspectionRunSummary[]>([]);
+ const [nextCursor,setNextCursor]=useState<string>();
+ const [loadingMore,setLoadingMore]=useState(false);
 	const [planFilter, setPlanFilter] = useState("all");
 	const [loaded, setLoaded] = useState(false);
 	const [runsLoaded, setRunsLoaded] = useState(false);
@@ -242,7 +245,7 @@ export function useInspectionsModule(
 		const filter = planFilter === "all" ? {} : { planKey: planFilter };
 		const runsRead = listInspectionRuns(filter).then(
 			(page) => {
-				setRuns(page.items);
+				setRuns(page.items); setNextCursor(page.nextCursor);
 				setRunsLoaded(true);
 			},
 			(reason: unknown) => setError(messageOf(reason, "无法读取巡检记录。")),
@@ -488,6 +491,9 @@ export function useInspectionsModule(
 					loadingLabel="正在读取巡检记录"
 					emptyTitle="没有巡检记录"
 				/>
+ <LoadMoreButton hasMore={!!nextCursor} loading={loadingMore} onLoadMore={() => {
+ setLoadingMore(true); void listInspectionRuns({cursor:nextCursor,...(planFilter === "all" ? {} : {planKey:planFilter})}).then(page => {setRuns(current => [...current,...page.items]);setNextCursor(page.nextCursor);}).catch(reason => setError(messageOf(reason,"无法读取巡检记录。"))).finally(() => setLoadingMore(false));
+ }} />
 			</section>
 		</div>
 	);

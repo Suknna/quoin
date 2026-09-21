@@ -101,7 +101,7 @@ export function useSettingsModule(
 				</EmptyHeader>
 			</Empty>
 		) : (
-			<Profile user={user} suspended={props.suspended} />
+			<Profile user={user} />
 		),
 	};
 }

@@ -86,7 +86,7 @@ import {
 	retryAnalysis,
 	stateLabel,
 } from "@/features/analysis/api";
-import { listBusinessViews } from "@/features/systems/api";
+import { listBusinessViewOptions } from "@/features/systems/api";
 import { usePolling } from "@/hooks/use-polling";
 import { formatDateTime } from "@/lib/format";
 import { parseRoute } from "@/lib/parse-route";
@@ -212,6 +212,7 @@ function AlertList({
 	const [views, setViews] = useState<
 		{ viewKey: string; displayName: string }[]
 	>([]);
+	const [viewsError, setViewsError] = useState("");
 	const [query, setQuery] = useState("");
 	// ADR-0012 单轨：过滤只按业务视图（首观测关联快照精确匹配）。
 	const filter = viewKey;
@@ -238,19 +239,24 @@ function AlertList({
 		!suspended,
 	);
 	const { setAtTop } = live;
-	useEffect(() => {
-		if (!suspended)
-			listBusinessViews()
-				.then((items) =>
-					setViews(
-						items.map((item) => ({
-							viewKey: item.viewKey,
-							displayName: item.displayName,
-						})),
-					),
-				)
-				.catch(() => undefined);
+	const loadViews = useCallback(() => {
+		if (suspended) return;
+		listBusinessViewOptions()
+			.then((items) => {
+				setViews(items);
+				setViewsError("");
+			})
+			.catch((reason) => {
+				// The filter endpoint is session-readable; a failure means the
+				// filter cannot offer options, which must be visible rather than a
+				// silently empty dropdown.
+				setViews([]);
+				setViewsError(messageOf(reason, "业务视图筛选暂不可用。"));
+			});
 	}, [suspended]);
+	useEffect(() => {
+		loadViews();
+	}, [loadViews]);
 	useEffect(() => {
 		// The workbench main area scrolls with the document, so this is the real
 		// reading-position boundary used to buffer new firing occurrences.
@@ -394,6 +400,7 @@ function AlertList({
 				</TabsList>
 			</Tabs>
 			<div className="flex flex-1 flex-wrap justify-end gap-3">
+ {viewsError && <p role="alert" className="text-sm text-destructive">{viewsError}</p>}
 				<Select
 					value={viewKey || "__all__"}
 					onValueChange={(next) =>
@@ -858,9 +865,7 @@ function AlertDetailSheet({
 													/>
 													<p className="text-sm text-muted-foreground">
 														首观测时命中的富化规则叠加终值（
-														{enrichmentSummary(
-															occurrence.enrichment.fields,
-														)}
+														{enrichmentSummary(occurrence.enrichment.fields)}
 														）；已冻结，不随规则修改重算。
 													</p>
 												</section>

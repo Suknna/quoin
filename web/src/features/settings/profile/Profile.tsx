@@ -8,7 +8,6 @@ import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { listOwnContacts, type OwnContact } from "./api";
-import { ContactChange } from "./ContactChange";
 import { channelLabels, roleLabels } from "@/features/settings/labels";
 
 const formatTime = (value: string | null) =>
@@ -30,19 +29,12 @@ function ContactRow({ contact }: { contact: OwnContact }) {
 	);
 }
 
-/** 联系方式是用户资料的一部分：任何登录用户可见自己的掩码渠道；管理员的
- * 自助更换以内联验证流程完成（旧渠道在新渠道验证通过前保持可用），操作员
- * 的渠道由管理员维护。明文目标永不出服务器。 */
-function ContactSection({
-	user,
-	suspended,
-}: {
-	user: UserSummary;
-	suspended: boolean;
-}) {
+/** 联系方式是用户资料的一部分：任何登录用户可见自己的掩码渠道。自助更换
+ * 流程已随 OTP 退役（ADR-0010）：管理员的渠道在用户管理页维护，操作员的
+ * 渠道同样由管理员维护。明文目标永不出服务器。 */
+function ContactSection({ user }: { user: UserSummary }) {
 	const [contacts, setContacts] = useState<OwnContact[]>();
 	const [error, setError] = useState("");
-	const [changing, setChanging] = useState(false);
 	const load = useCallback(() => {
 		listOwnContacts().then(
 			(items) => {
@@ -65,19 +57,7 @@ function ContactSection({
 
 	return (
 		<section className="space-y-3">
-			<div className="flex items-center gap-3">
-				<h3 className="text-sm font-medium">联系方式</h3>
-				{user.role === "admin" && !changing && (
-					<Button
-						variant="outline"
-						size="sm"
-						disabled={suspended || contacts === undefined}
-						onClick={() => setChanging(true)}
-					>
-						更换
-					</Button>
-				)}
-			</div>
+			<h3 className="text-sm font-medium">联系方式</h3>
 			{error && (
 				<Alert variant="destructive">
 					<AlertDescription>
@@ -109,31 +89,18 @@ function ContactSection({
 					{contacts?.length === 0 && (
 						<p className="text-sm text-muted-foreground">尚未配置收码渠道。</p>
 					)}
-					{user.role === "operator" && (
-						<p className="text-sm text-muted-foreground">
-							收码渠道由管理员维护；如需变更请联系管理员。
-						</p>
-					)}
+					<p className="text-sm text-muted-foreground">
+						收码渠道由管理员在用户管理页维护；如需变更请联系
+						{user.role === "admin" ? "其他管理员或在用户管理页操作" : "管理员"}。
+					</p>
 				</div>
-			)}
-			{changing && (
-				<ContactChange
-					suspended={suspended}
-					onClose={() => setChanging(false)}
-				/>
 			)}
 		</section>
 	);
 }
 
 /** 基本资料由管理员维护（与后端一致），页面同时呈现上次登录与联系方式。 */
-export function Profile({
-	user,
-	suspended,
-}: {
-	user: UserSummary;
-	suspended: boolean;
-}) {
+export function Profile({ user }: { user: UserSummary }) {
 	return (
 		<section className="space-y-6">
 			<div>
@@ -162,7 +129,7 @@ export function Profile({
 					</p>
 				</Field>
 			</div>
-			<ContactSection user={user} suspended={suspended} />
+			<ContactSection user={user} />
 		</section>
 	);
 }

@@ -80,7 +80,7 @@ export interface CreateAlertSourceRequest {
 
 export interface IntakeIssue {
   id: string
-  kind: 'identity_conflict' | 'fingerprint_mismatch' | 'delivery_truncated' | 'normalizer_missing'
+  kind: 'identity_conflict' | 'fingerprint_mismatch' | 'delivery_truncated' | 'normalizer_missing' | 'credential_denied'
   issueKey: string
   detailJson: string
   firstSeenAt: string

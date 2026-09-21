@@ -32,6 +32,27 @@ export async function listBusinessViews(): Promise<BusinessView[]> {
   return page.items ?? [];
 }
 
+/** Session-level key/name projection for alert filtering: the list endpoint is
+ * readable by every signed-in session and projects only the filter-safe fields
+ * for non-admin callers, so this type deliberately carries nothing more. */
+export interface BusinessViewOption {
+  viewKey: string;
+  displayName: string;
+}
+
+export async function listBusinessViewOptions(): Promise<BusinessViewOption[]> {
+  const page = await request<{ items?: { viewKey?: string; displayName?: string }[] }>(
+    "/api/v1/business-views",
+  );
+  return (page.items ?? [])
+    .filter((item): item is { viewKey: string; displayName?: string } =>
+      Boolean(item.viewKey))
+    .map((item) => ({
+      viewKey: item.viewKey,
+      displayName: item.displayName || item.viewKey,
+    }));
+}
+
 export function getBusinessView(viewKey: string): Promise<BusinessView> {
   return request<BusinessView>(`/api/v1/business-views/${encodeURIComponent(viewKey)}`);
 }
