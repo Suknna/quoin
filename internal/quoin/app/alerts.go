@@ -159,10 +159,9 @@ func asItems[T any](items []T) []T {
 }
 
 func (application *apiServer) listAlerts(ctx context.Context, input *struct {
-	Session           string `cookie:"__Host-quoin-session"`
-	State             string `query:"state" enum:"Firing,Resolved"`
-	BusinessSystemKey string `query:"businessSystemKey"`
-	ViewKey           string `query:"viewKey"`
+	Session string `cookie:"__Host-quoin-session"`
+	State   string `query:"state" enum:"Firing,Resolved"`
+	ViewKey string `query:"viewKey"`
 },
 ) (*alertSnapshotOutput, error) {
 	session, err := application.auth.Authenticate(ctx, input.Session)
@@ -174,7 +173,7 @@ func (application *apiServer) listAlerts(ctx context.Context, input *struct {
 	if state == "" {
 		state = "Firing"
 	}
-	snapshot, err := application.alerts.AlertSnapshot(ctx, state, input.BusinessSystemKey, input.ViewKey)
+	snapshot, err := application.alerts.AlertSnapshot(ctx, state, input.ViewKey)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("无法读取告警列表", err)
 	}

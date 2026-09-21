@@ -28,7 +28,7 @@ func TestReaderFailClosedRawRejectedAndTrustedWired(t *testing.T) {
 	if _, err := unwired.ChangesAfter(ctx, 0, 1); err == nil {
 		t.Fatal("unwired ChangesAfter must fail closed")
 	}
-	if _, err := unwired.AlertSnapshot(ctx, "Firing", "", ""); err == nil {
+	if _, err := unwired.AlertSnapshot(ctx, "Firing", ""); err == nil {
 		t.Fatal("unwired AlertSnapshot must fail closed")
 	}
 	if _, err := unwired.GetAlert(ctx, "1"); err == nil {
@@ -65,7 +65,7 @@ func TestReaderFailClosedRawRejectedAndTrustedWired(t *testing.T) {
 	if err != nil || len(events) != 1 || events[0].PlatformFaultID == 0 {
 		t.Fatalf("trusted ChangesAfter = %+v %v, want one platform fault event", events, err)
 	}
-	snapshot, err := wired.AlertSnapshot(ctx, "Firing", "", "")
+	snapshot, err := wired.AlertSnapshot(ctx, "Firing", "")
 	if err != nil || len(snapshot.Items) != 1 || snapshot.Items[0].Component != "plinth" || snapshot.SnapshotSeq != 1 {
 		t.Fatalf("trusted AlertSnapshot = %+v %v, want the plinth fault at seq 1", snapshot, err)
 	}

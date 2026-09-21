@@ -41,6 +41,15 @@ type IntakeIssueRef struct {
 	OccurrenceCount int    `json:"occurrenceCount"`
 }
 
+// txQuerier 是 intake 流水线各段（Normalize/Enrich/Correlate 落库与来源级
+// 接入问题）需要的最小事务面：执行器守卫的 *execution.Tx 与测试直连的
+// *sql.DB 都满足；不引入包间依赖。
+type txQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // OccurrenceRef identifies an occurrence affected by a delivery.
 type OccurrenceRef struct {
 	ID         int64  `json:"id"`
@@ -113,8 +122,8 @@ func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, c
 // audit rows.
 func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook *AlertmanagerWebhook, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) (DeliveryResult, error) {
 	var enabled int
-	var credentialState string
-	err := tx.QueryRowContext(ctx, `SELECT s.enabled, c.state FROM alert_sources s JOIN alert_source_credentials c ON c.source_id = s.id AND c.id = ? WHERE s.id = ?`, credentialID, sourceID).Scan(&enabled, &credentialState)
+	var protocol, credentialState string
+	err := tx.QueryRowContext(ctx, `SELECT s.enabled, s.protocol, c.state FROM alert_sources s JOIN alert_source_credentials c ON c.source_id = s.id AND c.id = ? WHERE s.id = ?`, credentialID, sourceID).Scan(&enabled, &protocol, &credentialState)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && (enabled != 1 || (credentialState != "Active" && credentialState != "PendingRetirement"))) {
 		// Q217: the revocation race is adjudicated by SQLite commit order — a
 		// credential revoked before this delivery commits is rejected here,
@@ -122,6 +131,10 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 		return DeliveryResult{}, &execution.Rejection{Code: codeCredentialDenied, Detail: reasonCredentialDenied}
 	}
 	if err != nil {
+		return DeliveryResult{}, err
+	}
+	var sourceKey string
+	if err := tx.QueryRowContext(ctx, `SELECT source_key FROM alert_sources WHERE id=?`, sourceID).Scan(&sourceKey); err != nil {
 		return DeliveryResult{}, err
 	}
 
@@ -157,16 +170,15 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 		preparedItems = append(preparedItems, item)
 	}
 
-	// First observations share this delivery's writer transaction so declaration
-	// publication cannot change attribution authority midway through the batch.
-	attribution, err := loadAttribution(ctx, tx)
-	if err != nil {
-		return DeliveryResult{}, err
-	}
+	// Normalize（ADR-0012 intake 流水线第一段）：整个交付解析一次归一化器，
+	// 归一化结果按 alerts[i] 与 preparedItems[i] 的 index 一一对应；缺失或失败
+	// 时全部条目使用缺省语义并在首观测发生时记 normalizer_missing 接入问题。
+	normalization := normalizeDelivery(protocol, body)
 
 	processed := 0
 	occurrences := []OccurrenceRef{}
 	issues := []IntakeIssueRef{}
+	normalizerNeeded := false
 	for index := range preparedItems {
 		item := &preparedItems[index]
 		if item.status != "ok" {
@@ -193,14 +205,27 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 			issues = append(issues, issueRef)
 			continue
 		}
-		occurrence, _, err := service.applyItem(ctx, tx, sourceID, *item, itemID, deliveryID, receivedAt, committedAt, attribution)
+		occurrence, effect, err := service.applyItem(ctx, tx, sourceID, sourceKey, *item, itemID, deliveryID, receivedAt, committedAt, normalization)
 		if err != nil {
 			return DeliveryResult{}, err
 		}
 		processed++
+		if effect == "initial_firing" || effect == "resolved_first" {
+			normalizerNeeded = true
+		}
 		if occurrence != nil {
 			occurrences = append(occurrences, *occurrence)
 		}
+	}
+
+	// 归一化缺失只在其降级真正生效（本交付创建了首观测）时记录一次；
+	// 同源的重复交付按既有接入问题聚合计数推进。
+	if !normalization.ok && normalizerNeeded {
+		issueRef, issueErr := service.recordNormalizerMissingIssue(ctx, tx, sourceID, deliveryID, protocol, committedAt)
+		if issueErr != nil {
+			return DeliveryResult{}, issueErr
+		}
+		issues = append(issues, issueRef)
 	}
 
 	if webhook.TruncatedAlerts > 0 {
@@ -349,7 +374,12 @@ func (service *Service) classifyAndInsertItem(ctx context.Context, conn executio
 	return status, itemID, nil
 }
 
-func (service *Service) applyItem(ctx context.Context, conn execution.Executor, sourceID int64, item prepared, itemID, deliveryID int64, receivedAt time.Time, committedAt string, attribution attributionIndex) (*OccurrenceRef, string, error) {
+// applyItem applies one normal alert item to the Occurrence lifecycle inside
+// the current transaction (DATA-ALERT-004/005/006/007). The first observation
+// (sql.ErrNoRows branch) executes the ADR-0012 intake pipeline stages that
+// freeze delivery-time evidence: Normalize (统一语义列), Enrich (富化文档) and
+// Correlate (全部命中视图)；Dedup 即外层的身份三元组幂等与观测机制本身。
+func (service *Service) applyItem(ctx context.Context, conn execution.Executor, sourceID int64, sourceKey string, item prepared, itemID, deliveryID int64, receivedAt time.Time, committedAt string, normalization deliveryNormalization) (*OccurrenceRef, string, error) {
 	var occurrenceID int64
 	var state string
 	var rowVersion int64
@@ -361,12 +391,8 @@ func (service *Service) applyItem(ctx context.Context, conn execution.Executor, 
 			return nil, "", canonicalErr
 		}
 		digest := DigestLabels(labelsCanonical)
-		// Freeze the complete declaration decision with this first delivery item.
-		// A subsequent config publication must not alter an existing occurrence.
-		attributionDecision, attrErr := attribution.attribute(ctx, conn, sourceID, item.labels)
-		if attrErr != nil {
-			return nil, "", attrErr
-		}
+		// Normalize：按 payload alerts[i] 对位冻结统一语义（缺失/失败时为缺省值）。
+		severity, title, annotationsCanonical, resource := normalization.semanticsFor(item.index)
 
 		// DATA-ALERT-006: a resolved-first delivery creates the occurrence
 		// already closed (state='Resolved', resolved_at set) with a
@@ -380,16 +406,29 @@ func (service *Service) applyItem(ctx context.Context, conn execution.Executor, 
 			initialState = "Resolved"
 			resolvedAt = committedAt
 		}
-		// ADR-0008: business_system_id stays NULL on new occurrences — the
-		// legacy declaration field is history-only and the view attribution
-		// lives in its own frozen projection table.
-		result, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_occurrences(source_id, fingerprint, starts_at, state, row_version, labels_canonical, labels_digest, business_system_id, first_seen_at, last_state_change_at, resolved_at) VALUES(?,?,?,?,1,?,?,NULL,?,?,?)`,
-			sourceID, item.fingerprint, item.startsAt, initialState, labelsCanonical, digest, committedAt, committedAt, resolvedAt)
+		result, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_occurrences(source_id, fingerprint, starts_at, state, row_version, labels_canonical, labels_digest, severity, title, annotations_canonical, resource, first_seen_at, last_state_change_at, resolved_at) VALUES(?,?,?,?,1,?,?,?,?,?,?,?,?,?)`,
+			sourceID, item.fingerprint, item.startsAt, initialState, labelsCanonical, digest, severity, title, annotationsCanonical, resource, committedAt, committedAt, resolvedAt)
 		if insertErr != nil {
 			return nil, "", insertErr
 		}
 		occurrenceID, _ = result.LastInsertId()
-		if err := persistAttribution(ctx, conn, occurrenceID, deliveryID, itemID, attributionDecision, committedAt); err != nil {
+
+		// Enrich：与首观测同事务求值并冻结富化文档（即使无规则命中也写一行，
+		// 区分"无规则命中"与"未求值"）。
+		enrichmentJSON, enrichErr := evaluateEnrichment(ctx, conn, sourceKey, item.labels)
+		if enrichErr != nil {
+			return nil, "", enrichErr
+		}
+		if err := persistEnrichment(ctx, conn, occurrenceID, enrichmentJSON, committedAt); err != nil {
+			return nil, "", err
+		}
+
+		// Correlate：全部命中视图各冻结一行关联证据，视图后续编辑不回写。
+		matched, correlateErr := correlateViews(ctx, conn, sourceID, item.labels)
+		if correlateErr != nil {
+			return nil, "", correlateErr
+		}
+		if err := persistCorrelations(ctx, conn, occurrenceID, matched, committedAt); err != nil {
 			return nil, "", err
 		}
 		state = initialState
@@ -566,6 +605,56 @@ func (service *Service) recordIssue(ctx context.Context, conn execution.Executor
 		occurrenceCount++
 	}
 	return IntakeIssueRef{Kind: kind, IssueKey: issueKey, OccurrenceCount: occurrenceCount}, nil
+}
+
+// recordNormalizerMissingIssue 标记一次 ADR-0012 归一化缺失（ADR-0012
+// Normalize 段）：来源协议没有 AlertNormalizer 或归一化失败时，首观测以缺省
+// 语义冻结并记录本问题。问题是来源级的（issue_key 绑定协议，不指向具体
+// 条目），闭合到该源本次已处理的 Delivery；同源重复交付沿既有聚合计数推进。
+func (service *Service) recordNormalizerMissingIssue(ctx context.Context, conn txQuerier, sourceID, deliveryID int64, protocol, committedAt string) (IntakeIssueRef, error) {
+	issueKey, err := IssueKey("normalizer_missing", map[string]string{"kind": "normalizer_missing", "protocol": protocol, "v": "1"})
+	if err != nil {
+		return IntakeIssueRef{}, err
+	}
+	detailJSON, _ := json.Marshal(map[string]any{
+		"kind": "normalizer_missing", "sourceId": sourceID, "deliveryId": deliveryID, "protocol": protocol,
+	})
+	var issueID int64
+	var occurrenceCount int
+	err = conn.QueryRowContext(ctx, `SELECT id, occurrence_count FROM alert_intake_issues WHERE source_id=? AND kind=? AND issue_key=? AND acknowledged_at IS NULL`,
+		sourceID, "normalizer_missing", issueKey).Scan(&issueID, &occurrenceCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		result, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_intake_issues(source_id, delivery_id, kind, issue_key, detail_json, first_seen_at, last_seen_at, occurrence_count, row_version, created_at) VALUES(?,?,?,?,?,?,?,1,1,?)`,
+			sourceID, deliveryID, "normalizer_missing", issueKey, string(detailJSON), committedAt, committedAt, committedAt)
+		if insertErr != nil {
+			return IntakeIssueRef{}, insertErr
+		}
+		issueID, _ = result.LastInsertId()
+		if _, err := conn.ExecContext(ctx, `INSERT INTO alert_intake_issue_events(issue_id, delivery_id, detail_json, observed_at) VALUES(?,?,?,?)`,
+			issueID, deliveryID, string(detailJSON), committedAt); err != nil {
+			return IntakeIssueRef{}, err
+		}
+		occurrenceCount = 1
+	} else if err != nil {
+		return IntakeIssueRef{}, err
+	} else {
+		eventResult, err := conn.ExecContext(ctx, `INSERT INTO alert_intake_issue_events(issue_id, delivery_id, detail_json, observed_at) VALUES(?,?,?,?)`,
+			issueID, deliveryID, string(detailJSON), committedAt)
+		if err != nil {
+			return IntakeIssueRef{}, err
+		}
+		eventID, err := eventResult.LastInsertId()
+		if err != nil {
+			return IntakeIssueRef{}, err
+		}
+		// 冻结触发器要求 last_event_id 前进到刚插入的事件且计数吻合。
+		if _, err := conn.ExecContext(ctx, `UPDATE alert_intake_issues SET last_seen_at=?, occurrence_count=occurrence_count+1, row_version=row_version+1, last_event_id=? WHERE id=?`,
+			committedAt, eventID, issueID); err != nil {
+			return IntakeIssueRef{}, err
+		}
+		occurrenceCount++
+	}
+	return IntakeIssueRef{Kind: "normalizer_missing", IssueKey: issueKey, OccurrenceCount: occurrenceCount}, nil
 }
 
 // recordTruncatedIssue flags one delivery_truncated intake issue for a

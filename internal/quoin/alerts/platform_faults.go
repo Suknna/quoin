@@ -3,6 +3,7 @@ package alerts
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/execution"
@@ -93,7 +94,9 @@ func openOrRepeatFaultOn(ctx context.Context, tx execution.Executor, component, 
 		_, err = tx.ExecContext(ctx, `UPDATE platform_faults SET last_seen_at=? WHERE id=?`, now, id)
 		return id, err
 	case err == sql.ErrNoRows:
-		result, insertErr := tx.ExecContext(ctx, `INSERT INTO platform_faults(component,reason,state,first_seen_at,last_seen_at) VALUES(?,?,'Firing',?,?)`, component, reason, now, now)
+		severity, title, annotations := platformFaultSemantics(component, reason)
+		result, insertErr := tx.ExecContext(ctx, `INSERT INTO platform_faults(component,reason,severity,title,annotations_canonical,state,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,'Firing',?,?)`,
+			component, reason, severity, title, annotations, now, now)
 		if insertErr != nil {
 			return 0, insertErr
 		}
@@ -102,6 +105,30 @@ func openOrRepeatFaultOn(ctx context.Context, tx execution.Executor, component, 
 	default:
 		return 0, err
 	}
+}
+
+// platformFaultSemantics 在入库侧投影与 occurrence 同构的统一语义列
+// (ADR-0012)：severity 按故障类别映射——控制流断连使整个 Runtime 不可达
+// (critical)；worker 协议错误使执行失败但控制流仍在 (high)。title 与
+// annotations_canonical 与旧读侧伪造投影保持同一形状，读侧不再伪造。
+func platformFaultSemantics(component, reason string) (severity, title, annotationsCanonical string) {
+	switch reason {
+	case "runtime_control_stream_disconnected":
+		severity = "critical"
+	case "worker_protocol_error":
+		severity = "high"
+	default:
+		severity = "warning"
+	}
+	annotations, err := json.Marshal(map[string]string{
+		"summary":     "内部组件 " + component + " 不可用",
+		"description": reason,
+	})
+	if err != nil {
+		// map[string]string 恒可序列化；此分支为编程错误兜底。
+		annotations = []byte("{}")
+	}
+	return severity, "Platform component unavailable", string(annotations)
 }
 
 func isExecutionFaultReason(reason string) bool {
@@ -178,8 +205,9 @@ func (reporter *PlatformFaultReporter) ObserveExecutionOutcomeOn(ctx context.Con
 		return err
 	}
 	if err == sql.ErrNoRows || state == "Resolved" {
-		_, err = tx.ExecContext(ctx, `INSERT INTO platform_faults(component,reason,state,first_seen_at,last_seen_at,last_execution_commit_sequence)
-			VALUES('plinth','worker_protocol_error','Firing',?,?,?)`, now, now, commitSequence)
+		severity, title, annotations := platformFaultSemantics("plinth", "worker_protocol_error")
+		_, err = tx.ExecContext(ctx, `INSERT INTO platform_faults(component,reason,severity,title,annotations_canonical,state,first_seen_at,last_seen_at,last_execution_commit_sequence)
+			VALUES('plinth','worker_protocol_error',?,?,?,'Firing',?,?,?)`, severity, title, annotations, now, now, commitSequence)
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE platform_faults SET last_seen_at=?, last_execution_commit_sequence=? WHERE id=?`, now, commitSequence, id)

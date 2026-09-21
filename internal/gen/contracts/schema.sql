@@ -9,7 +9,7 @@
 --   * 生成式技术 locator: INTEGER PRIMARY KEY CHECK (id > 0)；领域 locator 与
 --     单调序列使用 AUTOINCREMENT（跨删除不复用）；单行/投影/连接表可不用。
 --     HTTP 十进制字符串表示由 http-api.md (#10) 定义。
---   * 用户稳定 key（business_system.key、alert_sources.source_key、
+--   * 用户稳定 key（alert_sources.source_key、
 --     connections.name、discovery/plan/check key 等）与复合领域身份
 --     （alert_occurrences 的 UNIQUE 约束）是相等性权威；
 --     locator 只承担 FK / URL / 审计引用。
@@ -335,7 +335,14 @@ CREATE TABLE alert_occurrences (
   row_version          INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   labels_canonical     TEXT NOT NULL CHECK (json_valid(labels_canonical)), -- 不可变完整 labels 快照
   labels_digest        TEXT NOT NULL CHECK (length(labels_digest) = 64),
-  business_system_id   INTEGER REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  -- ADR-0012 告警归一化层：首观测经插件 AlertNormalizer 冻结的统一语义投影，
+  -- 与 labels 快照同批写入、同样不可变。severity 是封闭四级词表；title/
+  -- annotations/resource 是人面与受影响对象的规范投影。无 normalizer 或解析
+  -- 失败时退化为默认值（info/''/'{}'/''）并记 normalizer_missing 接入问题。
+  severity              TEXT NOT NULL DEFAULT 'info' CHECK (severity IN ('critical','high','warning','info')),
+  title                 TEXT NOT NULL DEFAULT '',
+  annotations_canonical TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(annotations_canonical) AND json_type(annotations_canonical) = 'object'),
+  resource              TEXT NOT NULL DEFAULT '',
   first_seen_at        TEXT NOT NULL,
   last_state_change_at TEXT NOT NULL,
   resolved_at          TEXT,
@@ -343,7 +350,6 @@ CREATE TABLE alert_occurrences (
   CHECK ((state = 'Resolved' AND resolved_at IS NOT NULL) OR (state = 'Firing' AND resolved_at IS NULL))
 ) STRICT;
 CREATE INDEX idx_alert_occurrences_firing ON alert_occurrences (state, last_state_change_at DESC);
-CREATE INDEX idx_alert_occurrences_business ON alert_occurrences (business_system_id);
 
 -- Platform faults are independent of Alertmanager Delivery and Occurrence.
 -- A single open row is the lifecycle authority for one component/reason pair;
@@ -354,6 +360,12 @@ CREATE TABLE platform_faults (
   -- Closed platform-owned failure vocabulary. Business/model/input errors stay
   -- on their own attempt and must never be promoted into this source.
   reason               TEXT NOT NULL CHECK (reason IN ('runtime_control_stream_disconnected','worker_protocol_error')),
+  -- ADR-0012：平台故障在入库侧投影与 occurrence 同构的语义列（severity 按故障
+  -- 类别映射：控制流断连=critical、worker 协议错误=high），读侧不再伪造
+  -- labels/annotations。
+  severity              TEXT NOT NULL DEFAULT 'warning' CHECK (severity IN ('critical','high','warning','info')),
+  title                 TEXT NOT NULL DEFAULT '',
+  annotations_canonical TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(annotations_canonical) AND json_type(annotations_canonical) = 'object'),
   state                TEXT NOT NULL CHECK (state IN ('Firing','Resolved')),
   row_version          INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   first_seen_at        TEXT NOT NULL,
@@ -378,59 +390,79 @@ CREATE TABLE alert_occurrence_labels (
 ) STRICT;
 CREATE INDEX idx_alert_occurrence_labels_name ON alert_occurrence_labels (name);
 
--- Attribution is immutable delivery-time evidence, not a mutable current-system
--- lookup. Candidate arrays are aligned by index: position i binds the system ID
--- to the exact configuration version which caused it to be a candidate.
-CREATE TABLE alert_occurrence_attributions (
-  occurrence_id                    INTEGER PRIMARY KEY REFERENCES alert_occurrences(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  status                           TEXT NOT NULL CHECK (status IN ('attributed','unattributed','conflict')),
-  candidate_system_ids_json        TEXT NOT NULL CHECK (json_valid(candidate_system_ids_json) AND json_type(candidate_system_ids_json) = 'array'),
-  candidate_config_version_ids_json TEXT NOT NULL CHECK (json_valid(candidate_config_version_ids_json) AND json_type(candidate_config_version_ids_json) = 'array'),
-  reason_json                      TEXT NOT NULL CHECK (json_valid(reason_json)),
-  evaluated_from_delivery_id       INTEGER NOT NULL REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  evaluated_from_delivery_item_id  INTEGER NOT NULL REFERENCES alert_delivery_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  created_at                       TEXT NOT NULL,
-  CHECK (json_array_length(candidate_system_ids_json) = json_array_length(candidate_config_version_ids_json)),
-  CHECK ((status = 'attributed' AND json_array_length(candidate_system_ids_json) = 1)
-      OR (status = 'unattributed' AND json_array_length(candidate_system_ids_json) = 0)
-      OR (status = 'conflict' AND json_array_length(candidate_system_ids_json) > 1))
+-- 富化规则（ADR-0012）：管理员维护的"命中即叠加 outputs"声明式富化配置。
+-- 范围语义与 business_views 的声明一致：label_conditions_json 是精确
+-- label=value 映射（空对象 = 不限标签、命中一切，用于全局默认富化）；
+-- alert_source_keys_json 空数组 = 不限告警源，非空时逐 key 精确匹配交付告警
+-- 源（key 存在性与启用态由服务层对照 alert_sources 校验，表不外键）。
+-- 求值发生在首观测事务内：按 priority 升序叠加 outputs，后命中者不覆盖已写
+-- 字段；结果与命中规则溯源一起冻结进 alert_enrichments。key 退役不复用
+-- （enabled=0 停用，行永不删除）。
+CREATE TABLE enrichment_rules (
+  id                     INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  rule_key               TEXT NOT NULL UNIQUE,  -- ^[a-z][a-z0-9-]{0,62}$，退役不复用
+  display_name           TEXT NOT NULL,
+  description            TEXT NOT NULL DEFAULT '',
+  enabled                INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+  label_conditions_json  TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(label_conditions_json) AND json_type(label_conditions_json) = 'object'),
+  alert_source_keys_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(alert_source_keys_json) AND json_type(alert_source_keys_json) = 'array'),
+  outputs_json           TEXT NOT NULL CHECK (json_valid(outputs_json) AND json_type(outputs_json) = 'object' AND length(outputs_json) > 2), -- 至少一个字段；值必须是字符串（形状触发器强制）
+  priority               INTEGER NOT NULL DEFAULT 100 CHECK (priority >= 1),
+  row_version            INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  created_by             INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at             TEXT NOT NULL,
+  updated_at             TEXT NOT NULL
 ) STRICT;
-CREATE INDEX idx_alert_occurrence_attributions_delivery ON alert_occurrence_attributions (evaluated_from_delivery_id);
+-- 规则 key 是跨迁移稳定引用（退役不复用）：key 不可改写，行不可删除；
+-- 停用走 enabled=0，内容演进走 row_version 前提下的整体提交更新。
+CREATE TRIGGER trg_enrichment_rules_key_immutable BEFORE UPDATE OF rule_key ON enrichment_rules
+BEGIN SELECT RAISE(ABORT, 'enrichment rule key is immutable'); END;
+CREATE TRIGGER trg_enrichment_rules_no_delete BEFORE DELETE ON enrichment_rules
+BEGIN SELECT RAISE(ABORT, 'enrichment rules are never deleted; keys are retired, not reused'); END;
+-- outputs 的值必须是字符串：SQLite CHECK 不支持子查询，由形状触发器在
+-- INSERT/UPDATE 时强制（服务层校验之外的存储级防线）。
+CREATE TRIGGER trg_enrichment_rules_outputs_text_insert BEFORE INSERT ON enrichment_rules
+WHEN EXISTS(SELECT 1 FROM json_each(NEW.outputs_json) WHERE json_each.type <> 'text')
+BEGIN SELECT RAISE(ABORT, 'enrichment rule outputs values must be strings'); END;
+CREATE TRIGGER trg_enrichment_rules_outputs_text_update BEFORE UPDATE OF outputs_json ON enrichment_rules
+WHEN EXISTS(SELECT 1 FROM json_each(NEW.outputs_json) WHERE json_each.type <> 'text')
+BEGIN SELECT RAISE(ABORT, 'enrichment rule outputs values must be strings'); END;
 
--- 业务视图告警归属投影（ADR-0008）：首次接收时一次性冻结的独立证据，与旧
--- business_system 归属历史（上表）并存；旧表停写、旧行保留，本表绝不回写
--- alert_occurrences.business_system_id。候选视图必须在其 alert_source_keys_json
--- 中显式声明交付告警源且非空精确标签条件全部命中；空标签条件不构成兜底匹配。
--- candidates_json 按序冻结每个候选视图的完整快照（viewId/viewKey/displayName/
--- scope），使唯一归属与多候选歧义在视图改名或退役后仍可追溯。
-CREATE TABLE alert_occurrence_view_attributions (
-  occurrence_id                    INTEGER PRIMARY KEY REFERENCES alert_occurrences(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  status                           TEXT NOT NULL CHECK (status IN ('attributed','ambiguous','unattributed')),
-  attributed_view_id               INTEGER REFERENCES business_views(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  candidates_json                  TEXT NOT NULL CHECK (json_valid(candidates_json) AND json_type(candidates_json) = 'array'),
-  reason_json                      TEXT NOT NULL CHECK (json_valid(reason_json)),
-  evaluated_from_delivery_id       INTEGER NOT NULL REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  evaluated_from_delivery_item_id  INTEGER NOT NULL REFERENCES alert_delivery_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  created_at                       TEXT NOT NULL,
-  CHECK ((status = 'attributed' AND attributed_view_id IS NOT NULL AND json_array_length(candidates_json) = 1)
-      OR (status = 'ambiguous' AND attributed_view_id IS NULL AND json_array_length(candidates_json) > 1)
-      OR (status = 'unattributed' AND attributed_view_id IS NULL AND json_array_length(candidates_json) = 0))
+-- 首观测富化冻结（ADR-0012）：与 occurrence 1:1；即使无规则命中也写一行
+-- （fields 为空对象），用于区分"无规则命中"与"未求值"。enrichment_json 形如
+-- {"fields":{...叠加结果...},"rules":[{"key":"...","outputs":{...}}]}——rules 按
+-- 求值序（priority 升序、同序按创建序）冻结命中溯源。
+CREATE TABLE alert_enrichments (
+  occurrence_id    INTEGER PRIMARY KEY REFERENCES alert_occurrences(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  enrichment_json  TEXT NOT NULL CHECK (json_valid(enrichment_json) AND json_type(enrichment_json) = 'object'),
+  evaluated_at     TEXT NOT NULL
 ) STRICT;
-CREATE INDEX idx_alert_occurrence_view_attributions_view ON alert_occurrence_view_attributions (attributed_view_id);
+CREATE TRIGGER trg_alert_enrichments_immutable BEFORE UPDATE ON alert_enrichments
+BEGIN SELECT RAISE(ABORT, 'alert enrichment is immutable first-observation evidence'); END;
+CREATE TRIGGER trg_alert_enrichments_no_delete BEFORE DELETE ON alert_enrichments
+BEGIN SELECT RAISE(ABORT, 'alert enrichment is immutable first-observation evidence'); END;
 
--- 归属证据冻结：首收判定后不允许任何 UPDATE/DELETE 改写；INSERT 必须闭合到
--- 同一 Delivery 的真实条目（DATA-ALERT 不可变证据语义）。
-CREATE TRIGGER trg_alert_occurrence_view_attributions_immutable BEFORE UPDATE ON alert_occurrence_view_attributions
-BEGIN SELECT RAISE(ABORT, 'alert view attribution is immutable delivery-time evidence'); END;
-CREATE TRIGGER trg_alert_occurrence_view_attributions_no_delete BEFORE DELETE ON alert_occurrence_view_attributions
-BEGIN SELECT RAISE(ABORT, 'alert view attribution is immutable delivery-time evidence'); END;
-CREATE TRIGGER trg_alert_occurrence_view_attributions_item_closure BEFORE INSERT ON alert_occurrence_view_attributions
-WHEN NOT EXISTS (
-  SELECT 1 FROM alert_delivery_items item
-  WHERE item.id = NEW.evaluated_from_delivery_item_id
-    AND item.delivery_id = NEW.evaluated_from_delivery_id
-)
-BEGIN SELECT RAISE(ABORT, 'alert view attribution must close to its own delivery item'); END;
+-- 视图关联（ADR-0012）：首观测时一次性冻结的"全部命中视图"证据，替代旧
+-- attributed/ambiguous/unattributed 状态机——多命中全记录，每命中视图一行。
+-- view_key/display_name 是冻结快照，视图改名/退役后不漂移。参与匹配的视图必须
+-- 在其 alert_source_keys_json 显式声明交付告警源且非空精确标签条件全部命中
+-- （沿用 ADR-0008 的匹配语义；空标签条件绝不构成兜底匹配）。
+CREATE TABLE alert_occurrence_correlations (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  occurrence_id   INTEGER NOT NULL REFERENCES alert_occurrences(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  view_id         INTEGER NOT NULL REFERENCES business_views(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  view_key        TEXT NOT NULL,  -- 冻结快照
+  display_name    TEXT NOT NULL,  -- 冻结快照
+  matched_at      TEXT NOT NULL,
+  UNIQUE (occurrence_id, view_id)
+) STRICT;
+CREATE INDEX idx_alert_occurrence_correlations_view ON alert_occurrence_correlations (view_id);
+CREATE INDEX idx_alert_occurrence_correlations_occurrence ON alert_occurrence_correlations (occurrence_id);
+-- 关联证据冻结：首收判定后不允许任何 UPDATE/DELETE 改写（不可变证据语义）。
+CREATE TRIGGER trg_alert_occurrence_correlations_immutable BEFORE UPDATE ON alert_occurrence_correlations
+BEGIN SELECT RAISE(ABORT, 'alert occurrence correlation is immutable first-observation evidence'); END;
+CREATE TRIGGER trg_alert_occurrence_correlations_no_delete BEFORE DELETE ON alert_occurrence_correlations
+BEGIN SELECT RAISE(ABORT, 'alert occurrence correlation is immutable first-observation evidence'); END;
 
 CREATE TABLE alert_observations (
   id               INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
@@ -470,7 +502,7 @@ CREATE TABLE alert_intake_issues (
   delivery_id       INTEGER REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 首次事件定位
   delivery_item_id  INTEGER REFERENCES alert_delivery_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 首次事件定位
   last_event_id     INTEGER REFERENCES alert_intake_issue_events(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 最近一次 repeat 事件；首次发生为 NULL
-  kind              TEXT NOT NULL CHECK (kind IN ('identity_conflict','fingerprint_mismatch','delivery_truncated')),
+  kind              TEXT NOT NULL CHECK (kind IN ('identity_conflict','fingerprint_mismatch','delivery_truncated','normalizer_missing')),
   issue_key         TEXT NOT NULL CHECK (length(issue_key) = 64 AND issue_key NOT GLOB '*[^0-9a-f]*'), -- DATA-ALERT-011 kind-specific versioned canonical JSON SHA-256 digest
   detail_json       TEXT NOT NULL CHECK (json_valid(detail_json)), -- 首次事件诊断详情
   first_seen_at     TEXT NOT NULL,
@@ -482,7 +514,7 @@ CREATE TABLE alert_intake_issues (
   created_at        TEXT NOT NULL,
   CHECK (first_seen_at = created_at),
   CHECK (kind <> 'delivery_truncated' OR delivery_id IS NOT NULL),
-  CHECK (kind = 'delivery_truncated' OR delivery_item_id IS NOT NULL),
+  CHECK (kind IN ('delivery_truncated','normalizer_missing') OR delivery_item_id IS NOT NULL),
   CHECK ((acknowledged_at IS NULL AND acknowledged_by IS NULL) OR (acknowledged_at IS NOT NULL AND acknowledged_by IS NOT NULL))
 ) STRICT;
 CREATE UNIQUE INDEX ux_alert_intake_issue_open_signature
@@ -505,12 +537,19 @@ CREATE UNIQUE INDEX ux_alert_intake_issue_events_item ON alert_intake_issue_even
 CREATE UNIQUE INDEX ux_alert_intake_issue_events_delivery ON alert_intake_issue_events (delivery_id) WHERE delivery_item_id IS NULL;
 
 -- 接入问题必须闭合到同一告警源的真实异常 Delivery/Item；kind、首事件定位与后续事件不可漂移。
+-- normalizer_missing（ADR-0012）是来源级问题：交付无法归一化（协议无
+-- AlertNormalizer 或归一化失败），闭合到该源任一已处理 Delivery，不指向具体条目。
 CREATE TRIGGER trg_alert_intake_issues_source_closure BEFORE INSERT ON alert_intake_issues
 WHEN NOT (
   (NEW.kind = 'delivery_truncated' AND NEW.delivery_item_id IS NULL AND EXISTS (
     SELECT 1 FROM alert_deliveries d
     WHERE d.id = NEW.delivery_id AND d.source_id = NEW.source_id
       AND d.integrity = 'truncated' AND d.status = 'processed'
+  ))
+  OR (NEW.kind = 'normalizer_missing' AND NEW.delivery_item_id IS NULL AND EXISTS (
+    SELECT 1 FROM alert_deliveries d
+    WHERE d.id = NEW.delivery_id AND d.source_id = NEW.source_id
+      AND d.status = 'processed'
   ))
   OR (NEW.kind IN ('identity_conflict','fingerprint_mismatch') AND EXISTS (
     SELECT 1 FROM alert_delivery_items i JOIN alert_deliveries d ON d.id = i.delivery_id
@@ -527,6 +566,11 @@ WHEN NOT EXISTS (
       SELECT 1 FROM alert_deliveries d
       WHERE d.id = NEW.delivery_id AND d.source_id = issue.source_id
         AND d.integrity = 'truncated' AND d.status = 'processed'
+    ))
+    OR (issue.kind = 'normalizer_missing' AND NEW.delivery_item_id IS NULL AND EXISTS (
+      SELECT 1 FROM alert_deliveries d
+      WHERE d.id = NEW.delivery_id AND d.source_id = issue.source_id
+        AND d.status = 'processed'
     ))
     OR (issue.kind IN ('identity_conflict','fingerprint_mismatch') AND EXISTS (
       SELECT 1 FROM alert_delivery_items i JOIN alert_deliveries d ON d.id = i.delivery_id
@@ -661,132 +705,12 @@ CREATE TABLE source_materials (
   CHECK ((kind = 'knowledge_import' AND content IS NOT NULL) OR (kind = 'text_attachment' AND content IS NULL))
 ) STRICT;
 
-CREATE TABLE label_contracts (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  version        INTEGER NOT NULL CHECK (version >= 1),
-  yaml_body      TEXT NOT NULL,          -- strict YAML 原文（Q12.1 B：Label Contract 只接受严格单文档 YAML，与业务系统配置同一解析机制）
-  contract_json  TEXT NOT NULL CHECK (json_valid(contract_json)), -- 解析一次的类型化投影（运行只使用它）
-  digest         TEXT NOT NULL CHECK (length(digest) = 64),
-  parser_version TEXT NOT NULL,
-  schema_version TEXT NOT NULL,
-  state          TEXT NOT NULL CHECK (state IN ('draft','active','retired')), -- 派生投影：只由 label_contract_state 指针经触发器维护（DATA-CONFIG-006），禁止手工改写
-  row_version    INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 激活命令对目标草稿行的并发前提（DATA-CONFIG-005）
-  created_at     TEXT NOT NULL,
-  activated_at   TEXT,  -- 一次性激活事实：NULL -> 时间戳一次，只由激活触发器写入
-  UNIQUE (version)
-) STRICT;
-
--- Label Contract 当前指针单行聚合：激活命令的并发前提权威与状态派生来源（DATA-CONFIG-005/006）。
--- current_activation_id 指向产生当前状态的不可变激活命令；current_contract_id 必须与该命令成对变化。
--- 这使直接指针 UPDATE 无法伪装成触发器内部写入，避免依赖时间戳或连接内临时状态。
-CREATE TABLE label_contract_state (
-  id                    INTEGER PRIMARY KEY CHECK (id = 1),
-  current_contract_id   INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  current_activation_id INTEGER REFERENCES label_contract_activations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  row_version           INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
-  updated_at            TEXT NOT NULL,
-  CHECK ((current_contract_id IS NULL) = (current_activation_id IS NULL))
-) STRICT;
-
-CREATE TABLE business_systems (
-  id                                 INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  key                                TEXT NOT NULL UNIQUE,  -- 稳定用户 key，退役不复用
-  display_name                       TEXT NOT NULL,
-  enabled                            INTEGER NOT NULL CHECK (enabled IN (0,1)),
-  row_version                        INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 系统行并发前提（DATA-CONFIG-005）
-  current_config_version_id          INTEGER REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  timezone                           TEXT,  -- 已发布配置版本的根投影；发布/联合激活时由触发器同步（DATA-CONFIG-001），从未发布时为 NULL
-  created_at                         TEXT NOT NULL
-) STRICT;
-
-CREATE TABLE business_system_config_versions (
-  id                                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  business_system_id                INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  version_seq                       INTEGER NOT NULL CHECK (version_seq >= 1),
-  state                             TEXT NOT NULL CHECK (state IN ('draft','published','superseded')), -- 派生投影：只由 business_systems.current_config_version_id 经触发器维护（DATA-CONFIG-001），禁止手工改写
-  yaml_body                         TEXT NOT NULL,
-  parser_version                    TEXT NOT NULL,
-  schema_version                    TEXT NOT NULL,
-  -- Historical provenance only. New declaration uploads leave this NULL:
-  -- Label Contracts no longer govern active Business System lifecycle.
-  label_contract_version_id         INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  -- Legacy history predating the declaration cutover deliberately has no
-  -- declaration projection. Only appended canonical successors are executable.
-  declaration_json                  TEXT CHECK (declaration_json IS NULL OR json_valid(declaration_json)),
-  description                       TEXT NOT NULL DEFAULT '',
-  discovery_refresh_seconds         INTEGER NOT NULL DEFAULT 300 CHECK (discovery_refresh_seconds BETWEEN 60 AND 86400),
-  digest                            TEXT NOT NULL CHECK (length(digest) = 64),
-  created_by                        INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  created_at                        TEXT NOT NULL,
-  published_at                      TEXT,  -- 一次性发布事实：NULL -> 时间戳一次，只由 current 指针变化触发器写入
-  -- 解析一次的类型化根投影（DATA-CONFIG-003）：运行只使用类型结构，不重新解析 YAML
-  system_key                        TEXT NOT NULL,  -- 必须等于 business_systems.key（trg_business_config_versions_system_key_match）
-  display_name                      TEXT NOT NULL,
-  metrics_connection_id             INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 版本化明确指标接入引用；尝试授权冻结其 revision/credential generation
-  enabled                           INTEGER NOT NULL CHECK (enabled IN (0,1)),
-  timezone                          TEXT NOT NULL,  -- IANA 时区（根节点统一提供，DATA-CONFIG-004）
-  UNIQUE (business_system_id, version_seq)
-) STRICT;
-
--- Optional alert attribution restrictions declared with a config version.
--- Empty source refs/label conditions mean no extra restriction; the Label
--- Contract business label remains the mandatory attribution authority.
-CREATE TABLE config_alert_source_refs (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  config_version_id INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  alert_source_id   INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  UNIQUE (config_version_id, alert_source_id)
-) STRICT;
-
-CREATE TABLE config_alert_label_conditions (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  config_version_id INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  label_name        TEXT NOT NULL,
-  label_value       TEXT NOT NULL,
-  UNIQUE (config_version_id, label_name)
-) STRICT;
-
--- Compiled resource scopes are the execution authority.
-CREATE TABLE config_resource_scopes (
-  id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  config_version_id    INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  resource_key         TEXT NOT NULL,
-  display_name         TEXT NOT NULL,
-  discovery_metric     TEXT NOT NULL,
-  selectors_json       TEXT NOT NULL CHECK (json_valid(selectors_json)),
-  identity_labels_json TEXT NOT NULL CHECK (json_valid(identity_labels_json)),
-  allowed_metrics_json TEXT NOT NULL CHECK (json_valid(allowed_metrics_json)),
-  UNIQUE (config_version_id, resource_key)
-) STRICT;
-
-CREATE TABLE config_plans (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  config_version_id INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  plan_key          TEXT NOT NULL,                  -- 跨版本稳定 key
-  display_name      TEXT NOT NULL,
-  timezone          TEXT NOT NULL DEFAULT 'UTC',
-  cron              TEXT,                          -- 标准五字段 cron；NULL = 仅人工运行；时区由配置根节点统一提供（DATA-CONFIG-004）
-  UNIQUE (config_version_id, plan_key)
-) STRICT;
-
-CREATE TABLE config_checks (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  plan_id           INTEGER NOT NULL REFERENCES config_plans(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  check_key         TEXT NOT NULL,                  -- 跨版本稳定 key
-  display_name      TEXT NOT NULL,
-  analysis_question TEXT NOT NULL,
-  kind              TEXT NOT NULL CHECK (kind = 'promql'),
-  query_mode        TEXT CHECK (query_mode IN ('instant','range')), -- promql：查询模式；range 以真实 evidence_at 为终点并保存实际 start/end/step
-  expression        TEXT,                          -- promql：字面量表达式（上传时经 Prometheus 官方 AST 校验）
-  range_seconds     INTEGER CHECK (range_seconds IS NULL OR range_seconds > 0),  -- range 查询窗口
-  step_seconds      INTEGER CHECK (step_seconds IS NULL OR step_seconds > 0),    -- range 查询步长
-  UNIQUE (plan_id, check_key),
-  CHECK (
-    (kind = 'promql' AND query_mode IS NOT NULL AND expression IS NOT NULL
-      AND ((query_mode = 'instant' AND range_seconds IS NULL AND step_seconds IS NULL)
-           OR (query_mode = 'range' AND range_seconds IS NOT NULL AND step_seconds IS NOT NULL)))
-  )
-) STRICT;
+-- ADR-0012：business_systems 域（business_systems、business_system_config_versions、
+-- config_alert_source_refs、config_alert_label_conditions、config_resource_scopes、
+-- config_plans、config_checks、label_contracts、label_contract_state、
+-- label_contract_activations）已整域退役删除——告警语义归一层（severity/title/
+-- annotations_canonical + 富化 + 视图关联）取代其归属与授权模型，观测/巡检走
+-- 来源级接入与独立计划。
 
 -- ============================================================================
 -- 6. 连接、凭据与浏览器身份
@@ -898,6 +822,142 @@ CREATE UNIQUE INDEX ux_connections_one_enabled_model_provider ON connections ((1
 -- ============================================================================
 -- 7. 巡检运行与检查结果
 -- ============================================================================
+
+
+CREATE TABLE label_contracts (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  version        INTEGER NOT NULL CHECK (version >= 1),
+  yaml_body      TEXT NOT NULL,          -- strict YAML 原文（Q12.1 B：Label Contract 只接受严格单文档 YAML，与业务系统配置同一解析机制）
+  contract_json  TEXT NOT NULL CHECK (json_valid(contract_json)), -- 解析一次的类型化投影（运行只使用它）
+  digest         TEXT NOT NULL CHECK (length(digest) = 64),
+  parser_version TEXT NOT NULL,
+  schema_version TEXT NOT NULL,
+  state          TEXT NOT NULL CHECK (state IN ('draft','active','retired')), -- 派生投影：只由 label_contract_state 指针经触发器维护（DATA-CONFIG-006），禁止手工改写
+  row_version    INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 激活命令对目标草稿行的并发前提（DATA-CONFIG-005）
+  created_at     TEXT NOT NULL,
+  activated_at   TEXT,  -- 一次性激活事实：NULL -> 时间戳一次，只由激活触发器写入
+  UNIQUE (version)
+) STRICT;
+
+-- Label Contract 当前指针单行聚合：激活命令的并发前提权威与状态派生来源（DATA-CONFIG-005/006）。
+-- current_activation_id 指向产生当前状态的不可变激活命令；current_contract_id 必须与该命令成对变化。
+-- 这使直接指针 UPDATE 无法伪装成触发器内部写入，避免依赖时间戳或连接内临时状态。
+
+CREATE TABLE label_contract_state (
+  id                    INTEGER PRIMARY KEY CHECK (id = 1),
+  current_contract_id   INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  current_activation_id INTEGER REFERENCES label_contract_activations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  row_version           INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  updated_at            TEXT NOT NULL,
+  CHECK ((current_contract_id IS NULL) = (current_activation_id IS NULL))
+) STRICT;
+
+
+CREATE TABLE business_systems (
+  id                                 INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  key                                TEXT NOT NULL UNIQUE,  -- 稳定用户 key，退役不复用
+  display_name                       TEXT NOT NULL,
+  enabled                            INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  row_version                        INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- 系统行并发前提（DATA-CONFIG-005）
+  current_config_version_id          INTEGER REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  timezone                           TEXT,  -- 已发布配置版本的根投影；发布/联合激活时由触发器同步（DATA-CONFIG-001），从未发布时为 NULL
+  created_at                         TEXT NOT NULL
+) STRICT;
+
+
+CREATE TABLE business_system_config_versions (
+  id                                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  business_system_id                INTEGER NOT NULL REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  version_seq                       INTEGER NOT NULL CHECK (version_seq >= 1),
+  state                             TEXT NOT NULL CHECK (state IN ('draft','published','superseded')), -- 派生投影：只由 business_systems.current_config_version_id 经触发器维护（DATA-CONFIG-001），禁止手工改写
+  yaml_body                         TEXT NOT NULL,
+  parser_version                    TEXT NOT NULL,
+  schema_version                    TEXT NOT NULL,
+  -- Historical provenance only. New declaration uploads leave this NULL:
+  -- Label Contracts no longer govern active Business System lifecycle.
+  label_contract_version_id         INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  -- Legacy history predating the declaration cutover deliberately has no
+  -- declaration projection. Only appended canonical successors are executable.
+  declaration_json                  TEXT CHECK (declaration_json IS NULL OR json_valid(declaration_json)),
+  description                       TEXT NOT NULL DEFAULT '',
+  discovery_refresh_seconds         INTEGER NOT NULL DEFAULT 300 CHECK (discovery_refresh_seconds BETWEEN 60 AND 86400),
+  digest                            TEXT NOT NULL CHECK (length(digest) = 64),
+  created_by                        INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at                        TEXT NOT NULL,
+  published_at                      TEXT,  -- 一次性发布事实：NULL -> 时间戳一次，只由 current 指针变化触发器写入
+  -- 解析一次的类型化根投影（DATA-CONFIG-003）：运行只使用类型结构，不重新解析 YAML
+  system_key                        TEXT NOT NULL,  -- 必须等于 business_systems.key（trg_business_config_versions_system_key_match）
+  display_name                      TEXT NOT NULL,
+  metrics_connection_id             INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 版本化明确指标接入引用；尝试授权冻结其 revision/credential generation
+  enabled                           INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  timezone                          TEXT NOT NULL,  -- IANA 时区（根节点统一提供，DATA-CONFIG-004）
+  UNIQUE (business_system_id, version_seq)
+) STRICT;
+
+-- Optional alert attribution restrictions declared with a config version.
+-- Empty source refs/label conditions mean no extra restriction; the Label
+-- Contract business label remains the mandatory attribution authority.
+
+CREATE TABLE config_alert_source_refs (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  config_version_id INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  alert_source_id   INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  UNIQUE (config_version_id, alert_source_id)
+) STRICT;
+
+
+CREATE TABLE config_alert_label_conditions (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  config_version_id INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  label_name        TEXT NOT NULL,
+  label_value       TEXT NOT NULL,
+  UNIQUE (config_version_id, label_name)
+) STRICT;
+
+-- Compiled resource scopes are the execution authority.
+
+CREATE TABLE config_resource_scopes (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  config_version_id    INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  resource_key         TEXT NOT NULL,
+  display_name         TEXT NOT NULL,
+  discovery_metric     TEXT NOT NULL,
+  selectors_json       TEXT NOT NULL CHECK (json_valid(selectors_json)),
+  identity_labels_json TEXT NOT NULL CHECK (json_valid(identity_labels_json)),
+  allowed_metrics_json TEXT NOT NULL CHECK (json_valid(allowed_metrics_json)),
+  UNIQUE (config_version_id, resource_key)
+) STRICT;
+
+
+CREATE TABLE config_plans (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  config_version_id INTEGER NOT NULL REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  plan_key          TEXT NOT NULL,                  -- 跨版本稳定 key
+  display_name      TEXT NOT NULL,
+  timezone          TEXT NOT NULL DEFAULT 'UTC',
+  cron              TEXT,                          -- 标准五字段 cron；NULL = 仅人工运行；时区由配置根节点统一提供（DATA-CONFIG-004）
+  UNIQUE (config_version_id, plan_key)
+) STRICT;
+
+
+CREATE TABLE config_checks (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  plan_id           INTEGER NOT NULL REFERENCES config_plans(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  check_key         TEXT NOT NULL,                  -- 跨版本稳定 key
+  display_name      TEXT NOT NULL,
+  analysis_question TEXT NOT NULL,
+  kind              TEXT NOT NULL CHECK (kind = 'promql'),
+  query_mode        TEXT CHECK (query_mode IN ('instant','range')), -- promql：查询模式；range 以真实 evidence_at 为终点并保存实际 start/end/step
+  expression        TEXT,                          -- promql：字面量表达式（上传时经 Prometheus 官方 AST 校验）
+  range_seconds     INTEGER CHECK (range_seconds IS NULL OR range_seconds > 0),  -- range 查询窗口
+  step_seconds      INTEGER CHECK (step_seconds IS NULL OR step_seconds > 0),    -- range 查询步长
+  UNIQUE (plan_id, check_key),
+  CHECK (
+    (kind = 'promql' AND query_mode IS NOT NULL AND expression IS NOT NULL
+      AND ((query_mode = 'instant' AND range_seconds IS NULL AND step_seconds IS NULL)
+           OR (query_mode = 'range' AND range_seconds IS NOT NULL AND step_seconds IS NOT NULL)))
+  )
+) STRICT;
 
 -- 独立巡检计划（ADR-0004）：不再内嵌于业务声明。计划直接绑定一个来源接入与
 -- 一个插件模板；Run 创建时展开并冻结目标、模板版本、查询窗口与接入授权。
@@ -1121,6 +1181,21 @@ CREATE INDEX idx_observed_source_objects_connection ON observed_source_objects (
 
 -- 业务视图（ADR-0004）：对来源接入范围与明确标签条件的可选组织；不拥有资源
 -- 身份、凭据或额外权限。Run/计划冻结使用时的视图内容，视图修改不改写历史。
+-- Label Contract 激活事件（DATA-CONFIG-002/006）：不可变单行承载 canonical items_json。
+-- 单 INSERT 触发 AFTER INSERT 原子校验并切换全部系统指针、更新 label_contract_state、激活/退休契约。
+-- 任一 RAISE(ABORT) 回滚该 INSERT 及全部副作用——结构性全有或全无，不存在“只切部分系统”的可提交状态。
+
+CREATE TABLE label_contract_activations (
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  contract_id               INTEGER NOT NULL UNIQUE REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  expected_target_row_version INTEGER NOT NULL CHECK (expected_target_row_version >= 1),
+  expected_state_row_version INTEGER NOT NULL CHECK (expected_state_row_version >= 1),
+  expected_current_contract_id INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  items_json                TEXT NOT NULL CHECK (json_valid(items_json) AND json_type(items_json) = 'array'),
+  applied_at                TEXT,
+  created_at                TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE business_views (
   id                    INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   view_key              TEXT NOT NULL UNIQUE,  -- ^[a-z][a-z0-9-]{0,62}$，退役不复用
@@ -1140,20 +1215,6 @@ CREATE TRIGGER trg_business_views_key_immutable BEFORE UPDATE OF view_key ON bus
 BEGIN SELECT RAISE(ABORT, 'business view key is immutable'); END;
 CREATE TRIGGER trg_business_views_no_delete BEFORE DELETE ON business_views
 BEGIN SELECT RAISE(ABORT, 'business views are never deleted; keys are retired, not reused'); END;
-
--- Label Contract 激活事件（DATA-CONFIG-002/006）：不可变单行承载 canonical items_json。
--- 单 INSERT 触发 AFTER INSERT 原子校验并切换全部系统指针、更新 label_contract_state、激活/退休契约。
--- 任一 RAISE(ABORT) 回滚该 INSERT 及全部副作用——结构性全有或全无，不存在“只切部分系统”的可提交状态。
-CREATE TABLE label_contract_activations (
-  id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  contract_id               INTEGER NOT NULL UNIQUE REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  expected_target_row_version INTEGER NOT NULL CHECK (expected_target_row_version >= 1),
-  expected_state_row_version INTEGER NOT NULL CHECK (expected_state_row_version >= 1),
-  expected_current_contract_id INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  items_json                TEXT NOT NULL CHECK (json_valid(items_json) AND json_type(items_json) = 'array'),
-  applied_at                TEXT,
-  created_at                TEXT NOT NULL
-) STRICT;
 
 -- ============================================================================
 -- 8. 执行尝试、模型/工具调用、证据与报告
@@ -1187,7 +1248,7 @@ CREATE TABLE execution_attempts (
   termination_reason        TEXT CHECK (termination_reason IS NULL OR termination_reason IN
                               ('timeout','rate_limited','provider_unavailable','invalid_response','context_too_large','tool_error',
                                'artifact_commit_failed','artifact_body_expired','sandbox_unavailable','worker_protocol_error',
-                               'cancelled','connection_disabled','business_system_disabled','lease_expired','replaced','revoked')),
+                               'cancelled','connection_disabled','lease_expired','replaced','revoked')),
   created_at                TEXT NOT NULL,
   CHECK (
     (state = 'Queued' AND runtime_slot IS NULL AND boot_id IS NULL AND connection_epoch IS NULL AND lease_until IS NULL AND accepted_at IS NULL AND runtime_release_version IS NULL)
@@ -1258,6 +1319,10 @@ CREATE TABLE attempt_input_snapshots (
 
 CREATE TABLE attempt_input_items (
   id                                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+
+  business_system_config_version_id INTEGER REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+
+  label_contract_version_id         INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   snapshot_id                       INTEGER NOT NULL REFERENCES attempt_input_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   item_seq                          INTEGER NOT NULL CHECK (item_seq >= 1),
   item_role      TEXT NOT NULL,
@@ -1271,8 +1336,6 @@ CREATE TABLE attempt_input_items (
   inspection_run_id                 INTEGER REFERENCES inspection_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   inspection_check_result_id        INTEGER REFERENCES inspection_check_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   source_material_id                INTEGER REFERENCES source_materials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  business_system_config_version_id INTEGER REFERENCES business_system_config_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  label_contract_version_id         INTEGER REFERENCES label_contracts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   knowledge_import_batch_id         INTEGER REFERENCES knowledge_import_batches(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   embedding_generation_id           INTEGER REFERENCES embedding_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_revision_id             INTEGER REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -1281,7 +1344,6 @@ CREATE TABLE attempt_input_items (
     (occurrence_id IS NOT NULL) + (initial_analysis_id IS NOT NULL) + (investigation_message_id IS NOT NULL) +
     (evidence_id IS NOT NULL) + (artifact_id IS NOT NULL) + (knowledge_version_id IS NOT NULL) +
     (inspection_run_id IS NOT NULL) + (inspection_check_result_id IS NOT NULL) + (source_material_id IS NOT NULL) +
-    (business_system_config_version_id IS NOT NULL) + (label_contract_version_id IS NOT NULL) +
     (knowledge_import_batch_id IS NOT NULL) + (embedding_generation_id IS NOT NULL) +
     (connection_revision_id IS NOT NULL) = 1
   )
@@ -1291,9 +1353,10 @@ CREATE TABLE attempt_input_items (
 -- 是持久权威。绑定可在 Tool Call 持久化事务中追加，连接轮换不改写旧 binding。
 CREATE TABLE attempt_connection_grants (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+
+  business_system_id   INTEGER REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   attempt_id                INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   purpose                   TEXT NOT NULL CHECK (purpose IN ('chat_model','embedding','thanos_query','config_thanos_query','model_probe_chat','model_probe_embedding','prometheus_probe','thanos_probe')),
-  business_system_id        INTEGER REFERENCES business_systems(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_id             INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_revision_id    INTEGER NOT NULL REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   credential_generation_id  INTEGER NOT NULL REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -1301,15 +1364,13 @@ CREATE TABLE attempt_connection_grants (
   created_by_tool_call_id    INTEGER REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at                TEXT NOT NULL,
   CHECK (
-      (-- Historic unscoped grants remain readable. New thanos_query inserts are
-      -- fenced by trg_attempt_connection_grants_thanos_query_scope below.
-       purpose = 'thanos_query' AND created_by_tool_call_id IS NOT NULL AND qualified_probe_result_id IS NULL)
-      OR (purpose = 'config_thanos_query' AND business_system_id IS NULL AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL)
-      OR (purpose IN ('chat_model','embedding') AND business_system_id IS NULL AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NOT NULL)
-      OR (purpose IN ('model_probe_chat','model_probe_embedding','prometheus_probe','thanos_probe') AND business_system_id IS NULL AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL))
+      (purpose = 'thanos_query' AND created_by_tool_call_id IS NOT NULL AND qualified_probe_result_id IS NULL)
+      OR (purpose = 'config_thanos_query' AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL)
+      OR (purpose IN ('chat_model','embedding') AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NOT NULL)
+      OR (purpose IN ('model_probe_chat','model_probe_embedding','prometheus_probe','thanos_probe') AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL))
 ) STRICT;
 CREATE UNIQUE INDEX ux_attempt_connection_grant_binding ON attempt_connection_grants
-  (attempt_id, purpose, connection_id, connection_revision_id, credential_generation_id, COALESCE(business_system_id, 0));
+  (attempt_id, purpose, connection_id, connection_revision_id, credential_generation_id);
 -- PromQL collection has one deterministic selected metrics locator. A credential
 -- rotation must not leave a Queued Attempt with competing historical grants; it
 -- must re-freeze a fresh Attempt. The legacy purpose name is wire-stable and
@@ -1973,56 +2034,11 @@ CREATE TRIGGER trg_alert_observations_no_update BEFORE UPDATE ON alert_observati
 BEGIN SELECT RAISE(ABORT, 'alert_observations is append-only'); END;
 CREATE TRIGGER trg_alert_observations_no_delete BEFORE DELETE ON alert_observations
 BEGIN SELECT RAISE(ABORT, 'alert_observations is append-only'); END;
--- New model tool grants must bind the immutable Business System configuration
--- item carried by this Attempt's input snapshot. A later publish cannot change
--- that approved snapshot route. An attributed Investigation additionally proves
--- its occurrence belongs to the granted business. A source-free direct
--- Investigation is allowed only when it has the same exact config/contract
--- pair, uses that pair's selected metrics connection, and is truly direct
--- (rather than an unrelated source lineage). Existing nullable historic grants
--- remain immutable/readable but cannot be newly inserted or executed.
-CREATE TRIGGER trg_attempt_connection_grants_thanos_query_scope BEFORE INSERT ON attempt_connection_grants
-WHEN NEW.purpose = 'thanos_query' AND NEW.business_system_id IS NOT NULL AND NOT EXISTS (
-  SELECT 1 FROM attempt_input_snapshots snapshot
-  JOIN attempt_input_items config_item ON config_item.snapshot_id=snapshot.id
-  JOIN business_system_config_versions v ON v.id=config_item.business_system_config_version_id
-  WHERE snapshot.attempt_id=NEW.attempt_id
-    AND config_item.item_role IN ('business_config','config_version')
-    AND v.business_system_id=NEW.business_system_id
-    AND v.metrics_connection_id=NEW.connection_id
-    AND (
-      EXISTS (
-        SELECT 1 FROM attempt_input_items occurrence_item
-        JOIN alert_occurrences occurrence ON occurrence.id=occurrence_item.occurrence_id
-        WHERE occurrence_item.snapshot_id=snapshot.id
-          AND occurrence_item.item_role='occurrence'
-          AND occurrence.business_system_id=NEW.business_system_id
-      )
-      OR (
-        NOT EXISTS (
-          SELECT 1 FROM attempt_input_items occurrence_item
-          WHERE occurrence_item.snapshot_id=snapshot.id
-            AND occurrence_item.occurrence_id IS NOT NULL
-        )
-        AND EXISTS (
-          SELECT 1 FROM execution_attempts attempt
-          WHERE attempt.id=NEW.attempt_id
-            AND attempt.attempt_type='investigation'
-            AND attempt.scope_type='investigation'
-            AND NOT EXISTS (
-              SELECT 1 FROM investigation_source_links source
-              WHERE source.investigation_id=attempt.scope_id
-            )
-        )
-      )
-    )
-)
-BEGIN SELECT RAISE(ABORT, 'metrics query grant requires an attributed or direct investigation frozen business config and selected metrics connection'); END;
--- 无业务归属（business_system_id NULL）的 thanos_query 只有在 Attempt 快照冻结了
--- 对应 metrics_source 来源项、且被授 revision 恰为该来源当前启用修订时才可创建；
--- 不按"NULL 即全来源放行"处理。
+-- thanos_query grant 只有在 Attempt 快照冻结了对应 metrics_source 来源项、且被授
+-- revision 恰为该来源当前启用修订时才可创建（ADR-0004 来源级授权；business_system
+-- 授权模型已随 ADR-0012 整域退役，不按"全来源放行"处理）。
 CREATE TRIGGER trg_attempt_connection_grants_thanos_query_source BEFORE INSERT ON attempt_connection_grants
-WHEN NEW.purpose = 'thanos_query' AND NEW.business_system_id IS NULL AND NOT EXISTS (
+WHEN NEW.purpose = 'thanos_query' AND NOT EXISTS (
   SELECT 1 FROM attempt_input_snapshots snapshot
   JOIN attempt_input_items source_item ON source_item.snapshot_id=snapshot.id
     AND source_item.item_role='metrics_source'
@@ -2114,12 +2130,8 @@ CREATE TRIGGER trg_source_materials_no_update BEFORE UPDATE ON source_materials
 BEGIN SELECT RAISE(ABORT, 'source_materials is append-only'); END;
 CREATE TRIGGER trg_source_materials_no_delete BEFORE DELETE ON source_materials
 BEGIN SELECT RAISE(ABORT, 'source_materials is append-only'); END;
-CREATE TRIGGER trg_investigation_source_links_creation_only BEFORE INSERT ON investigation_source_links
-WHEN NOT EXISTS (
-  SELECT 1 FROM investigations i WHERE i.id = NEW.investigation_id AND i.created_at = NEW.linked_at
-    AND NOT EXISTS (SELECT 1 FROM investigation_messages m WHERE m.investigation_id = i.id)
-)
-BEGIN SELECT RAISE(ABORT, 'investigation source links may only be frozen before the first Chat message'); END;
+-- 来源链接是追加式谱系：创建事务与 Send 事务（ADR-0012「+ 引入告警」）都可写入，
+-- 部分唯一索引幂等；写入后不可改写、不可删除。
 CREATE TRIGGER trg_investigation_source_links_no_update BEFORE UPDATE ON investigation_source_links
 BEGIN SELECT RAISE(ABORT, 'investigation_source_links is append-only'); END;
 CREATE TRIGGER trg_investigation_source_links_no_delete BEFORE DELETE ON investigation_source_links
@@ -2175,14 +2187,6 @@ BEGIN SELECT RAISE(ABORT, 'credential_generations is append-only'); END;
 CREATE TRIGGER trg_credential_generations_current_key_binding BEFORE INSERT ON credential_generations
 WHEN NOT EXISTS (SELECT 1 FROM root_key_state k WHERE k.id = 1 AND k.binding_revision = NEW.key_binding_revision)
 BEGIN SELECT RAISE(ABORT, 'credential generation must use the current root key binding revision'); END;
-CREATE TRIGGER trg_config_plans_no_update BEFORE UPDATE ON config_plans
-BEGIN SELECT RAISE(ABORT, 'config_plans is append-only'); END;
-CREATE TRIGGER trg_config_plans_no_delete BEFORE DELETE ON config_plans
-BEGIN SELECT RAISE(ABORT, 'config_plans is append-only'); END;
-CREATE TRIGGER trg_config_checks_no_update BEFORE UPDATE ON config_checks
-BEGIN SELECT RAISE(ABORT, 'config_checks is append-only'); END;
-CREATE TRIGGER trg_config_checks_no_delete BEFORE DELETE ON config_checks
-BEGIN SELECT RAISE(ABORT, 'config_checks is append-only'); END;
 CREATE TRIGGER trg_initial_analysis_outputs_no_update BEFORE UPDATE ON initial_analysis_outputs
 BEGIN SELECT RAISE(ABORT, 'initial_analysis_outputs is append-only'); END;
 CREATE TRIGGER trg_initial_analysis_outputs_no_delete BEFORE DELETE ON initial_analysis_outputs
@@ -2268,18 +2272,9 @@ BEGIN SELECT RAISE(ABORT, 'knowledge_import_batch origin is immutable'); END;
 CREATE TRIGGER trg_knowledge_import_batches_no_delete BEFORE DELETE ON knowledge_import_batches
 BEGIN SELECT RAISE(ABORT, 'knowledge_import_batches history is not deletable'); END;
 
--- 12.7 配置版本：只允许 state/published 字段变化，正文与类型化投影不可变
-CREATE TRIGGER trg_business_config_versions_no_content_update BEFORE UPDATE OF
-  business_system_id, version_seq, yaml_body, parser_version, schema_version,
-  label_contract_version_id, declaration_json, description, discovery_refresh_seconds,
-  system_key, display_name, metrics_connection_id, enabled, timezone,
-  digest, created_by, created_at ON business_system_config_versions
-BEGIN SELECT RAISE(ABORT, 'business_system_config_version content is immutable'); END;
+-- 12.7（已退役）business_system_config_versions 触发器随 ADR-0012 整域删除。
 
--- 12.8 Label Contract：只允许 state/activation 变化，正文与类型化投影不可变
-CREATE TRIGGER trg_label_contracts_no_content_update BEFORE UPDATE OF
-  version, yaml_body, contract_json, digest, parser_version, schema_version, created_at ON label_contracts
-BEGIN SELECT RAISE(ABORT, 'label_contract content is immutable'); END;
+-- 12.8（已退役）label_contracts 触发器随 ADR-0012 整域删除。
 
 -- 12.9 连接：name/type 不可变。
 CREATE TRIGGER trg_connections_no_identity_update BEFORE UPDATE OF name, type, created_at ON connections
@@ -2467,20 +2462,13 @@ BEGIN SELECT RAISE(ABORT, 'knowledge_search_docs is an immutable eligibility pro
 -- 12.22 稳定身份 key / 登录名：不可改写
 CREATE TRIGGER trg_users_username_immutable BEFORE UPDATE OF username ON users
 BEGIN SELECT RAISE(ABORT, 'username is stable and cannot be rewritten'); END;
-CREATE TRIGGER trg_business_systems_identity_immutable BEFORE UPDATE OF key, created_at ON business_systems
-BEGIN SELECT RAISE(ABORT, 'business_system stable key is immutable'); END;
--- 首次 YAML 上传创建的聚合必须从 Disabled/未发布状态开始；YAML 的 enabled/timezone
--- 只存在于第一份不可变草稿，显式发布后才投影到 business_systems（DATA-CONFIG-001）。
-CREATE TRIGGER trg_business_systems_insert_unconfigured BEFORE INSERT ON business_systems
-WHEN NEW.enabled <> 0 OR NEW.current_config_version_id IS NOT NULL
-  OR NEW.timezone IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'business_system must be created Disabled with no current config or published root projection'); END;
 CREATE TRIGGER trg_alert_sources_identity_immutable BEFORE UPDATE OF source_key, protocol, created_at ON alert_sources
 BEGIN SELECT RAISE(ABORT, 'alert_source stable key is immutable'); END;
 
 -- 12.23 生命周期对象的归属/身份字段不可改写（状态/时间等可更新）
 CREATE TRIGGER trg_alert_occurrences_identity_immutable BEFORE UPDATE OF
-  source_id, fingerprint, starts_at, labels_canonical, labels_digest, first_seen_at ON alert_occurrences
+  source_id, fingerprint, starts_at, labels_canonical, labels_digest,
+  severity, title, annotations_canonical, resource, first_seen_at ON alert_occurrences
 BEGIN SELECT RAISE(ABORT, 'alert_occurrence identity/labels snapshot is immutable'); END;
 CREATE TRIGGER trg_initial_analyses_origin_immutable BEFORE UPDATE OF
   occurrence_id, input_snapshot_digest, created_by, created_at ON initial_analyses
@@ -2510,12 +2498,6 @@ BEGIN SELECT RAISE(ABORT, 'users row_version must increase exactly by 1'); END;
 CREATE TRIGGER trg_alert_sources_row_version_increment BEFORE UPDATE ON alert_sources
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'alert_sources row_version must increase exactly by 1'); END;
-CREATE TRIGGER trg_label_contracts_row_version_increment BEFORE UPDATE ON label_contracts
-WHEN NEW.row_version <> OLD.row_version + 1
-BEGIN SELECT RAISE(ABORT, 'label_contracts row_version must increase exactly by 1'); END;
-CREATE TRIGGER trg_business_systems_row_version_increment BEFORE UPDATE ON business_systems
-WHEN NEW.row_version <> OLD.row_version + 1
-BEGIN SELECT RAISE(ABORT, 'business_systems row_version must increase exactly by 1'); END;
 CREATE TRIGGER trg_connections_row_version_increment BEFORE UPDATE ON connections
 WHEN NEW.row_version <> OLD.row_version + 1
 BEGIN SELECT RAISE(ABORT, 'connections row_version must increase exactly by 1'); END;
@@ -2598,31 +2580,6 @@ CREATE TRIGGER trg_alert_intake_issues_ack_does_not_change_repeat BEFORE UPDATE 
 WHEN NEW.last_seen_at <> OLD.last_seen_at OR NEW.occurrence_count <> OLD.occurrence_count OR NEW.last_event_id IS NOT OLD.last_event_id
 BEGIN SELECT RAISE(ABORT, 'intake issue acknowledgement cannot rewrite repeat history'); END;
 
--- 指针变更只能由激活触发器内部修改（trg_label_contract_state_activate_atomic）。
--- 放行条件不是时间戳：目标 activation 必须是本次尚未标记 applied 的不可变 INSERT，且 contract 精确匹配。
--- SQLite statement 原子性保证 activation INSERT 的 AFTER 触发器完成前外部语句不可见该未应用行。
-CREATE TRIGGER trg_label_contract_state_row_version_increment BEFORE UPDATE ON label_contract_state
-WHEN NEW.row_version <> OLD.row_version + 1
-BEGIN SELECT RAISE(ABORT, 'label_contract_state row_version must increase exactly by 1'); END;
-CREATE TRIGGER trg_label_contract_state_no_delete BEFORE DELETE ON label_contract_state
-BEGIN SELECT RAISE(ABORT, 'label_contract_state is a single-row table'); END;
-CREATE TRIGGER trg_label_contract_state_no_insert_pointer BEFORE INSERT ON label_contract_state
-WHEN NEW.current_contract_id IS NOT NULL OR NEW.current_activation_id IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'label_contract_state pointer can only be set by the atomic activation INSERT'); END;
-CREATE TRIGGER trg_label_contract_state_no_direct_pointer_update BEFORE UPDATE OF current_contract_id, current_activation_id ON label_contract_state
-WHEN NEW.current_contract_id IS OLD.current_contract_id
-  OR NEW.current_activation_id IS OLD.current_activation_id
-  OR NOT EXISTS (
-    SELECT 1 FROM label_contract_activations a
-    WHERE a.id = NEW.current_activation_id
-      AND a.contract_id = NEW.current_contract_id
-      AND a.applied_at IS NULL
-  )
-BEGIN SELECT RAISE(ABORT, 'label_contract_state pointer pair can only be changed by the matching atomic activation INSERT'); END;
-CREATE TRIGGER trg_label_contract_state_no_unset BEFORE UPDATE OF current_contract_id, current_activation_id ON label_contract_state
-WHEN NEW.current_contract_id IS NULL OR NEW.current_activation_id IS NULL
-BEGIN SELECT RAISE(ABORT, 'label_contract_state pointer cannot be unset (no deactivation)'); END;
-
 -- 12.23f
 -- high-water，由 BEFORE DELETE 触发器强制保留（禁止删除最新行）；旧行仍可 GC 删除。
 -- high_water = COALESCE(MAX(change_log.id),0)，oldest_available = COALESCE(MIN(change_log.id),0)，
@@ -2644,12 +2601,6 @@ CREATE TRIGGER trg_initial_analyses_no_delete BEFORE DELETE ON initial_analyses
 BEGIN SELECT RAISE(ABORT, 'initial_analyses history is not deletable'); END;
 CREATE TRIGGER trg_investigations_no_delete BEFORE DELETE ON investigations
 BEGIN SELECT RAISE(ABORT, 'investigations history is not deletable'); END;
-CREATE TRIGGER trg_label_contracts_no_delete BEFORE DELETE ON label_contracts
-BEGIN SELECT RAISE(ABORT, 'label_contracts history is not deletable'); END;
-CREATE TRIGGER trg_business_systems_no_delete BEFORE DELETE ON business_systems
-BEGIN SELECT RAISE(ABORT, 'business_systems are tombstone-only'); END;
-CREATE TRIGGER trg_business_system_config_versions_no_delete BEFORE DELETE ON business_system_config_versions
-BEGIN SELECT RAISE(ABORT, 'business_system_config_versions history is not deletable'); END;
 CREATE TRIGGER trg_connections_no_delete BEFORE DELETE ON connections
 BEGIN SELECT RAISE(ABORT, 'connections are tombstone-only'); END;
 CREATE TRIGGER trg_artifacts_no_delete BEFORE DELETE ON artifacts
@@ -2699,51 +2650,6 @@ CREATE TRIGGER trg_connections_credential_owner_update AFTER UPDATE OF current_c
 WHEN NEW.current_credential_generation_id IS NOT NULL AND NOT EXISTS
   (SELECT 1 FROM credential_generations g WHERE g.id = NEW.current_credential_generation_id AND g.connection_id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'current_credential_generation_id must belong to the same connection'); END;
-CREATE TRIGGER trg_business_systems_config_owner_insert AFTER INSERT ON business_systems
-WHEN NEW.current_config_version_id IS NOT NULL AND NOT EXISTS
-  (SELECT 1 FROM business_system_config_versions v WHERE v.id = NEW.current_config_version_id AND v.business_system_id = NEW.id)
-BEGIN SELECT RAISE(ABORT, 'current_config_version_id must belong to the same business system'); END;
--- 指针变更前置守卫：只能移动到同系统的未发布版本（published_at IS NULL 即从未发布）；
--- 禁止直接 INSERT/UPDATE 携带已发布版本（re-publish 旧版本）或跨系统版本（DATA-CONFIG-001）。
-CREATE TRIGGER trg_business_systems_config_owner_update BEFORE UPDATE OF current_config_version_id ON business_systems
-WHEN NEW.current_config_version_id IS NOT NULL AND (OLD.current_config_version_id IS NULL OR NEW.current_config_version_id IS NOT OLD.current_config_version_id)
-  AND NOT EXISTS (SELECT 1 FROM business_system_config_versions v
-                  WHERE v.id = NEW.current_config_version_id AND v.business_system_id = NEW.id AND v.published_at IS NULL)
-BEGIN SELECT RAISE(ABORT, 'current config pointer can only move to an unpublished version of the same business system'); END;
--- 禁止 current 指针从非空变为 NULL（不允许取消发布；DATA-CONFIG-001）。
--- 普通发布只能选择以当前 Label Contract 为目标的草稿；切向候选 Label Contract 的配置版本
--- 只能由同一条未应用 activation INSERT 的原子联合激活触发器完成（DATA-CONFIG-001/002）。
--- Label Contract provenance is archival-only; publishing a draft never depends on an active contract.
-CREATE TRIGGER trg_business_systems_no_unset_config_pointer BEFORE UPDATE OF current_config_version_id ON business_systems
-WHEN OLD.current_config_version_id IS NOT NULL AND NEW.current_config_version_id IS NULL
-BEGIN SELECT RAISE(ABORT, 'business_systems current_config_version_id cannot be unset (no deactivation)'); END;
--- 根投影守卫：business_systems 的 display_name/enabled/timezone 必须等于 current
--- 指针所指版本的类型化根投影（不允许绕过 YAML 发布直接改写，DATA-CONFIG-001）。
-CREATE TRIGGER trg_business_systems_projection_matches_version BEFORE UPDATE OF display_name, enabled, timezone ON business_systems
-WHEN NEW.current_config_version_id IS NOT NULL AND NOT EXISTS (
-  SELECT 1 FROM business_system_config_versions v
-  WHERE v.id = NEW.current_config_version_id
-    AND v.display_name = NEW.display_name AND v.enabled = NEW.enabled
-    AND v.timezone = NEW.timezone
-)
-BEGIN SELECT RAISE(ABORT, 'business_system root projection must equal its current config version root projection'); END;
-CREATE TRIGGER trg_business_systems_pointer_projection_on_pointer_change BEFORE UPDATE OF current_config_version_id ON business_systems
-WHEN NEW.current_config_version_id IS NOT NULL AND (OLD.current_config_version_id IS NULL OR NEW.current_config_version_id IS NOT OLD.current_config_version_id) AND NOT EXISTS (
-  SELECT 1 FROM business_system_config_versions v
-  WHERE v.id = NEW.current_config_version_id
-    AND v.display_name = NEW.display_name AND v.enabled = NEW.enabled
-    AND v.timezone = NEW.timezone
-)
-BEGIN SELECT RAISE(ABORT, 'current pointer change must carry the target version root projection in the same UPDATE'); END;
--- 指针变更后继：把新 current 版本派生为 published（写入一次性 published_at 事实）、旧 current 派生为 superseded。
-CREATE TRIGGER trg_business_systems_publish_derived AFTER UPDATE OF current_config_version_id ON business_systems
-WHEN NEW.current_config_version_id IS NOT NULL AND (OLD.current_config_version_id IS NULL OR NEW.current_config_version_id IS NOT OLD.current_config_version_id)
-BEGIN
-  UPDATE business_system_config_versions SET state = 'published', published_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-  WHERE id = NEW.current_config_version_id AND state = 'draft';
-  UPDATE business_system_config_versions SET state = 'superseded'
-  WHERE id = OLD.current_config_version_id AND OLD.current_config_version_id IS NOT NULL AND state = 'published';
-END;
 CREATE TRIGGER trg_reusable_knowledge_current_owner_insert AFTER INSERT ON reusable_knowledge
 WHEN NEW.current_version_id IS NOT NULL AND NOT EXISTS
   (SELECT 1 FROM knowledge_versions v WHERE v.id = NEW.current_version_id AND v.knowledge_id = NEW.id)
@@ -3158,53 +3064,6 @@ BEGIN SELECT RAISE(ABORT, 'invalid knowledge_import_batch state transition'); EN
 CREATE TRIGGER trg_knowledge_candidates_terminal_immutable BEFORE UPDATE OF state ON knowledge_candidates
 WHEN OLD.state IN ('Confirmed','Excluded','Superseded','SourceInvalid') AND NEW.state <> OLD.state
 BEGIN SELECT RAISE(ABORT, 'knowledge_candidate terminal state is immutable'); END;
-CREATE TRIGGER trg_label_contracts_state_derived BEFORE UPDATE OF state ON label_contracts
-WHEN NEW.state <> OLD.state AND NOT (
-  (OLD.state = 'draft' AND NEW.state = 'active'
-    AND NEW.activated_at IS NOT NULL
-    AND EXISTS (SELECT 1 FROM label_contract_state WHERE current_contract_id = NEW.id))
-  OR (OLD.state = 'active' AND NEW.state = 'retired'
-    AND NOT EXISTS (SELECT 1 FROM label_contract_state WHERE current_contract_id = NEW.id))
-)
-BEGIN SELECT RAISE(ABORT, 'label_contract state is derived from the label_contract_state pointer and cannot be forged'); END;
-CREATE TRIGGER trg_label_contracts_insert_state_draft BEFORE INSERT ON label_contracts
-WHEN NEW.state <> 'draft' OR NEW.activated_at IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'label_contract must be created as an unactivated draft'); END;
-CREATE TRIGGER trg_label_contracts_activated_at_once BEFORE UPDATE OF activated_at ON label_contracts
-WHEN (OLD.activated_at IS NOT NULL AND NEW.activated_at IS NOT OLD.activated_at)
-  OR (OLD.activated_at IS NULL AND NEW.activated_at IS NOT NULL
-      AND NOT (OLD.state = 'draft' AND NEW.state = 'active'))
-BEGIN SELECT RAISE(ABORT, 'label_contract activated_at is a derived one-time fact written only while entering active'); END;
-CREATE TRIGGER trg_business_config_versions_state_derived BEFORE UPDATE OF state ON business_system_config_versions
-WHEN NEW.state <> OLD.state AND NOT (
-  (OLD.state = 'draft' AND NEW.state = 'published'
-    AND NEW.published_at IS NOT NULL
-    AND EXISTS (SELECT 1 FROM business_systems WHERE current_config_version_id = NEW.id))
-  OR (OLD.state = 'published' AND NEW.state = 'superseded'
-    AND NOT EXISTS (SELECT 1 FROM business_systems WHERE current_config_version_id = NEW.id))
-)
-BEGIN SELECT RAISE(ABORT, 'config version state is derived from the business_systems current pointer and cannot be forged'); END;
-CREATE TRIGGER trg_business_config_versions_insert_state_draft BEFORE INSERT ON business_system_config_versions
-WHEN NEW.state <> 'draft' OR NEW.published_at IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'config version must be created as an unpublished draft'); END;
-CREATE TRIGGER trg_business_config_versions_published_at_once BEFORE UPDATE OF published_at ON business_system_config_versions
-WHEN (OLD.published_at IS NOT NULL AND NEW.published_at IS NOT OLD.published_at)
-  OR (OLD.published_at IS NULL AND NEW.published_at IS NOT NULL
-      AND NOT (OLD.state = 'draft' AND NEW.state = 'published'))
-BEGIN SELECT RAISE(ABORT, 'config version published_at is a derived one-time fact written only while entering published'); END;
-CREATE TRIGGER trg_business_config_versions_terminal_superseded BEFORE UPDATE OF state ON business_system_config_versions
-WHEN OLD.state = 'superseded' AND NEW.state <> 'superseded'
-BEGIN SELECT RAISE(ABORT, 'superseded config version is terminal'); END;
--- 配置版本 system_key 必须等于所属业务系统的稳定 key（DATA-CONFIG-003）。
-CREATE TRIGGER trg_business_config_versions_system_key_match BEFORE INSERT ON business_system_config_versions
-WHEN NEW.system_key <> (SELECT key FROM business_systems WHERE id = NEW.business_system_id)
-BEGIN SELECT RAISE(ABORT, 'config version system_key must equal the business system stable key'); END;
-CREATE TRIGGER trg_business_config_versions_system_key_match_update BEFORE UPDATE OF system_key ON business_system_config_versions
-WHEN NEW.system_key <> (SELECT key FROM business_systems WHERE id = NEW.business_system_id)
-BEGIN SELECT RAISE(ABORT, 'config version system_key must equal the business system stable key'); END;
-CREATE TRIGGER trg_label_contracts_retired_terminal BEFORE UPDATE OF state ON label_contracts
-WHEN OLD.state = 'retired' AND NEW.state <> 'retired'
-BEGIN SELECT RAISE(ABORT, 'retired label_contract is terminal'); END;
 
 -- runtime_artifact_uploads：来源字段不可改写（含 boot_id）；只能以 uploading 创建，状态转换仅
 -- uploading->committed/rejected 且终态不可变；committed 必须满足 NULL-safe 正向条件：所引 Attempt
@@ -3292,101 +3151,6 @@ WHEN (OLD.runtime_slot IS NOT NULL AND NEW.runtime_slot IS NOT OLD.runtime_slot)
   OR (OLD.accepted_at IS NOT NULL AND NEW.accepted_at IS NOT OLD.accepted_at)
 BEGIN SELECT RAISE(ABORT, 'execution_attempt runtime binding is immutable once set'); END;
 
--- 12.38 Label Contract 原子激活（DATA-CONFIG-002/006）：单个顶层 INSERT 触发 AFTER INSERT，
--- 在同一 statement 中重验全部前提并原子切换全部系统指针、更新 label_contract_state。
--- 任一 RAISE(ABORT) 回滚该 INSERT 及全部副作用。
-CREATE TRIGGER trg_label_contract_activations_insert_unapplied BEFORE INSERT ON label_contract_activations
-WHEN NEW.applied_at IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'label_contract_activation must be inserted unapplied'); END;
-CREATE TRIGGER trg_label_contract_activations_no_content_update BEFORE UPDATE OF contract_id, expected_target_row_version, expected_state_row_version, expected_current_contract_id, items_json, created_at ON label_contract_activations
-BEGIN SELECT RAISE(ABORT, 'label_contract_activation command content is immutable'); END;
-CREATE TRIGGER trg_label_contract_activations_applied_once BEFORE UPDATE OF applied_at ON label_contract_activations
-WHEN OLD.applied_at IS NOT NULL OR NEW.applied_at IS NULL
-BEGIN SELECT RAISE(ABORT, 'label_contract_activation applied_at is a one-time fact'); END;
-CREATE TRIGGER trg_label_contract_activations_no_delete BEFORE DELETE ON label_contract_activations
-BEGIN SELECT RAISE(ABORT, 'label_contract_activation history is not deletable'); END;
-CREATE TRIGGER trg_label_contract_state_activate_atomic AFTER INSERT ON label_contract_activations
-BEGIN
-  -- 1) 命令 JSON 必须是封闭的 item 数组，系统只能出现一次。
-  SELECT RAISE(ABORT, 'activation items must be closed objects with typed fields and unique business_system_id')
-  WHERE EXISTS (
-    SELECT 1 FROM json_each(NEW.items_json) je
-    WHERE json_type(je.value) IS NOT 'object'
-       OR json_type(je.value, '$.business_system_id') IS NOT 'integer'
-       OR json_type(je.value, '$.config_version_id') IS NOT 'integer'
-       OR json_type(je.value, '$.verification_run_id') IS NOT 'integer'
-       OR json_type(je.value, '$.expected_business_system_row_version') IS NOT 'integer'
-       OR COALESCE(json_type(je.value, '$.expected_current_config_version_id'), 'missing') NOT IN ('integer','null')
-       OR EXISTS (
-         SELECT 1 FROM json_each(je.value) member
-         WHERE member.key NOT IN ('business_system_id','config_version_id','verification_run_id','expected_current_config_version_id','expected_business_system_row_version')
-       )
-  )
-  OR (SELECT COUNT(*) FROM json_each(NEW.items_json)) <>
-     (SELECT COUNT(DISTINCT CAST(je.value ->> '$.business_system_id' AS INTEGER)) FROM json_each(NEW.items_json) je);
-  -- 2) 目标契约必须从未激活
-  SELECT RAISE(ABORT, 'activation target must be an unactivated draft')
-  WHERE EXISTS (SELECT 1 FROM label_contracts lc WHERE lc.id = NEW.contract_id AND lc.activated_at IS NOT NULL);
-  -- 3) 目标契约 row_version 前提匹配
-  SELECT RAISE(ABORT, 'activation target row_version mismatch')
-  WHERE NOT EXISTS (SELECT 1 FROM label_contracts lc WHERE lc.id = NEW.contract_id AND lc.row_version = NEW.expected_target_row_version);
-  -- 4) label_contract_state 前提匹配
-  SELECT RAISE(ABORT, 'activation state pointer/row_version mismatch')
-  WHERE NOT EXISTS (SELECT 1 FROM label_contract_state s
-    WHERE s.id = 1 AND s.row_version = NEW.expected_state_row_version
-      AND s.current_contract_id IS NEW.expected_current_contract_id);
-  -- 5) 覆盖：启用系统必须全部出现在 items_json，不得含禁用系统
-  SELECT RAISE(ABORT, 'activation items must cover every enabled system exactly once and no disabled system')
-  WHERE EXISTS (SELECT 1 FROM business_systems bs WHERE bs.enabled = 1 AND NOT EXISTS
-    (SELECT 1 FROM json_each(NEW.items_json) je
-     WHERE CAST(je.value ->> '$.business_system_id' AS INTEGER) = bs.id))
-  OR EXISTS (SELECT 1 FROM json_each(NEW.items_json) je
-     JOIN business_systems bs ON bs.id = CAST(je.value ->> '$.business_system_id' AS INTEGER)
-     WHERE bs.enabled = 0);
-  -- 6) 逐项闭合：config 属于该系统、未发布、以被激活契约为目标；并发前提匹配。
-  --    使用 json_each 遍历 items_json 中的每个 item 进行重验。
-  --    （Config Verification Run Passed 前置已随验证引擎退役。）
-  SELECT RAISE(ABORT, 'activation item validation failed')
-  WHERE EXISTS (
-    SELECT 1 FROM json_each(NEW.items_json) je
-    WHERE NOT EXISTS (
-      SELECT 1
-      FROM business_systems bs
-      JOIN business_system_config_versions v ON v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER)
-      WHERE bs.id = CAST(je.value ->> '$.business_system_id' AS INTEGER)
-        AND v.business_system_id = bs.id
-        AND v.published_at IS NULL
-        AND v.label_contract_version_id = NEW.contract_id
-        AND (CAST(je.value ->> '$.expected_current_config_version_id' AS INTEGER) IS bs.current_config_version_id
-             OR (je.value ->> '$.expected_current_config_version_id' IS NULL AND bs.current_config_version_id IS NULL))
-        AND CAST(je.value ->> '$.expected_business_system_row_version' AS INTEGER) = bs.row_version
-    )
-  );
-  -- 7) 原子切换全部系统 current 指针（级联触发 business_systems 指针/投影/row_version/发布派生守卫）
-  UPDATE business_systems SET
-    current_config_version_id = CAST(je.value ->> '$.config_version_id' AS INTEGER),
-    row_version = row_version + 1,
-    display_name = (SELECT display_name FROM business_system_config_versions v WHERE v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER)),
-    enabled = (SELECT enabled FROM business_system_config_versions v WHERE v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER)),
-    timezone = (SELECT timezone FROM business_system_config_versions v WHERE v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER))
-  FROM json_each(NEW.items_json) je
-  WHERE business_systems.id = CAST(je.value ->> '$.business_system_id' AS INTEGER);
-  -- 8) 更新 label_contract_state 指针对；匹配的未应用 activation_id 是唯一内部写入令牌。
-  UPDATE label_contract_state SET
-    current_contract_id = NEW.contract_id,
-    current_activation_id = NEW.id,
-    row_version = row_version + 1,
-    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-  WHERE id = 1;
-  -- 9) 契约激活事实（一次性）与旧契约退休（派生）
-  UPDATE label_contracts SET state = 'active', activated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), row_version = row_version + 1
-  WHERE id = NEW.contract_id AND state = 'draft';
-  UPDATE label_contracts SET state = 'retired', row_version = row_version + 1
-  WHERE id = NEW.expected_current_contract_id AND NEW.expected_current_contract_id IS NOT NULL AND state = 'active';
-  -- 10) 所有副作用完成后才封存 activation；此后该行不能再作为指针变更令牌。
-  UPDATE label_contract_activations SET applied_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-  WHERE id = NEW.id;
-END;
 -- 12.39 巡检运行闭合：每个 Run 冻结一个启用接入上的启用独立计划（ADR-0004）。
 -- 重新采证是唯一例外：它必须从一个已终止的同源 Run 逐字段复制不可变绑定，不
 -- 能被当前指针重写。
@@ -3758,7 +3522,7 @@ BEGIN SELECT RAISE(ABORT, 'model call context item must belong to the same Attem
 -- resurrect retired tool names. Per-agent catalog membership is enforced by
 -- Quoin before this insert; this trigger seals the global name set.
 CREATE TRIGGER trg_tool_call_fixed_name BEFORE INSERT ON tool_calls
-WHEN NEW.tool_name NOT IN ('bash','read','write','grep','artifact_read','artifact_grep','thanos_query')
+WHEN NEW.tool_name NOT IN ('bash','read','write','grep','artifact_read','artifact_grep','alerts_recent','thanos_query')
 BEGIN SELECT RAISE(ABORT, 'tool call name is not in the frozen catalog'); END;
 CREATE TRIGGER trg_tool_call_closure BEFORE INSERT ON tool_calls
 WHEN NEW.status <> 'pending' OR NOT EXISTS (
@@ -3931,18 +3695,6 @@ BEGIN
   SET state = 'Succeeded', ended_at = NEW.created_at, row_version = row_version + 1
   WHERE id = NEW.attempt_id AND state = 'Running';
 END;
-CREATE TRIGGER trg_config_plans_parent_frozen BEFORE INSERT ON config_plans
-WHEN NOT EXISTS (
-  SELECT 1 FROM business_system_config_versions v
-  WHERE v.id = NEW.config_version_id AND v.state = 'draft' AND v.published_at IS NULL
-)
-BEGIN SELECT RAISE(ABORT, 'config_plans can only be inserted while parent config is draft with no publications'); END;
-CREATE TRIGGER trg_config_checks_parent_frozen BEFORE INSERT ON config_checks
-WHEN NOT EXISTS (
-  SELECT 1 FROM config_plans p JOIN business_system_config_versions v ON v.id = p.config_version_id
-  WHERE p.id = NEW.plan_id AND v.state = 'draft' AND v.published_at IS NULL
-)
-BEGIN SELECT RAISE(ABORT, 'config_checks can only be inserted while parent config is draft with no publications'); END;
 -- check_key 只在其 plan 父作用域内唯一，因而不同 plan 可合法复用同一 check_key（DATA-CONFIG-004）。
 -- Immutable Inspection Report closure (T24b). Runtime inserts only the typed
 -- ledger; direct Report writes and a successful analysis without that ledger
@@ -4044,3 +3796,294 @@ WHEN NOT EXISTS (
   WHERE r.id=NEW.report_id
 )
 BEGIN SELECT RAISE(ABORT, 'inspection Report Knowledge reference must exactly match its immutable ResultProposal ledger'); END;
+
+
+CREATE TRIGGER trg_business_config_versions_insert_state_draft BEFORE INSERT ON business_system_config_versions
+WHEN NEW.state <> 'draft' OR NEW.published_at IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'config version must be created as an unpublished draft'); END;
+
+CREATE TRIGGER trg_business_config_versions_no_content_update BEFORE UPDATE OF
+  business_system_id, version_seq, yaml_body, parser_version, schema_version,
+  label_contract_version_id, declaration_json, description, discovery_refresh_seconds,
+  system_key, display_name, metrics_connection_id, enabled, timezone,
+  digest, created_by, created_at ON business_system_config_versions
+BEGIN SELECT RAISE(ABORT, 'business_system_config_version content is immutable'); END;
+
+CREATE TRIGGER trg_business_config_versions_published_at_once BEFORE UPDATE OF published_at ON business_system_config_versions
+WHEN (OLD.published_at IS NOT NULL AND NEW.published_at IS NOT OLD.published_at)
+  OR (OLD.published_at IS NULL AND NEW.published_at IS NOT NULL
+      AND NOT (OLD.state = 'draft' AND NEW.state = 'published'))
+BEGIN SELECT RAISE(ABORT, 'config version published_at is a derived one-time fact written only while entering published'); END;
+
+CREATE TRIGGER trg_business_config_versions_state_derived BEFORE UPDATE OF state ON business_system_config_versions
+WHEN NEW.state <> OLD.state AND NOT (
+  (OLD.state = 'draft' AND NEW.state = 'published'
+    AND NEW.published_at IS NOT NULL
+    AND EXISTS (SELECT 1 FROM business_systems WHERE current_config_version_id = NEW.id))
+  OR (OLD.state = 'published' AND NEW.state = 'superseded'
+    AND NOT EXISTS (SELECT 1 FROM business_systems WHERE current_config_version_id = NEW.id))
+)
+BEGIN SELECT RAISE(ABORT, 'config version state is derived from the business_systems current pointer and cannot be forged'); END;
+
+CREATE TRIGGER trg_business_config_versions_system_key_match BEFORE INSERT ON business_system_config_versions
+WHEN NEW.system_key <> (SELECT key FROM business_systems WHERE id = NEW.business_system_id)
+BEGIN SELECT RAISE(ABORT, 'config version system_key must equal the business system stable key'); END;
+
+CREATE TRIGGER trg_business_config_versions_system_key_match_update BEFORE UPDATE OF system_key ON business_system_config_versions
+WHEN NEW.system_key <> (SELECT key FROM business_systems WHERE id = NEW.business_system_id)
+BEGIN SELECT RAISE(ABORT, 'config version system_key must equal the business system stable key'); END;
+
+CREATE TRIGGER trg_business_config_versions_terminal_superseded BEFORE UPDATE OF state ON business_system_config_versions
+WHEN OLD.state = 'superseded' AND NEW.state <> 'superseded'
+BEGIN SELECT RAISE(ABORT, 'superseded config version is terminal'); END;
+
+CREATE TRIGGER trg_business_system_config_versions_no_delete BEFORE DELETE ON business_system_config_versions
+BEGIN SELECT RAISE(ABORT, 'business_system_config_versions history is not deletable'); END;
+
+CREATE TRIGGER trg_business_systems_config_owner_insert AFTER INSERT ON business_systems
+WHEN NEW.current_config_version_id IS NOT NULL AND NOT EXISTS
+  (SELECT 1 FROM business_system_config_versions v WHERE v.id = NEW.current_config_version_id AND v.business_system_id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'current_config_version_id must belong to the same business system'); END;
+
+CREATE TRIGGER trg_business_systems_config_owner_update BEFORE UPDATE OF current_config_version_id ON business_systems
+WHEN NEW.current_config_version_id IS NOT NULL AND (OLD.current_config_version_id IS NULL OR NEW.current_config_version_id IS NOT OLD.current_config_version_id)
+  AND NOT EXISTS (SELECT 1 FROM business_system_config_versions v
+                  WHERE v.id = NEW.current_config_version_id AND v.business_system_id = NEW.id AND v.published_at IS NULL)
+BEGIN SELECT RAISE(ABORT, 'current config pointer can only move to an unpublished version of the same business system'); END;
+
+CREATE TRIGGER trg_business_systems_identity_immutable BEFORE UPDATE OF key, created_at ON business_systems
+BEGIN SELECT RAISE(ABORT, 'business_system stable key is immutable'); END;
+
+CREATE TRIGGER trg_business_systems_insert_unconfigured BEFORE INSERT ON business_systems
+WHEN NEW.enabled <> 0 OR NEW.current_config_version_id IS NOT NULL
+  OR NEW.timezone IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'business_system must be created Disabled with no current config or published root projection'); END;
+
+CREATE TRIGGER trg_business_systems_no_delete BEFORE DELETE ON business_systems
+BEGIN SELECT RAISE(ABORT, 'business_systems are tombstone-only'); END;
+
+CREATE TRIGGER trg_business_systems_no_unset_config_pointer BEFORE UPDATE OF current_config_version_id ON business_systems
+WHEN OLD.current_config_version_id IS NOT NULL AND NEW.current_config_version_id IS NULL
+BEGIN SELECT RAISE(ABORT, 'business_systems current_config_version_id cannot be unset (no deactivation)'); END;
+
+CREATE TRIGGER trg_business_systems_pointer_projection_on_pointer_change BEFORE UPDATE OF current_config_version_id ON business_systems
+WHEN NEW.current_config_version_id IS NOT NULL AND (OLD.current_config_version_id IS NULL OR NEW.current_config_version_id IS NOT OLD.current_config_version_id) AND NOT EXISTS (
+  SELECT 1 FROM business_system_config_versions v
+  WHERE v.id = NEW.current_config_version_id
+    AND v.display_name = NEW.display_name AND v.enabled = NEW.enabled
+    AND v.timezone = NEW.timezone
+)
+BEGIN SELECT RAISE(ABORT, 'current pointer change must carry the target version root projection in the same UPDATE'); END;
+
+CREATE TRIGGER trg_business_systems_projection_matches_version BEFORE UPDATE OF display_name, enabled, timezone ON business_systems
+WHEN NEW.current_config_version_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM business_system_config_versions v
+  WHERE v.id = NEW.current_config_version_id
+    AND v.display_name = NEW.display_name AND v.enabled = NEW.enabled
+    AND v.timezone = NEW.timezone
+)
+BEGIN SELECT RAISE(ABORT, 'business_system root projection must equal its current config version root projection'); END;
+
+CREATE TRIGGER trg_business_systems_publish_derived AFTER UPDATE OF current_config_version_id ON business_systems
+WHEN NEW.current_config_version_id IS NOT NULL AND (OLD.current_config_version_id IS NULL OR NEW.current_config_version_id IS NOT OLD.current_config_version_id)
+BEGIN
+  UPDATE business_system_config_versions SET state = 'published', published_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+  WHERE id = NEW.current_config_version_id AND state = 'draft';
+  UPDATE business_system_config_versions SET state = 'superseded'
+  WHERE id = OLD.current_config_version_id AND OLD.current_config_version_id IS NOT NULL AND state = 'published';
+END;
+
+CREATE TRIGGER trg_business_systems_row_version_increment BEFORE UPDATE ON business_systems
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'business_systems row_version must increase exactly by 1'); END;
+
+CREATE TRIGGER trg_config_checks_no_delete BEFORE DELETE ON config_checks
+BEGIN SELECT RAISE(ABORT, 'config_checks is append-only'); END;
+
+CREATE TRIGGER trg_config_checks_no_update BEFORE UPDATE ON config_checks
+BEGIN SELECT RAISE(ABORT, 'config_checks is append-only'); END;
+
+CREATE TRIGGER trg_config_checks_parent_frozen BEFORE INSERT ON config_checks
+WHEN NOT EXISTS (
+  SELECT 1 FROM config_plans p JOIN business_system_config_versions v ON v.id = p.config_version_id
+  WHERE p.id = NEW.plan_id AND v.state = 'draft' AND v.published_at IS NULL
+)
+BEGIN SELECT RAISE(ABORT, 'config_checks can only be inserted while parent config is draft with no publications'); END;
+
+CREATE TRIGGER trg_config_plans_no_delete BEFORE DELETE ON config_plans
+BEGIN SELECT RAISE(ABORT, 'config_plans is append-only'); END;
+
+CREATE TRIGGER trg_config_plans_no_update BEFORE UPDATE ON config_plans
+BEGIN SELECT RAISE(ABORT, 'config_plans is append-only'); END;
+
+CREATE TRIGGER trg_config_plans_parent_frozen BEFORE INSERT ON config_plans
+WHEN NOT EXISTS (
+  SELECT 1 FROM business_system_config_versions v
+  WHERE v.id = NEW.config_version_id AND v.state = 'draft' AND v.published_at IS NULL
+)
+BEGIN SELECT RAISE(ABORT, 'config_plans can only be inserted while parent config is draft with no publications'); END;
+
+CREATE TRIGGER trg_investigation_source_links_creation_only BEFORE INSERT ON investigation_source_links
+WHEN NOT EXISTS (
+  SELECT 1 FROM investigations i WHERE i.id = NEW.investigation_id AND i.created_at = NEW.linked_at
+    AND NOT EXISTS (SELECT 1 FROM investigation_messages m WHERE m.investigation_id = i.id)
+)
+BEGIN SELECT RAISE(ABORT, 'investigation source links may only be frozen before the first Chat message'); END;
+
+CREATE TRIGGER trg_label_contract_activations_applied_once BEFORE UPDATE OF applied_at ON label_contract_activations
+WHEN OLD.applied_at IS NOT NULL OR NEW.applied_at IS NULL
+BEGIN SELECT RAISE(ABORT, 'label_contract_activation applied_at is a one-time fact'); END;
+
+CREATE TRIGGER trg_label_contract_activations_insert_unapplied BEFORE INSERT ON label_contract_activations
+WHEN NEW.applied_at IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'label_contract_activation must be inserted unapplied'); END;
+
+CREATE TRIGGER trg_label_contract_activations_no_content_update BEFORE UPDATE OF contract_id, expected_target_row_version, expected_state_row_version, expected_current_contract_id, items_json, created_at ON label_contract_activations
+BEGIN SELECT RAISE(ABORT, 'label_contract_activation command content is immutable'); END;
+
+CREATE TRIGGER trg_label_contract_activations_no_delete BEFORE DELETE ON label_contract_activations
+BEGIN SELECT RAISE(ABORT, 'label_contract_activation history is not deletable'); END;
+
+CREATE TRIGGER trg_label_contract_state_activate_atomic AFTER INSERT ON label_contract_activations
+BEGIN
+  -- 1) 命令 JSON 必须是封闭的 item 数组，系统只能出现一次。
+  SELECT RAISE(ABORT, 'activation items must be closed objects with typed fields and unique business_system_id')
+  WHERE EXISTS (
+    SELECT 1 FROM json_each(NEW.items_json) je
+    WHERE json_type(je.value) IS NOT 'object'
+       OR json_type(je.value, '$.business_system_id') IS NOT 'integer'
+       OR json_type(je.value, '$.config_version_id') IS NOT 'integer'
+       OR json_type(je.value, '$.verification_run_id') IS NOT 'integer'
+       OR json_type(je.value, '$.expected_business_system_row_version') IS NOT 'integer'
+       OR COALESCE(json_type(je.value, '$.expected_current_config_version_id'), 'missing') NOT IN ('integer','null')
+       OR EXISTS (
+         SELECT 1 FROM json_each(je.value) member
+         WHERE member.key NOT IN ('business_system_id','config_version_id','verification_run_id','expected_current_config_version_id','expected_business_system_row_version')
+       )
+  )
+  OR (SELECT COUNT(*) FROM json_each(NEW.items_json)) <>
+     (SELECT COUNT(DISTINCT CAST(je.value ->> '$.business_system_id' AS INTEGER)) FROM json_each(NEW.items_json) je);
+  -- 2) 目标契约必须从未激活
+  SELECT RAISE(ABORT, 'activation target must be an unactivated draft')
+  WHERE EXISTS (SELECT 1 FROM label_contracts lc WHERE lc.id = NEW.contract_id AND lc.activated_at IS NOT NULL);
+  -- 3) 目标契约 row_version 前提匹配
+  SELECT RAISE(ABORT, 'activation target row_version mismatch')
+  WHERE NOT EXISTS (SELECT 1 FROM label_contracts lc WHERE lc.id = NEW.contract_id AND lc.row_version = NEW.expected_target_row_version);
+  -- 4) label_contract_state 前提匹配
+  SELECT RAISE(ABORT, 'activation state pointer/row_version mismatch')
+  WHERE NOT EXISTS (SELECT 1 FROM label_contract_state s
+    WHERE s.id = 1 AND s.row_version = NEW.expected_state_row_version
+      AND s.current_contract_id IS NEW.expected_current_contract_id);
+  -- 5) 覆盖：启用系统必须全部出现在 items_json，不得含禁用系统
+  SELECT RAISE(ABORT, 'activation items must cover every enabled system exactly once and no disabled system')
+  WHERE EXISTS (SELECT 1 FROM business_systems bs WHERE bs.enabled = 1 AND NOT EXISTS
+    (SELECT 1 FROM json_each(NEW.items_json) je
+     WHERE CAST(je.value ->> '$.business_system_id' AS INTEGER) = bs.id))
+  OR EXISTS (SELECT 1 FROM json_each(NEW.items_json) je
+     JOIN business_systems bs ON bs.id = CAST(je.value ->> '$.business_system_id' AS INTEGER)
+     WHERE bs.enabled = 0);
+  -- 6) 逐项闭合：config 属于该系统、未发布、以被激活契约为目标；并发前提匹配。
+  --    使用 json_each 遍历 items_json 中的每个 item 进行重验。
+  --    （Config Verification Run Passed 前置已随验证引擎退役。）
+  SELECT RAISE(ABORT, 'activation item validation failed')
+  WHERE EXISTS (
+    SELECT 1 FROM json_each(NEW.items_json) je
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM business_systems bs
+      JOIN business_system_config_versions v ON v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER)
+      WHERE bs.id = CAST(je.value ->> '$.business_system_id' AS INTEGER)
+        AND v.business_system_id = bs.id
+        AND v.published_at IS NULL
+        AND v.label_contract_version_id = NEW.contract_id
+        AND (CAST(je.value ->> '$.expected_current_config_version_id' AS INTEGER) IS bs.current_config_version_id
+             OR (je.value ->> '$.expected_current_config_version_id' IS NULL AND bs.current_config_version_id IS NULL))
+        AND CAST(je.value ->> '$.expected_business_system_row_version' AS INTEGER) = bs.row_version
+    )
+  );
+  -- 7) 原子切换全部系统 current 指针（级联触发 business_systems 指针/投影/row_version/发布派生守卫）
+  UPDATE business_systems SET
+    current_config_version_id = CAST(je.value ->> '$.config_version_id' AS INTEGER),
+    row_version = row_version + 1,
+    display_name = (SELECT display_name FROM business_system_config_versions v WHERE v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER)),
+    enabled = (SELECT enabled FROM business_system_config_versions v WHERE v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER)),
+    timezone = (SELECT timezone FROM business_system_config_versions v WHERE v.id = CAST(je.value ->> '$.config_version_id' AS INTEGER))
+  FROM json_each(NEW.items_json) je
+  WHERE business_systems.id = CAST(je.value ->> '$.business_system_id' AS INTEGER);
+  -- 8) 更新 label_contract_state 指针对；匹配的未应用 activation_id 是唯一内部写入令牌。
+  UPDATE label_contract_state SET
+    current_contract_id = NEW.contract_id,
+    current_activation_id = NEW.id,
+    row_version = row_version + 1,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+  WHERE id = 1;
+  -- 9) 契约激活事实（一次性）与旧契约退休（派生）
+  UPDATE label_contracts SET state = 'active', activated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), row_version = row_version + 1
+  WHERE id = NEW.contract_id AND state = 'draft';
+  UPDATE label_contracts SET state = 'retired', row_version = row_version + 1
+  WHERE id = NEW.expected_current_contract_id AND NEW.expected_current_contract_id IS NOT NULL AND state = 'active';
+  -- 10) 所有副作用完成后才封存 activation；此后该行不能再作为指针变更令牌。
+  UPDATE label_contract_activations SET applied_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+  WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER trg_label_contract_state_no_delete BEFORE DELETE ON label_contract_state
+BEGIN SELECT RAISE(ABORT, 'label_contract_state is a single-row table'); END;
+
+CREATE TRIGGER trg_label_contract_state_no_direct_pointer_update BEFORE UPDATE OF current_contract_id, current_activation_id ON label_contract_state
+WHEN NEW.current_contract_id IS OLD.current_contract_id
+  OR NEW.current_activation_id IS OLD.current_activation_id
+  OR NOT EXISTS (
+    SELECT 1 FROM label_contract_activations a
+    WHERE a.id = NEW.current_activation_id
+      AND a.contract_id = NEW.current_contract_id
+      AND a.applied_at IS NULL
+  )
+BEGIN SELECT RAISE(ABORT, 'label_contract_state pointer pair can only be changed by the matching atomic activation INSERT'); END;
+
+CREATE TRIGGER trg_label_contract_state_no_insert_pointer BEFORE INSERT ON label_contract_state
+WHEN NEW.current_contract_id IS NOT NULL OR NEW.current_activation_id IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'label_contract_state pointer can only be set by the atomic activation INSERT'); END;
+
+CREATE TRIGGER trg_label_contract_state_no_unset BEFORE UPDATE OF current_contract_id, current_activation_id ON label_contract_state
+WHEN NEW.current_contract_id IS NULL OR NEW.current_activation_id IS NULL
+BEGIN SELECT RAISE(ABORT, 'label_contract_state pointer cannot be unset (no deactivation)'); END;
+
+CREATE TRIGGER trg_label_contract_state_row_version_increment BEFORE UPDATE ON label_contract_state
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'label_contract_state row_version must increase exactly by 1'); END;
+
+CREATE TRIGGER trg_label_contracts_activated_at_once BEFORE UPDATE OF activated_at ON label_contracts
+WHEN (OLD.activated_at IS NOT NULL AND NEW.activated_at IS NOT OLD.activated_at)
+  OR (OLD.activated_at IS NULL AND NEW.activated_at IS NOT NULL
+      AND NOT (OLD.state = 'draft' AND NEW.state = 'active'))
+BEGIN SELECT RAISE(ABORT, 'label_contract activated_at is a derived one-time fact written only while entering active'); END;
+
+CREATE TRIGGER trg_label_contracts_insert_state_draft BEFORE INSERT ON label_contracts
+WHEN NEW.state <> 'draft' OR NEW.activated_at IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'label_contract must be created as an unactivated draft'); END;
+
+CREATE TRIGGER trg_label_contracts_no_content_update BEFORE UPDATE OF
+  version, yaml_body, contract_json, digest, parser_version, schema_version, created_at ON label_contracts
+BEGIN SELECT RAISE(ABORT, 'label_contract content is immutable'); END;
+
+CREATE TRIGGER trg_label_contracts_no_delete BEFORE DELETE ON label_contracts
+BEGIN SELECT RAISE(ABORT, 'label_contracts history is not deletable'); END;
+
+CREATE TRIGGER trg_label_contracts_retired_terminal BEFORE UPDATE OF state ON label_contracts
+WHEN OLD.state = 'retired' AND NEW.state <> 'retired'
+BEGIN SELECT RAISE(ABORT, 'retired label_contract is terminal'); END;
+
+CREATE TRIGGER trg_label_contracts_row_version_increment BEFORE UPDATE ON label_contracts
+WHEN NEW.row_version <> OLD.row_version + 1
+BEGIN SELECT RAISE(ABORT, 'label_contracts row_version must increase exactly by 1'); END;
+
+CREATE TRIGGER trg_label_contracts_state_derived BEFORE UPDATE OF state ON label_contracts
+WHEN NEW.state <> OLD.state AND NOT (
+  (OLD.state = 'draft' AND NEW.state = 'active'
+    AND NEW.activated_at IS NOT NULL
+    AND EXISTS (SELECT 1 FROM label_contract_state WHERE current_contract_id = NEW.id))
+  OR (OLD.state = 'active' AND NEW.state = 'retired'
+    AND NOT EXISTS (SELECT 1 FROM label_contract_state WHERE current_contract_id = NEW.id))
+)
+BEGIN SELECT RAISE(ABORT, 'label_contract state is derived from the label_contract_state pointer and cannot be forged'); END;

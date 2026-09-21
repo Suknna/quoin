@@ -16,44 +16,41 @@ import (
 // Queries owns the unified alert read projections. Upstream occurrences and
 // platform faults retain distinct storage and lifecycles but share this safe,
 // non-secret representation for the existing alert list and detail surfaces.
-type AttributionDiagnostic struct {
-	Status                    string `json:"status"`
-	CandidateSystemIDs        string `json:"candidateSystemIdsJson"`
-	CandidateConfigVersionIDs string `json:"candidateConfigVersionIdsJson"`
-	Reason                    string `json:"reasonJson"`
+
+// AlertCorrelation 是一条冻结的视图关联证据（ADR-0012 Correlate 段）：首观测
+// 时命中的业务视图身份快照，视图改名/退役后不漂移。
+type AlertCorrelation struct {
+	ViewKey     string `json:"viewKey"`
+	DisplayName string `json:"displayName"`
 }
 
-// ViewAttributionDiagnostic surfaces the real business-view attribution
-// (ADR-0008). Attributed rows freeze their unique view identity; ambiguous
-// rows keep every candidate snapshot; unattributed rows carry the reason.
-// BusinessSystem/Attribution above are legacy declaration history and are
-// never recomputed.
-type ViewAttributionDiagnostic struct {
-	Status         string `json:"status"`
-	ViewKey        string `json:"viewKey,omitempty"`
-	ViewName       string `json:"viewName,omitempty"`
-	CandidatesJSON string `json:"candidatesJson"`
-	Reason         string `json:"reasonJson"`
-	CreatedAt      string `json:"createdAt"`
+// AlertEnrichment 是首观测冻结的富化投影（ADR-0012 Enrich 段）：fields 是
+// 按规则 priority 升序叠加、后命中不覆盖的终值；ruleKeys 是命中规则的溯源
+// key 列表（求值序），仅详情面返回，列表只投影 fields。
+type AlertEnrichment struct {
+	Fields   map[string]string `json:"fields"`
+	RuleKeys []string          `json:"ruleKeys,omitempty"`
 }
 
 type OccurrenceSummary struct {
 	// ID is an occurrence locator or platform:<fault-id>; Source is mandatory so
 	// consumers cannot mistake an internal fault for an Alertmanager occurrence.
-	ID              string                     `json:"id"`
-	Source          string                     `json:"source"`
-	State           string                     `json:"state"`
-	RowVersion      int64                      `json:"rowVersion"`
-	BusinessSystem  *string                    `json:"businessSystemKey,omitempty"`
-	Attribution     *AttributionDiagnostic     `json:"attribution,omitempty"`
-	ViewAttribution *ViewAttributionDiagnostic `json:"viewAttribution,omitempty"`
-	Component       string                     `json:"component,omitempty"`
-	Reason          string                     `json:"reason,omitempty"`
-	FirstSeenAt     string                     `json:"firstSeenAt"`
-	LastStateChange string                     `json:"lastStateChangeAt"`
-	ResolvedAt      *string                    `json:"resolvedAt,omitempty"`
-	Labels          map[string]string          `json:"labels"`
-	Annotations     map[string]string          `json:"annotations,omitempty"`
+	ID              string             `json:"id"`
+	Source          string             `json:"source"`
+	State           string             `json:"state"`
+	RowVersion      int64              `json:"rowVersion"`
+	Severity        string             `json:"severity"`
+	Title           string             `json:"title"`
+	Resource        string             `json:"resource,omitempty"`
+	Component       string             `json:"component,omitempty"`
+	Reason          string             `json:"reason,omitempty"`
+	FirstSeenAt     string             `json:"firstSeenAt"`
+	LastStateChange string             `json:"lastStateChangeAt"`
+	ResolvedAt      *string            `json:"resolvedAt,omitempty"`
+	Labels          map[string]string  `json:"labels"`
+	Annotations     map[string]string  `json:"annotations,omitempty"`
+	Correlations    []AlertCorrelation `json:"correlations"`
+	Enrichment      *AlertEnrichment   `json:"enrichment,omitempty"`
 }
 
 type AlertSnapshot struct {
@@ -62,38 +59,14 @@ type AlertSnapshot struct {
 	NextCursor  string              `json:"nextCursor,omitempty"`
 }
 
-// viewAttributionColumns is the shared projection list for the frozen
-// business-view attribution joined by both alert read queries. The surfaced
-// key/name are read from the frozen candidates snapshot's first element, so a
-// later view rename or retirement can never drift the historical identity.
-const viewAttributionColumns = `va.status, json_extract(va.candidates_json,'$[0].viewKey'), json_extract(va.candidates_json,'$[0].displayName'), va.candidates_json, va.reason_json, va.created_at`
-
-// viewAttributionJoin is the shared LEFT JOIN of the frozen projection;
-// attributed_view_id stays available for filtering, never for display.
-const viewAttributionJoin = `
-			LEFT JOIN alert_occurrence_view_attributions va ON va.occurrence_id=o.id`
-
-func scanViewAttribution(status, viewKey, viewName, candidates, reason, createdAt sql.NullString) *ViewAttributionDiagnostic {
-	if !status.Valid {
-		return nil
-	}
-	return &ViewAttributionDiagnostic{
-		Status: status.String, ViewKey: viewKey.String, ViewName: viewName.String,
-		CandidatesJSON: candidates.String, Reason: reason.String, CreatedAt: createdAt.String,
-	}
-}
-
-func occurrenceSummary(id int64, state string, version int64, businessKey sql.NullString, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason sql.NullString, first, changed string, resolved sql.NullString, labelsJSON string, annotationsJSON sql.NullString) (OccurrenceSummary, error) {
-	summary := OccurrenceSummary{ID: strconv.FormatInt(id, 10), Source: "alertmanager", State: state, RowVersion: version, FirstSeenAt: first, LastStateChange: changed}
-	if businessKey.Valid {
-		value := businessKey.String
-		summary.BusinessSystem = &value
-	}
-	if attributionStatus.Valid {
-		summary.Attribution = &AttributionDiagnostic{
-			Status: attributionStatus.String, CandidateSystemIDs: attributionSystemIDs.String,
-			CandidateConfigVersionIDs: attributionConfigIDs.String, Reason: attributionReason.String,
-		}
+// occurrenceSummaryRow 是 occurrence 列表/详情共享的行扫描形状：统一语义列
+// (severity/title/resource) 与 labels/annotations 快照均来自 alert_occurrences
+// 自身，不再从交付 body 现算 annotations，也不再投影任何业务系统归属。
+func occurrenceSummaryRow(id int64, state string, version int64, severity, title, resource, first, changed string, resolved sql.NullString, labelsJSON, annotationsJSON string) (OccurrenceSummary, error) {
+	summary := OccurrenceSummary{
+		ID: strconv.FormatInt(id, 10), Source: "alertmanager", State: state, RowVersion: version,
+		Severity: severity, Title: title, Resource: resource,
+		FirstSeenAt: first, LastStateChange: changed, Correlations: []AlertCorrelation{},
 	}
 	if resolved.Valid {
 		value := resolved.String
@@ -102,15 +75,17 @@ func occurrenceSummary(id int64, state string, version int64, businessKey sql.Nu
 	if err := json.Unmarshal([]byte(labelsJSON), &summary.Labels); err != nil {
 		return OccurrenceSummary{}, err
 	}
-	if annotationsJSON.Valid && annotationsJSON.String != "" {
-		if err := json.Unmarshal([]byte(annotationsJSON.String), &summary.Annotations); err != nil {
+	if annotationsJSON != "" && annotationsJSON != "{}" {
+		if err := json.Unmarshal([]byte(annotationsJSON), &summary.Annotations); err != nil {
 			return OccurrenceSummary{}, err
 		}
 	}
 	return summary, nil
 }
 
-func platformFaultSummary(id int64, component, reason, state string, version int64, first, last string, resolved sql.NullString) OccurrenceSummary {
+// platformFaultSummary 从 platform_faults 自身的语义列投影统一摘要
+// (ADR-0012：入库侧已冻结 severity/title/annotations，读侧不再伪造)。
+func platformFaultSummary(id int64, component, reason, state string, version int64, severity, title, first, last string, resolved sql.NullString, annotationsJSON string) OccurrenceSummary {
 	// Repeat disconnects only advance last_seen_at and emit no change-log event.
 	// Sort unified rows by a state transition time so those diagnostic repeats
 	// cannot reorder a client view without a corresponding SSE notification.
@@ -120,9 +95,13 @@ func platformFaultSummary(id int64, component, reason, state string, version int
 	}
 	summary := OccurrenceSummary{
 		ID: "platform:" + strconv.FormatInt(id, 10), Source: "platform", State: state, RowVersion: version,
-		Component: component, Reason: reason, FirstSeenAt: first, LastStateChange: lifecycleAt,
-		Labels:      map[string]string{"alertname": "Platform component unavailable", "component": component, "severity": "warning"},
-		Annotations: map[string]string{"summary": "内部组件 " + component + " 不可用", "description": reason},
+		Severity: severity, Title: title, Component: component, Reason: reason,
+		FirstSeenAt: first, LastStateChange: lifecycleAt,
+		Labels: map[string]string{}, Correlations: []AlertCorrelation{},
+	}
+	if annotationsJSON != "" && annotationsJSON != "{}" {
+		// 语义列由 platformFaultSemantics 以确定形状写入；解析失败保持缺省。
+		_ = json.Unmarshal([]byte(annotationsJSON), &summary.Annotations)
 	}
 	if resolved.Valid {
 		value := resolved.String
@@ -131,18 +110,108 @@ func platformFaultSummary(id int64, component, reason, state string, version int
 	return summary
 }
 
+// occurrenceColumns 是两处 occurrence 查询共享的投影列表（不含 o.id：列表
+// 查询自行前置，详情查询以路径 locator 定位）。
+const occurrenceColumns = `o.state,o.row_version,o.severity,o.title,o.resource,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,o.annotations_canonical`
+
+// loadCorrelations 按 matched_at 稳定序读取一批 occurrence 的关联证据；
+// occurrenceIDs 为空时直接返回空索引。
+func loadCorrelations(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, occurrenceIDs []int64) (map[int64][]AlertCorrelation, error) {
+	index := map[int64][]AlertCorrelation{}
+	if len(occurrenceIDs) == 0 {
+		return index, nil
+	}
+	placeholders := strings.Repeat("?,", len(occurrenceIDs))
+	args := make([]any, 0, len(occurrenceIDs))
+	for _, id := range occurrenceIDs {
+		args = append(args, id)
+	}
+	rows, err := q.QueryContext(ctx, `SELECT occurrence_id, view_key, display_name FROM alert_occurrence_correlations WHERE occurrence_id IN (`+placeholders[:len(placeholders)-1]+`) ORDER BY occurrence_id, matched_at, id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var occurrenceID int64
+		var correlation AlertCorrelation
+		if err := rows.Scan(&occurrenceID, &correlation.ViewKey, &correlation.DisplayName); err != nil {
+			return nil, err
+		}
+		index[occurrenceID] = append(index[occurrenceID], correlation)
+	}
+	return index, rows.Err()
+}
+
+// enrichmentDocumentRow 是 alert_enrichments 冻结文档的读取形状；withRuleKeys
+// 控制是否投影规则溯源（详情面专用，列表只给 fields）。
+func enrichmentProjection(documentJSON string, withRuleKeys bool) *AlertEnrichment {
+	var document struct {
+		Fields map[string]string `json:"fields"`
+		Rules  []struct {
+			Key string `json:"key"`
+		} `json:"rules"`
+	}
+	if err := json.Unmarshal([]byte(documentJSON), &document); err != nil {
+		// 冻结文档由本包写入且经 CHECK 约束；解析失败按空富化降级而非断读。
+		return &AlertEnrichment{Fields: map[string]string{}}
+	}
+	if document.Fields == nil {
+		document.Fields = map[string]string{}
+	}
+	projection := &AlertEnrichment{Fields: document.Fields}
+	if withRuleKeys {
+		projection.RuleKeys = []string{}
+		for _, rule := range document.Rules {
+			projection.RuleKeys = append(projection.RuleKeys, rule.Key)
+		}
+	}
+	return projection
+}
+
+// loadEnrichments 读取一批 occurrence 的富化 fields（列表投影，不带溯源）。
+func loadEnrichments(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, occurrenceIDs []int64) (map[int64]*AlertEnrichment, error) {
+	index := map[int64]*AlertEnrichment{}
+	if len(occurrenceIDs) == 0 {
+		return index, nil
+	}
+	placeholders := strings.Repeat("?,", len(occurrenceIDs))
+	args := make([]any, 0, len(occurrenceIDs))
+	for _, id := range occurrenceIDs {
+		args = append(args, id)
+	}
+	rows, err := q.QueryContext(ctx, `SELECT occurrence_id, enrichment_json FROM alert_enrichments WHERE occurrence_id IN (`+placeholders[:len(placeholders)-1]+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var occurrenceID int64
+		var documentJSON string
+		if err := rows.Scan(&occurrenceID, &documentJSON); err != nil {
+			return nil, err
+		}
+		index[occurrenceID] = enrichmentProjection(documentJSON, false)
+	}
+	return index, rows.Err()
+}
+
 // AlertSnapshot returns occurrences and independently durable platform faults.
-// Platform rows intentionally ignore businessSystemKey: no business was declared
-// and filtering them would imply fabricated attribution. viewKey filters by the
-// frozen business-view attribution (ADR-0008); businessSystemKey stays as the
-// legacy declaration filter.
+// Platform rows intentionally ignore viewKey: no business view was matched and
+// filtering them beside a view-scoped request would imply fabricated
+// correlation. viewKey filters by the frozen occurrence correlations
+// (ADR-0012): an occurrence is in scope when any frozen correlation row names
+// that view key.
 //
 // The watermark query and both unions run inside ONE read-only snapshot
 // transaction opened on the trusted execution.Reader (BeginSnapshot), so the
 // returned SnapshotSeq and items always describe the same committed state and
 // every statement degrades together: any failure rolls the whole snapshot
 // back, and only a clean read reaches the single Commit.
-func (service *Service) AlertSnapshot(ctx context.Context, state string, businessSystemKey string, viewKey string) (AlertSnapshot, error) {
+func (service *Service) AlertSnapshot(ctx context.Context, state string, viewKey string) (AlertSnapshot, error) {
 	if state != "Firing" && state != "Resolved" {
 		state = "Firing"
 	}
@@ -156,71 +225,74 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, busines
 		return AlertSnapshot{}, err
 	}
 	conditions, args := `o.state=?`, []any{state}
-	if businessSystemKey != "" {
-		conditions += ` AND o.business_system_id=(SELECT id FROM business_systems WHERE key=?)`
-		args = append(args, businessSystemKey)
-	}
 	if viewKey != "" {
-		conditions += ` AND va.attributed_view_id=(SELECT id FROM business_views WHERE view_key=?)`
+		conditions += ` AND EXISTS(SELECT 1 FROM alert_occurrence_correlations c WHERE c.occurrence_id=o.id AND c.view_key=?)`
 		args = append(args, viewKey)
 	}
-	rows, err := snapshot.QueryContext(ctx, `SELECT o.id,o.state,o.row_version,bs.key,attribution.status,attribution.candidate_system_ids_json,attribution.candidate_config_version_ids_json,attribution.reason_json,`+viewAttributionColumns+`,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,
-			(SELECT json_extract(d.body, '$.alerts[' || item.item_index || '].annotations')
-
-			 FROM alert_observations observation
-			 JOIN alert_delivery_items item ON item.id=observation.delivery_item_id
-			 JOIN alert_deliveries d ON d.id=observation.delivery_id
-			 WHERE observation.occurrence_id=o.id
-			 ORDER BY observation.committed_at ASC, observation.id ASC LIMIT 1)
+	rows, err := snapshot.QueryContext(ctx, `SELECT o.id,`+occurrenceColumns+`
 			FROM alert_occurrences o
-			LEFT JOIN business_systems bs ON bs.id=o.business_system_id
-			LEFT JOIN alert_occurrence_attributions attribution ON attribution.occurrence_id=o.id
-			`+viewAttributionJoin+`
 			WHERE `+conditions, args...)
 	if err != nil {
 		return AlertSnapshot{}, err
 	}
 	items := []OccurrenceSummary{}
+	occurrenceIDs := []int64{}
 	for rows.Next() {
 		var id, version int64
-		var summaryState, first, changed, labels string
-		var businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, resolved, annotations sql.NullString
-		var viewStatus, viewKeyDB, viewName, viewCandidates, viewReason, viewCreatedAt sql.NullString
-		if err := rows.Scan(&id, &summaryState, &version, &businessKey, &attributionStatus, &attributionSystemIDs, &attributionConfigIDs, &attributionReason,
-			&viewStatus, &viewKeyDB, &viewName, &viewCandidates, &viewReason, &viewCreatedAt,
-			&first, &changed, &resolved, &labels, &annotations); err != nil {
-
+		var summaryState, severity, title, resource, first, changed, labels, annotations string
+		var resolved sql.NullString
+		if err := rows.Scan(&id, &summaryState, &version, &severity, &title, &resource, &first, &changed, &resolved, &labels, &annotations); err != nil {
 			rows.Close()
 			return AlertSnapshot{}, err
 		}
-		summary, err := occurrenceSummary(id, summaryState, version, businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, first, changed, resolved, labels, annotations)
+		summary, err := occurrenceSummaryRow(id, summaryState, version, severity, title, resource, first, changed, resolved, labels, annotations)
 		if err != nil {
 			rows.Close()
 			return AlertSnapshot{}, err
 		}
-		summary.ViewAttribution = scanViewAttribution(viewStatus, viewKeyDB, viewName, viewCandidates, viewReason, viewCreatedAt)
 		items = append(items, summary)
+		occurrenceIDs = append(occurrenceIDs, id)
 	}
 	if err := rows.Close(); err != nil {
 		return AlertSnapshot{}, err
 	}
-	// Platform faults join the unified list only on unfiltered reads: both
-	// attribution filters scope to Alertmanager occurrences, and listing them
-	// beside a view-filtered request would imply fabricated attribution.
-	if businessSystemKey == "" && viewKey == "" {
-		faultRows, err := snapshot.QueryContext(ctx, `SELECT id,component,reason,state,row_version,first_seen_at,last_seen_at,resolved_at FROM platform_faults WHERE state=?`, state)
+	// 关联与富化在同一只读快照内补齐，保证与列表行同刻一致。
+	correlations, err := loadCorrelations(ctx, snapshot, occurrenceIDs)
+	if err != nil {
+		return AlertSnapshot{}, err
+	}
+	enrichments, err := loadEnrichments(ctx, snapshot, occurrenceIDs)
+	if err != nil {
+		return AlertSnapshot{}, err
+	}
+	for index := range items {
+		id, _ := strconv.ParseInt(items[index].ID, 10, 64)
+		items[index].Correlations = correlations[id]
+		if items[index].Correlations == nil {
+			items[index].Correlations = []AlertCorrelation{}
+		}
+		if enrichment, ok := enrichments[id]; ok {
+			items[index].Enrichment = enrichment
+		}
+	}
+	// Platform faults join the unified list only on unfiltered reads: the view
+	// correlation filter scopes to Alertmanager occurrences, and listing them
+	// beside a view-scoped request would imply fabricated correlation.
+	if viewKey == "" {
+		faultRows, err := snapshot.QueryContext(ctx, `SELECT id,component,reason,state,row_version,severity,title,first_seen_at,last_seen_at,resolved_at,annotations_canonical FROM platform_faults WHERE state=?`, state)
 		if err != nil {
 			return AlertSnapshot{}, err
 		}
 		for faultRows.Next() {
 			var id, version int64
-			var component, reason, faultState, first, last string
+			var component, reason, faultState, severity, title, first, last string
 			var resolved sql.NullString
-			if err := faultRows.Scan(&id, &component, &reason, &faultState, &version, &first, &last, &resolved); err != nil {
+			var annotations string
+			if err := faultRows.Scan(&id, &component, &reason, &faultState, &version, &severity, &title, &first, &last, &resolved, &annotations); err != nil {
 				faultRows.Close()
 				return AlertSnapshot{}, err
 			}
-			items = append(items, platformFaultSummary(id, component, reason, faultState, version, first, last, resolved))
+			items = append(items, platformFaultSummary(id, component, reason, faultState, version, severity, title, first, last, resolved, annotations))
 		}
 		if err := faultRows.Close(); err != nil {
 			return AlertSnapshot{}, err
@@ -240,52 +312,62 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, busines
 	return AlertSnapshot{SnapshotSeq: seq, Items: items}, nil
 }
 
-// GetAlert resolves either member of the explicit unified alert union.
+// GetAlert resolves either member of the explicit unified alert union. 详情
+// 面的富化投影附带 ruleKeys 溯源（求值序）；关联按 matched_at 稳定序返回。
 func (service *Service) GetAlert(ctx context.Context, alertID string) (OccurrenceSummary, error) {
 	if strings.HasPrefix(alertID, "platform:") {
 		id, err := strconv.ParseInt(strings.TrimPrefix(alertID, "platform:"), 10, 64)
 		if err != nil || id <= 0 {
 			return OccurrenceSummary{}, sql.ErrNoRows
 		}
-		var component, reason, state, first, last string
+		var component, reason, state, severity, title, first, last, annotations string
 		var version int64
 		var resolved sql.NullString
-		err = service.runner.Reader().QueryRowContext(ctx, `SELECT component,reason,state,row_version,first_seen_at,last_seen_at,resolved_at FROM platform_faults WHERE id=?`, id).Scan(&component, &reason, &state, &version, &first, &last, &resolved)
+		err = service.runner.Reader().QueryRowContext(ctx, `SELECT component,reason,state,row_version,severity,title,first_seen_at,last_seen_at,resolved_at,annotations_canonical FROM platform_faults WHERE id=?`, id).
+			Scan(&component, &reason, &state, &version, &severity, &title, &first, &last, &resolved, &annotations)
 		if err != nil {
 			return OccurrenceSummary{}, err
 		}
-		return platformFaultSummary(id, component, reason, state, version, first, last, resolved), nil
+		return platformFaultSummary(id, component, reason, state, version, severity, title, first, last, resolved, annotations), nil
 	}
 	id, err := strconv.ParseInt(alertID, 10, 64)
 	if err != nil || id <= 0 {
 		return OccurrenceSummary{}, sql.ErrNoRows
 	}
-	var summaryState, first, changed, labels string
+	var summaryState, severity, title, resource, first, changed, labels, annotations string
 	var version int64
-	var businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, resolved, annotations sql.NullString
-	var viewStatus, viewKeyDB, viewName, viewCandidates, viewReason, viewCreatedAt sql.NullString
-	err = service.runner.Reader().QueryRowContext(ctx, `SELECT o.state,o.row_version,bs.key,attribution.status,attribution.candidate_system_ids_json,attribution.candidate_config_version_ids_json,attribution.reason_json,`+viewAttributionColumns+`,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,
-		(SELECT json_extract(d.body, '$.alerts[' || item.item_index || '].annotations')
-		 FROM alert_observations observation
-		 JOIN alert_delivery_items item ON item.id=observation.delivery_item_id
-		 JOIN alert_deliveries d ON d.id=observation.delivery_id
-		 WHERE observation.occurrence_id=o.id
-		 ORDER BY observation.committed_at ASC, observation.id ASC LIMIT 1)
+	var resolved sql.NullString
+	err = service.runner.Reader().QueryRowContext(ctx, `SELECT `+occurrenceColumns+`
 		FROM alert_occurrences o
-		LEFT JOIN business_systems bs ON bs.id=o.business_system_id
-		LEFT JOIN alert_occurrence_attributions attribution ON attribution.occurrence_id=o.id
-		`+viewAttributionJoin+`
-		WHERE o.id=?`, id).Scan(&summaryState, &version, &businessKey, &attributionStatus, &attributionSystemIDs, &attributionConfigIDs, &attributionReason,
-		&viewStatus, &viewKeyDB, &viewName, &viewCandidates, &viewReason, &viewCreatedAt,
-		&first, &changed, &resolved, &labels, &annotations)
+		WHERE o.id=?`, id).Scan(&summaryState, &version, &severity, &title, &resource, &first, &changed, &resolved, &labels, &annotations)
 	if err != nil {
 		return OccurrenceSummary{}, err
 	}
-	summary, err := occurrenceSummary(id, summaryState, version, businessKey, attributionStatus, attributionSystemIDs, attributionConfigIDs, attributionReason, first, changed, resolved, labels, annotations)
+	summary, err := occurrenceSummaryRow(id, summaryState, version, severity, title, resource, first, changed, resolved, labels, annotations)
 	if err != nil {
 		return OccurrenceSummary{}, err
 	}
-	summary.ViewAttribution = scanViewAttribution(viewStatus, viewKeyDB, viewName, viewCandidates, viewReason, viewCreatedAt)
+	correlationRows, err := service.runner.Reader().QueryContext(ctx, `SELECT view_key, display_name FROM alert_occurrence_correlations WHERE occurrence_id=? ORDER BY matched_at, id`, id)
+	if err != nil {
+		return OccurrenceSummary{}, err
+	}
+	defer correlationRows.Close()
+	for correlationRows.Next() {
+		var correlation AlertCorrelation
+		if err := correlationRows.Scan(&correlation.ViewKey, &correlation.DisplayName); err != nil {
+			return OccurrenceSummary{}, err
+		}
+		summary.Correlations = append(summary.Correlations, correlation)
+	}
+	if err := correlationRows.Err(); err != nil {
+		return OccurrenceSummary{}, err
+	}
+	var documentJSON string
+	if err := service.runner.Reader().QueryRowContext(ctx, `SELECT enrichment_json FROM alert_enrichments WHERE occurrence_id=?`, id).Scan(&documentJSON); err == nil {
+		summary.Enrichment = enrichmentProjection(documentJSON, true)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return OccurrenceSummary{}, err
+	}
 	return summary, nil
 }
 
