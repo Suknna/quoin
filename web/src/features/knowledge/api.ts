@@ -1,244 +1,352 @@
-import { newClientCommandId, request as workbenchRequest } from "@/api/workbench"
+import {
+	newClientCommandId,
+	request as workbenchRequest,
+} from "@/api/workbench";
 
 // Knowledge candidate and knowledge API (T27): create-or-return from the
 // three diagnosis sources, revisioned draft edits, the human confirmation
 // boundary, and the browse/version projections.
 
-export type CandidateState = 'AwaitingConfirmation' | 'Confirmed' | 'Excluded' | 'Superseded' | 'SourceInvalid'
+export type CandidateState =
+	| "AwaitingConfirmation"
+	| "Confirmed"
+	| "Excluded"
+	| "Superseded"
+	| "SourceInvalid";
 
-export type CandidateSourceType = 'initial_analysis_output' | 'inspection_report' | 'investigation_message' | 'source_material' | 'knowledge_version'
+export type CandidateSourceType =
+	| "initial_analysis_output"
+	| "inspection_report"
+	| "investigation_message"
+	| "source_material"
+	| "knowledge_version";
 
 export interface CandidateSummary {
-  id: string
-  sourceType: CandidateSourceType
-  sourceId: string
-  state: CandidateState
-  rowVersion: number
-  generation: number
-  draftRevision: number
-  draftTitle?: string
-  draftBody?: string
-  draftScope?: Record<string, unknown>
-  targetKnowledgeId?: string
-  confirmedKnowledgeId?: string
+	id: string;
+	sourceType: CandidateSourceType;
+	sourceId: string;
+	state: CandidateState;
+	rowVersion: number;
+	generation: number;
+	draftRevision: number;
+	draftTitle?: string;
+	draftBody?: string;
+	draftScope?: Record<string, unknown>;
+	targetKnowledgeId?: string;
+	confirmedKnowledgeId?: string;
 }
 
 export interface CandidateSuggestionSource {
-  type: CandidateSourceType
-  id: string
-  modelId?: string
-  createdAt?: string
-  locator?: Record<string, number | string>
+	type: CandidateSourceType;
+	id: string;
+	modelId?: string;
+	createdAt?: string;
+	locator?: Record<string, number | string>;
 }
 
 export interface CandidateSuggestion {
-  v: number
-  source: CandidateSuggestionSource
-  title: string
-  body: string
+	v: number;
+	source: CandidateSuggestionSource;
+	title: string;
+	body: string;
 }
 
 export interface CandidateDetail extends CandidateSummary {
-  originalSuggestion: CandidateSuggestion
+	originalSuggestion: CandidateSuggestion;
 }
 
 export interface KnowledgeSummary {
-  id: string
-  title: string
-  currentVersionId: string
-  currentVersionSeq: number
-  eligible: boolean
-  rowVersion: number
+	id: string;
+	title: string;
+	currentVersionId: string;
+	currentVersionSeq: number;
+	eligible: boolean;
+	rowVersion: number;
 }
 
 export interface KnowledgeDetail extends KnowledgeSummary {
-  versionCount: number
+	versionCount: number;
 }
 
 // index/embedding 状态的人类标签（UI-KNOWLEDGE-002/005：分数与索引状态并列展示）。
 export const indexStateLabels: Record<string, string> = {
-  ready: '语义索引就绪',
-  stale: '语义索引已换代（结果来自旧一代索引）',
-  rebuilding: '语义索引重建中',
-}
+	ready: "语义索引就绪",
+	stale: "语义索引已换代（结果来自旧一代索引）",
+	rebuilding: "语义索引重建中",
+};
 
 export const embeddingStateLabels: Record<string, string> = {
-  not_configured: '未配置语义索引',
-  pending: '语义索引生成中',
-  ready: '语义索引就绪',
-  failed: '语义索引生成失败',
-  stale: '语义索引待重建',
-  rebuilding: '语义索引重建中',
-}
+	not_configured: "未配置",
+	pending: "生成中",
+	ready: "就绪",
+	failed: "生成失败",
+	stale: "待重建",
+	rebuilding: "重建中",
+};
 
 export interface KnowledgeSearchHit {
-  knowledge: KnowledgeSummary
-  score: number
-  indexState?: 'ready' | 'stale' | 'rebuilding'
+	knowledge: KnowledgeSummary;
+	score: number;
+	indexState?: "ready" | "stale" | "rebuilding";
 }
 
 export interface KnowledgeQueryResult {
-  mode: 'query'
-  exactTextMatches: KnowledgeSearchHit[]
-  semanticMatches: KnowledgeSearchHit[]
-  nextCursor?: string
+	mode: "query";
+	exactTextMatches: KnowledgeSearchHit[];
+	semanticMatches: KnowledgeSearchHit[];
+	nextCursor?: string;
 }
 
 export interface KnowledgeVersionSummary {
-  id: string
-  versionSeq: number
-  title: string
-  sourceCandidateId: string
-  embeddingState: string
-  createdAt: string
-  eligible: boolean
-  retrievalStateRowVersion: number
+	id: string;
+	versionSeq: number;
+	title: string;
+	sourceCandidateId: string;
+	embeddingState: string;
+	createdAt: string;
+	eligible: boolean;
+	retrievalStateRowVersion: number;
 }
 
 export interface KnowledgeVersionDetail {
-  id: string
-  versionSeq: number
-  title: string
-  body: string
-  scope?: Record<string, unknown>
-  sourceCandidateId: string
-  createdAt: string
-  eligible: boolean
-  retrievalStateRowVersion: number
-  embeddingState: string
-  exitedAt?: string
-  exitReason?: string
+	id: string;
+	versionSeq: number;
+	title: string;
+	body: string;
+	scope?: Record<string, unknown>;
+	conditions?: Record<string, unknown>;
+	limitations?: Record<string, unknown>;
+	sourceCandidateId: string;
+	createdAt: string;
+	eligible: boolean;
+	retrievalStateRowVersion: number;
+	embeddingState: string;
+	exitedAt?: string;
+	exitReason?: string;
 }
 
 export interface ImportBatchSummary {
-  id: string
-  state: 'Processing' | 'AwaitingConfirmation' | 'Failed' | 'Completed' | 'Cancelled'
-  rowVersion: number
-  generation: number
-  createdAt: string
+	id: string;
+	state:
+		| "Processing"
+		| "AwaitingConfirmation"
+		| "Failed"
+		| "Completed"
+		| "Cancelled";
+	rowVersion: number;
+	generation: number;
+	createdAt: string;
 }
 
 export interface ImportBatchDetail extends ImportBatchSummary {
-  candidates: CandidateSummary[]
+	candidates: CandidateSummary[];
 }
 
 export interface Page<T> {
-  items: T[]
-  nextCursor?: string
+	items: T[];
+	nextCursor?: string;
 }
 
 export interface ConflictInfo {
-  code: string
-  currentRevision?: number
-  currentRowVersion?: number
-  state?: string
+	code: string;
+	currentRevision?: number;
+	currentRowVersion?: number;
+	state?: string;
 }
 
 export class CommandConflictError extends Error {
-  constructor(readonly conflict: ConflictInfo | null) {
-    super(conflict?.currentRevision !== undefined
-      ? '草稿已被更新，请基于最新版本修改。'
-      : '候选状态已变化，请刷新后重试。')
-  }
+	constructor(readonly conflict: ConflictInfo | null) {
+		super(
+			conflict?.currentRevision !== undefined
+				? "草稿已被更新，请基于最新版本修改。"
+				: "候选状态已变化，请刷新后重试。",
+		);
+	}
 }
 
 export const candidateStateLabels: Record<CandidateState, string> = {
-  AwaitingConfirmation: '待确认',
-  Confirmed: '已确认',
-  Excluded: '已排除',
-  Superseded: '已取代',
-  SourceInvalid: '来源无效',
-}
+	AwaitingConfirmation: "待确认",
+	Confirmed: "已确认",
+	Excluded: "已排除",
+	Superseded: "已取代",
+	SourceInvalid: "来源无效",
+};
 
-export const batchStateLabels: Record<ImportBatchSummary['state'], string> = {
-  Processing: '处理中',
-  AwaitingConfirmation: '待确认',
-  Completed: '已完成',
-  Cancelled: '已取消',
-  Failed: '失败',
-}
+export const batchStateLabels: Record<ImportBatchSummary["state"], string> = {
+	Processing: "处理中",
+	AwaitingConfirmation: "待确认",
+	Completed: "已完成",
+	Cancelled: "已取消",
+	Failed: "失败",
+};
 
 export const candidateSourceLabels: Record<CandidateSourceType, string> = {
-  initial_analysis_output: '初步分析',
-  inspection_report: '巡检报告',
-  investigation_message: '调查消息',
-  source_material: '导入原文',
-  knowledge_version: '知识修订',
-}
+	initial_analysis_output: "初步分析",
+	inspection_report: "巡检报告",
+	investigation_message: "调查消息",
+	source_material: "导入原文",
+	knowledge_version: "知识修订",
+};
 
-export const knowledgeCommandId = newClientCommandId
+export const knowledgeCommandId = newClientCommandId;
 
 // Command bodies are created once by the caller, so retrying the identical
 // RequestInit through the shared workbench request preserves clientCommandId
 // across transient transport failures.
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  return workbenchRequest<T>(path, init, true, {
-    retryTransient: true,
-    conflict: (body) =>
-      new CommandConflictError(
-        (body as { conflict?: ConflictInfo } | null)?.conflict ?? null,
-      ),
-  })
+	return workbenchRequest<T>(path, init, true, {
+		retryTransient: true,
+		conflict: (body) =>
+			new CommandConflictError(
+				(body as { conflict?: ConflictInfo } | null)?.conflict ?? null,
+			),
+	});
 }
 
 function commandBody(extra: Record<string, unknown>): string {
-  return JSON.stringify({ clientCommandId: knowledgeCommandId(), ...extra })
+	return JSON.stringify({ clientCommandId: knowledgeCommandId(), ...extra });
 }
 
 export const api = {
-  createAnalysisCandidate: (occurrenceId: string, analysisId: string) =>
-    request<CandidateSummary>(`/api/v1/alerts/${occurrenceId}/analyses/${analysisId}/knowledge-candidates`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({}),
-    }),
-  createMessageCandidate: (investigationId: string, messageId: string) =>
-    request<CandidateSummary>(`/api/v1/investigations/${investigationId}/knowledge-candidates`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: commandBody({ sourceType: 'investigation_message', sourceId: messageId }),
-    }),
-  createReportCandidate: (runId: string, reportVersion: number) =>
-    request<CandidateSummary>(`/api/v1/inspections/runs/${runId}/reports/${reportVersion}/knowledge-candidates`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({}),
-    }),
-  listCandidates: (query = '', cursor?: string) =>
-    request<Page<CandidateSummary>>(`/api/v1/knowledge/candidates${query}${cursor ? `${query ? '&' : '?'}cursor=${encodeURIComponent(cursor)}` : ''}`),
-  getCandidate: (candidateId: string) =>
-    request<CandidateDetail>(`/api/v1/knowledge/candidates/${candidateId}`),
-  editDraft: (candidateId: string, expectedRevision: number, changes: { title?: string; body?: string; scope?: Record<string, unknown> }) =>
-    request<CandidateSummary>(`/api/v1/knowledge/candidates/${candidateId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: commandBody({ expectedRevision, ...changes }),
-    }),
-  confirm: (candidateId: string, expectedRevision: number) =>
-    request<CandidateSummary>(`/api/v1/knowledge/candidates/${candidateId}/confirm`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ expectedRevision }),
-    }),
-  exclude: (candidateId: string, expectedRowVersion: number) =>
-    request<CandidateSummary>(`/api/v1/knowledge/candidates/${candidateId}/exclude`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ expectedRowVersion }),
-    }),
-  browse: (cursor?: string) => request<{ mode: 'browse'; items: KnowledgeSummary[]; nextCursor?: string }>(`/api/v1/knowledge${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
-  search: (query: string, cursor?: string) => request<KnowledgeQueryResult>(`/api/v1/knowledge?q=${encodeURIComponent(query)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
-  getKnowledge: (knowledgeId: string) =>
-    request<KnowledgeDetail>(`/api/v1/knowledge/items/${knowledgeId}`),
-  listVersions: (knowledgeId: string, cursor?: string) =>
-    request<Page<KnowledgeVersionSummary>>(`/api/v1/knowledge/items/${knowledgeId}/versions${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
-  getVersion: (knowledgeId: string, versionId: string) =>
-    request<KnowledgeVersionDetail>(`/api/v1/knowledge/items/${knowledgeId}/versions/${versionId}`),
-  startImport: (text: string) => request<ImportBatchDetail>('/api/v1/knowledge/import-batches', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ text }),
-  }),
-  listImportBatches: (cursor?: string) => request<Page<ImportBatchSummary>>(`/api/v1/knowledge/import-batches${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
-  getImportBatch: (batchId: string) => request<ImportBatchDetail>(`/api/v1/knowledge/import-batches/${batchId}`),
-  confirmBatch: (batchId: string, items: Array<{ candidateId: string; expectedRevision: number }>) => request<ImportBatchDetail>(`/api/v1/knowledge/import-batches/${batchId}/confirm`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ items }),
-  }),
-  cancelBatch: (batchId: string, expectedRowVersion: number) => request<ImportBatchDetail>(`/api/v1/knowledge/import-batches/${batchId}/cancel`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ expectedRowVersion }),
-  }),
-  createRevision: (knowledgeId: string, expectedCurrentVersionId: string, expectedRowVersion: number) => request<CandidateSummary>(`/api/v1/knowledge/items/${knowledgeId}/versions`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ expectedCurrentVersionId, expectedRowVersion }),
-  }),
-  stopReuse: (knowledgeId: string, versionId: string, expectedRowVersion: number) => request<void>(`/api/v1/knowledge/items/${knowledgeId}/versions/${versionId}/stop-reuse`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: commandBody({ expectedRowVersion }),
-  }),
-}
+	createAnalysisCandidate: (occurrenceId: string, analysisId: string) =>
+		request<CandidateSummary>(
+			`/api/v1/alerts/${occurrenceId}/analyses/${analysisId}/knowledge-candidates`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: commandBody({}),
+			},
+		),
+	createMessageCandidate: (investigationId: string, messageId: string) =>
+		request<CandidateSummary>(
+			`/api/v1/investigations/${investigationId}/knowledge-candidates`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: commandBody({
+					sourceType: "investigation_message",
+					sourceId: messageId,
+				}),
+			},
+		),
+	createReportCandidate: (runId: string, reportVersion: number) =>
+		request<CandidateSummary>(
+			`/api/v1/inspections/runs/${runId}/reports/${reportVersion}/knowledge-candidates`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: commandBody({}),
+			},
+		),
+	listCandidates: (query = "", cursor?: string) =>
+		request<Page<CandidateSummary>>(
+			`/api/v1/knowledge/candidates${query}${cursor ? `${query ? "&" : "?"}cursor=${encodeURIComponent(cursor)}` : ""}`,
+		),
+	getCandidate: (candidateId: string) =>
+		request<CandidateDetail>(`/api/v1/knowledge/candidates/${candidateId}`),
+	editDraft: (
+		candidateId: string,
+		expectedRevision: number,
+		changes: { title?: string; body?: string; scope?: Record<string, unknown> },
+	) =>
+		request<CandidateSummary>(`/api/v1/knowledge/candidates/${candidateId}`, {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: commandBody({ expectedRevision, ...changes }),
+		}),
+	confirm: (candidateId: string, expectedRevision: number) =>
+		request<CandidateSummary>(
+			`/api/v1/knowledge/candidates/${candidateId}/confirm`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: commandBody({ expectedRevision }),
+			},
+		),
+	exclude: (candidateId: string, expectedRowVersion: number) =>
+		request<CandidateSummary>(
+			`/api/v1/knowledge/candidates/${candidateId}/exclude`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: commandBody({ expectedRowVersion }),
+			},
+		),
+	browse: (cursor?: string) =>
+		request<{ mode: "browse"; items: KnowledgeSummary[]; nextCursor?: string }>(
+			`/api/v1/knowledge${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+		),
+	search: (query: string, cursor?: string) =>
+		request<KnowledgeQueryResult>(
+			`/api/v1/knowledge?q=${encodeURIComponent(query)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+		),
+	getKnowledge: (knowledgeId: string) =>
+		request<KnowledgeDetail>(`/api/v1/knowledge/items/${knowledgeId}`),
+	listVersions: (knowledgeId: string, cursor?: string) =>
+		request<Page<KnowledgeVersionSummary>>(
+			`/api/v1/knowledge/items/${knowledgeId}/versions${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+		),
+	getVersion: (knowledgeId: string, versionId: string) =>
+		request<KnowledgeVersionDetail>(
+			`/api/v1/knowledge/items/${knowledgeId}/versions/${versionId}`,
+		),
+	startImport: (text: string) =>
+		request<ImportBatchDetail>("/api/v1/knowledge/import-batches", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: commandBody({ text }),
+		}),
+	listImportBatches: (cursor?: string) =>
+		request<Page<ImportBatchSummary>>(
+			`/api/v1/knowledge/import-batches${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+		),
+	getImportBatch: (batchId: string) =>
+		request<ImportBatchDetail>(`/api/v1/knowledge/import-batches/${batchId}`),
+	confirmBatch: (
+		batchId: string,
+		items: Array<{ candidateId: string; expectedRevision: number }>,
+	) =>
+		request<ImportBatchDetail>(
+			`/api/v1/knowledge/import-batches/${batchId}/confirm`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: commandBody({ items }),
+			},
+		),
+	cancelBatch: (batchId: string, expectedRowVersion: number) =>
+		request<ImportBatchDetail>(
+			`/api/v1/knowledge/import-batches/${batchId}/cancel`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: commandBody({ expectedRowVersion }),
+			},
+		),
+	createRevision: (
+		knowledgeId: string,
+		expectedCurrentVersionId: string,
+		expectedRowVersion: number,
+	) =>
+		request<CandidateSummary>(
+			`/api/v1/knowledge/items/${knowledgeId}/versions`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: commandBody({ expectedCurrentVersionId, expectedRowVersion }),
+			},
+		),
+	stopReuse: (
+		knowledgeId: string,
+		versionId: string,
+		expectedRowVersion: number,
+	) =>
+		request<void>(
+			`/api/v1/knowledge/items/${knowledgeId}/versions/${versionId}/stop-reuse`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: commandBody({ expectedRowVersion }),
+			},
+		),
+};

@@ -15,6 +15,44 @@ const json = <T extends JsonBodyType>(body: T, init?: ResponseInit) =>
 const problem = (status: number, message: string, code = "mock_error") =>
 	json({ message, detail: message, code }, { status });
 const page = <T>(items: T[]) => json({ items });
+function organizeCandidate(
+	sourceType: string,
+	sourceId: string,
+	suggestion: { title: string; body: string },
+) {
+	const state = getMockState();
+	const latest = state.feedback.find(
+		(item) => item.targetType === sourceType && item.targetId === sourceId,
+	);
+	if (latest?.value === "rejected") {
+		return problem(409, "该来源已被标记为不采纳，不能整理为知识。", "active_conflict");
+	}
+	const existing = state.candidates.find(
+		(candidate) =>
+			candidate.sourceType === sourceType && candidate.sourceId === sourceId,
+	);
+	if (existing) return json(existing);
+	const id = nextId("candidate");
+	const candidate = {
+		id,
+		sourceType,
+		sourceId,
+		state: "AwaitingConfirmation" as const,
+		rowVersion: 1,
+		generation: 1,
+		draftRevision: 1,
+		draftTitle: suggestion.title,
+		draftBody: suggestion.body,
+		originalSuggestion: {
+			v: 1,
+			source: { type: sourceType, id: sourceId },
+			title: suggestion.title,
+			body: suggestion.body,
+		},
+	};
+	state.candidates.unshift(candidate as never);
+	return json(candidate, { status: 201 });
+}
 const body = <T>(request: Request) => request.json() as Promise<T>;
 function slow() {
 	return getMockScenario() === "slow" ? delay(350) : undefined;
@@ -1297,9 +1335,68 @@ export const domainHandlers = [
 		);
 		return json({ latestValue: items[0]?.value, items });
 	}),
-	http.get("*/api/v1/knowledge/candidates", () => {
+	// 三个“整理为知识”入口（create-or-return）：同源重复创建返回已有候选；
+	// 来源最新反馈为“不采纳”时按真实后端语义返回 409。
+	http.post(
+		"*/api/v1/alerts/:occurrenceId/analyses/:analysisId/knowledge-candidates",
+		({ params }) => {
+			const denied = required();
+			if (denied) return denied;
+			const analysis = (
+				getMockState().analyses[String(params.occurrenceId)] ?? []
+			).find((item) => item.id === params.analysisId);
+			if (!analysis?.output) return problem(404, "未找到分析输出。");
+			return organizeCandidate("initial_analysis_output", analysis.output.id, {
+				title: analysis.output.content.slice(0, 40) || "分析输出",
+				body: analysis.output.content,
+			});
+		},
+	),
+	http.post(
+		"*/api/v1/investigations/:investigationId/knowledge-candidates",
+		async ({ params, request }) => {
+			const denied = required();
+			if (denied) return denied;
+			const input = await body<{ sourceId: string }>(request);
+			const message = (
+				getMockState().messages[String(params.investigationId)] ?? []
+			).find((item) => item.id === input.sourceId);
+			if (!message || message.role !== "assistant") {
+				return problem(422, "只有 AI 回复可以整理为知识。", "invalid_source");
+			}
+			return organizeCandidate("investigation_message", message.id, {
+				title: message.content.slice(0, 40) || "调查消息",
+				body: message.content,
+			});
+		},
+	),
+	http.post(
+		"*/api/v1/inspections/runs/:runId/reports/:reportVersion/knowledge-candidates",
+		({ params }) => {
+			const denied = required();
+			if (denied) return denied;
+			const report = (
+				getMockState().reports[String(params.runId)] ?? []
+			).find((item) => item.version === Number(params.reportVersion));
+			if (!report) return problem(404, "未找到巡检报告。");
+			return organizeCandidate("inspection_report", report.id, {
+				title: report.content.slice(0, 40) || "巡检报告",
+				body: report.content,
+			});
+		},
+	),
+	http.get("*/api/v1/knowledge/candidates", ({ request }) => {
 		const denied = required();
-		return denied ?? page(getMockState().candidates);
+		if (denied) return denied;
+		const url = new URL(request.url);
+		const state = url.searchParams.get("state");
+		const sourceType = url.searchParams.get("sourceType");
+		const items = getMockState().candidates.filter(
+			(candidate) =>
+				(!state || candidate.state === state) &&
+				(!sourceType || candidate.sourceType === sourceType),
+		);
+		return page(items);
 	}),
 	http.get("*/api/v1/knowledge/candidates/:id", ({ params }) => {
 		const denied = required();
@@ -1372,9 +1469,14 @@ export const domainHandlers = [
 		);
 		return value ? json(value) : problem(404, "未找到知识项。");
 	}),
-	http.get("*/api/v1/knowledge/import-batches", () => {
+	http.get("*/api/v1/knowledge/import-batches", ({ request }) => {
 		const denied = required();
-		return denied ?? page(getMockState().imports);
+		if (denied) return denied;
+		const state = new URL(request.url).searchParams.get("state");
+		const items = getMockState().imports.filter(
+			(batch) => !state || batch.state === state,
+		);
+		return page(items);
 	}),
 	http.post("*/api/v1/knowledge/import-batches", async ({ request }) => {
 		const denied = required();

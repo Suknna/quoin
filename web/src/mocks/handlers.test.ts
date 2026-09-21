@@ -210,6 +210,33 @@ describe('offline domain mock handlers', () => {
     expect((await response('/api/v1/knowledge/import-batches/import-1')).status).toBe(404)
   })
 
+  test('organize-knowledge endpoints create-or-return candidates and honor rejection', async () => {
+    const headers = { 'Content-Type': 'application/json' }
+    // 分析输出来源:首次创建 201,同源再次创建返回已有候选(200)。
+    const first = await response('/api/v1/alerts/alert-checkout-latency/analyses/analysis-1/knowledge-candidates', { method: 'POST', headers, body: JSON.stringify({ clientCommandId: 'k1' }) })
+    // analysis-output-1 已挂接 candidate-1(create-or-return 命中已有候选)。
+    expect(first.status).toBe(200)
+    expect((await first.json() as { id: string }).id).toBe('candidate-1')
+    // 调查消息来源:assistant 消息可建,用户消息 422。
+    const msg = await response('/api/v1/investigations/investigation-checkout/knowledge-candidates', { method: 'POST', headers, body: JSON.stringify({ clientCommandId: 'k2', sourceType: 'investigation_message', sourceId: 'message-2' }) })
+    expect(msg.status).toBe(201)
+    const msgCandidate = await msg.json() as { id: string; sourceType: string }
+    expect(msgCandidate.sourceType).toBe('investigation_message')
+    expect((await response('/api/v1/investigations/investigation-checkout/knowledge-candidates', { method: 'POST', headers, body: JSON.stringify({ clientCommandId: 'k3', sourceType: 'investigation_message', sourceId: 'message-2' }) })).status).toBe(200)
+    expect((await response('/api/v1/investigations/investigation-checkout/knowledge-candidates', { method: 'POST', headers, body: JSON.stringify({ clientCommandId: 'k4', sourceType: 'investigation_message', sourceId: 'message-1' }) })).status).toBe(422)
+    // 巡检报告来源:按 run + 报告版本建候选。
+    const report = await response('/api/v1/inspections/runs/inspection-run-1/reports/1/knowledge-candidates', { method: 'POST', headers, body: JSON.stringify({ clientCommandId: 'k5' }) })
+    expect(report.status).toBe(201)
+    // 来源被标记不采纳后,同源创建返回 409。
+    await response('/api/v1/knowledge/feedback', { method: 'POST', headers, body: JSON.stringify({ targetType: 'inspection_report', targetId: 'report-1', value: 'rejected' }) })
+    expect((await response('/api/v1/inspections/runs/inspection-run-1/reports/1/knowledge-candidates', { method: 'POST', headers, body: JSON.stringify({ clientCommandId: 'k6' }) })).status).toBe(409)
+    // 列表过滤:state/sourceType 都生效。
+    const awaiting = await (await response('/api/v1/knowledge/candidates?state=AwaitingConfirmation')).json() as { items: Array<{ state: string }> }
+    expect(awaiting.items.every((item) => item.state === 'AwaitingConfirmation')).toBe(true)
+    const fromMessages = await (await response('/api/v1/knowledge/candidates?sourceType=investigation_message')).json() as { items: Array<{ id: string }> }
+    expect(fromMessages.items.map((item) => item.id)).toEqual([msgCandidate.id])
+  })
+
   test('honors conflict, unavailable, and unsupported boundaries without passthrough', async () => {
     setMockScenario('conflict')
     const conflict = await response('/api/v1/connections/thanos-primary/disable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRowVersion: 3 }) })
