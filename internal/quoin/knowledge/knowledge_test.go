@@ -741,6 +741,199 @@ func parseID(t *testing.T, value string) int64 {
 	return id
 }
 
+// seedMaterialBatch inserts one source_material + Processing batch pair and
+// returns (materialID, batchID): the minimal valid source closure for
+// bulk-seeded source_material candidates, mirroring the import production
+// shape where one batch owns several candidates.
+func seedMaterialBatch(t *testing.T, f *fixture, seq int, createdAt string) (int64, int64) {
+	t.Helper()
+	material, err := f.db.Exec(`INSERT INTO source_materials(kind,digest,size_bytes,content,created_by,created_at)
+		VALUES('knowledge_import',?,1,'pagination fixture',?,?)`, fmt.Sprintf("%064d", seq), f.userID, createdAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialID, err := material.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := f.db.Exec(`INSERT INTO knowledge_import_batches(source_material_id,state,created_by,created_at)
+		VALUES(?,'Processing',?,?)`, materialID, f.userID, createdAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchID, err := batch.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return materialID, batchID
+}
+
+// seedMaterialCandidateAt inserts one source_material candidate of the batch
+// with a pinned created_at, so pagination tests can force identical
+// timestamps and exercise the id tiebreaker of the keyset edge.
+func seedMaterialCandidateAt(t *testing.T, f *fixture, materialID, batchID int64, state, createdAt string) {
+	t.Helper()
+	if _, err := f.db.Exec(`INSERT INTO knowledge_candidates(import_batch_id,source_type,source_id,state,original_suggestion_json,draft_title,draft_body,created_by,created_at)
+		VALUES(?,'source_material',?,?,'{}','t','b',?,?)`, batchID, materialID, state, f.userID, createdAt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedOutputCandidateAt inserts one initial_analysis_output candidate with a
+// pinned created_at (a second candidate type for filter-leak assertions).
+func seedOutputCandidateAt(t *testing.T, f *fixture, outputID int64, state, createdAt string) {
+	t.Helper()
+	if _, err := f.db.Exec(`INSERT INTO knowledge_candidates(source_type,source_id,state,original_suggestion_json,draft_title,draft_body,created_by,created_at)
+		VALUES('initial_analysis_output',?,?,'{}','t','b',?,?)`, outputID, state, f.userID, createdAt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// walkCandidatePages pages the candidate list through real next cursors. A
+// regressed keyset (WHERE ≡ the first page's block predicate) repeats rows,
+// which fails fast here instead of looping forever.
+func walkCandidatePages(t *testing.T, f *fixture, ctx context.Context, filter ListFilter, limit int) []CandidateSummary {
+	t.Helper()
+	var all []CandidateSummary
+	seen := map[string]bool{}
+	var after *CandidateCursor
+	for page := 0; page < 30; page++ {
+		items, next, err := f.service.ListCandidates(ctx, filter, after, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) == 0 {
+			t.Fatal("empty page returned while a next cursor was pending")
+		}
+		for _, item := range items {
+			if seen[item.ID] {
+				t.Fatalf("candidate %s repeated on page %d — keyset cursor replayed earlier rows", item.ID, page+1)
+			}
+			seen[item.ID] = true
+			all = append(all, item)
+		}
+		if next == nil {
+			return all
+		}
+		after = next
+	}
+	t.Fatal("candidate pagination did not terminate within 30 pages")
+	return nil
+}
+
+// TestListCandidatesKeysetReachesEveryRowBeyondFirstPage pins the 51st-row
+// regression: 55 candidates share one created_at, so every keyset edge falls
+// on the (created_at = ?, id < ?) tiebreaker. The walk must reach all 55 rows
+// exactly once — both unfiltered and with the state filter bound into the
+// cursor (HTTP-PAGE-001).
+func TestListCandidatesKeysetReachesEveryRowBeyondFirstPage(t *testing.T) {
+	f := newFixture(t)
+	ctx := f.ctx(t)
+	const total = 55
+	materialID, batchID := seedMaterialBatch(t, f, 1, "2026-01-01T00:00:00Z")
+	for i := 0; i < total; i++ {
+		seedMaterialCandidateAt(t, f, materialID, batchID, StateAwaiting, "2026-01-02T03:04:05Z")
+	}
+	all := walkCandidatePages(t, f, ctx, ListFilter{}, 50)
+	if len(all) != total {
+		t.Fatalf("unfiltered walk reached %d of %d candidates — later rows unreachable", len(all), total)
+	}
+	filtered := walkCandidatePages(t, f, ctx, ListFilter{State: StateAwaiting}, 50)
+	if len(filtered) != total {
+		t.Fatalf("state-filtered walk reached %d of %d candidates", len(filtered), total)
+	}
+}
+
+// TestListCandidatesKeysetCrossesAwaitingBlockBoundary pins the block edge:
+// the frozen ordering is awaiting-first, so page 1 can end inside the
+// non-awaiting block. The next page must resume strictly after the emitted
+// edge, never replay the whole non-awaiting block.
+func TestListCandidatesKeysetCrossesAwaitingBlockBoundary(t *testing.T) {
+	f := newFixture(t)
+	ctx := f.ctx(t)
+	materialID, batchID := seedMaterialBatch(t, f, 2, "2026-01-01T00:00:00Z")
+	for i := 0; i < 3; i++ {
+		seedMaterialCandidateAt(t, f, materialID, batchID, StateAwaiting, "2026-01-02T03:04:05Z")
+	}
+	for i := 0; i < 52; i++ {
+		seedMaterialCandidateAt(t, f, materialID, batchID, "Excluded", "2026-01-02T03:04:05Z")
+	}
+	all := walkCandidatePages(t, f, ctx, ListFilter{}, 50)
+	if len(all) != 55 {
+		t.Fatalf("cross-block walk reached %d of 55 candidates", len(all))
+	}
+	for i := 0; i < 3; i++ {
+		if all[i].State != StateAwaiting {
+			t.Fatalf("awaiting-first ordering broken at position %d: %+v", i, all[i])
+		}
+	}
+}
+
+// TestListCandidatesFilterCombinesWithCursor pins the filter ∨ cursor
+// composition: the filter must AND with the keyset edge while the walk still
+// reaches every matching row exactly once, and the source-type filter must
+// keep foreign rows out of every page.
+func TestListCandidatesFilterCombinesWithCursor(t *testing.T) {
+	f := newFixture(t)
+	ctx := f.ctx(t)
+	materialID, batchID := seedMaterialBatch(t, f, 3, "2026-01-01T00:00:00Z")
+	for i := 0; i < 55; i++ {
+		seedMaterialCandidateAt(t, f, materialID, batchID, "Excluded", "2026-01-02T03:04:05Z")
+	}
+	seedOutputCandidateAt(t, f, f.outputID, "Excluded", "2026-01-02T03:04:05Z")
+	filtered := walkCandidatePages(t, f, ctx, ListFilter{State: "Excluded"}, 50)
+	if len(filtered) != 56 {
+		t.Fatalf("state-filtered walk reached %d of 56 candidates", len(filtered))
+	}
+	typed := walkCandidatePages(t, f, ctx, ListFilter{State: "Excluded", SourceType: "source_material"}, 50)
+	if len(typed) != 55 {
+		t.Fatalf("state+source filtered walk reached %d of 55 candidates", len(typed))
+	}
+	for _, item := range typed {
+		if item.SourceType != "source_material" {
+			t.Fatalf("foreign source type leaked into filtered page: %+v", item)
+		}
+	}
+}
+
+// TestListImportBatchesKeysetReachesEveryRow pins the batch list against the
+// same keyset class: 55 batches share one created_at, so the id tiebreaker
+// carries every edge and all rows must be reachable exactly once.
+func TestListImportBatchesKeysetReachesEveryRow(t *testing.T) {
+	f := newFixture(t)
+	ctx := f.ctx(t)
+	const total = 55
+	for i := 0; i < total; i++ {
+		seedMaterialBatch(t, f, 100+i, "2026-01-02T03:04:05Z")
+	}
+	var all []ImportBatchSummary
+	seen := map[string]bool{}
+	var after *ImportBatchCursor
+	for page := 0; page < 30; page++ {
+		items, next, err := f.service.ListImportBatches(ctx, "", after, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) == 0 {
+			t.Fatal("empty page returned while a next cursor was pending")
+		}
+		for _, item := range items {
+			if seen[item.ID] {
+				t.Fatalf("batch %s repeated on page %d — keyset cursor replayed earlier rows", item.ID, page+1)
+			}
+			seen[item.ID] = true
+			all = append(all, item)
+		}
+		if next == nil {
+			break
+		}
+		after = next
+	}
+	if len(all) != total {
+		t.Fatalf("batch walk reached %d of %d batches", len(all), total)
+	}
+}
+
 func TestConcurrentConfirmCreatesExactlyOneKnowledge(t *testing.T) {
 	f := newFixture(t)
 	ctx := f.ctx(t)

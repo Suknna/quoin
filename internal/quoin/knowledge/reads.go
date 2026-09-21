@@ -159,7 +159,13 @@ func (service *Service) ListCandidates(ctx context.Context, filter ListFilter, a
 		if after.AwaitingFirst == 1 {
 			awaiting = 1
 		}
-		where += " AND ((c.state='AwaitingConfirmation')=? OR ((c.state='AwaitingConfirmation')=? AND (c.created_at < ? OR (c.created_at = ? AND c.id < ?))))"
+		// Keyset over the frozen ordering (awaiting DESC, created_at DESC,
+		// id DESC): a row is strictly after the edge when it belongs to a
+		// later block (flag <) or shares the block and loses the
+		// (created_at, id) comparison. An `=` in the first disjunct would
+		// collapse the predicate to the block flag alone and replay the
+		// first page forever.
+		where += " AND ((c.state='AwaitingConfirmation') < ? OR ((c.state='AwaitingConfirmation') = ? AND (c.created_at < ? OR (c.created_at = ? AND c.id < ?))))"
 		args = append(args, awaiting, awaiting, after.CreatedAt, after.CreatedAt, after.ID)
 	}
 	query := `SELECT ` + candidateColumns + `, c.created_at, (c.state='AwaitingConfirmation') FROM knowledge_candidates c WHERE 1=1` + where + ` ORDER BY ` + orderExpr + ` LIMIT ?`

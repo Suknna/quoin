@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components, react-hooks/exhaustive-deps -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
 	WorkspaceModuleProps,
 	WorkspaceModuleView,
@@ -28,23 +28,118 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { DetailSheet } from "@/components/workbench/DetailSheet";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
+import { ErrorRetry } from "@/components/workbench/ErrorRetry";
 import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 import {
 	api,
 	batchStateLabels,
 	type CandidateDetail,
+	type CandidateSummary,
 	candidateSourceLabels,
 	candidateStateLabels,
 	embeddingStateLabels,
 	type ImportBatchDetail,
+	type ImportBatchSummary,
 	indexStateLabels,
 	type KnowledgeDetail,
 	type KnowledgeSearchHit,
 	type KnowledgeVersionDetail,
 	type KnowledgeVersionSummary,
+	type Page,
 } from "@/features/knowledge/api";
 import { usePolling } from "@/hooks/use-polling";
 import { parseRoute } from "@/lib/parse-route";
+
+/**
+ * One cursor-paged sidebar list: first page on mount, explicit “加载更多”
+ * appends. Reads pause while suspended; in-flight responses are invalidated
+ * by a generation bump and resuming re-reads the first page (alerts pattern).
+ */
+function usePagedList<T extends { id: string }>(
+	fetchPage: (cursor?: string) => Promise<Page<T>>,
+	suspended: boolean,
+	fallbackError: string,
+) {
+	const fetchRef = useRef(fetchPage);
+	fetchRef.current = fetchPage;
+	const suspendedRef = useRef(suspended);
+	suspendedRef.current = suspended;
+	const generationRef = useRef(0);
+	// 挂起切换必须在渲染期作废旧世代，堵住 effect 清理前的落地窗口。
+	const pauseScopeRef = useRef(suspended);
+	if (pauseScopeRef.current !== suspended) {
+		pauseScopeRef.current = suspended;
+		generationRef.current += 1;
+	}
+	const [state, setState] = useState<{
+		items: T[];
+		nextCursor?: string;
+		loading: boolean;
+		loadingMore: boolean;
+		error: string;
+	}>({ items: [], loading: true, loadingMore: false, error: "" });
+	async function load(cursor?: string) {
+		if (suspendedRef.current) return;
+		// 只有最新世代的响应可以写状态。
+		const generation = generationRef.current + 1;
+		generationRef.current = generation;
+		setState((current) => ({
+			items: cursor ? current.items : [],
+			nextCursor: cursor ? current.nextCursor : undefined,
+			error: "",
+			loading: !cursor,
+			loadingMore: Boolean(cursor),
+		}));
+		try {
+			const page = await fetchRef.current(cursor);
+			if (generation !== generationRef.current) return;
+			setState((current) => {
+				// 追加按 id 去重：游标窗口重叠与页内重复 id 都只留一行。
+				const seen = new Set(current.items.map((item) => item.id));
+				const fresh = page.items.filter((item) => {
+					if (seen.has(item.id)) return false;
+					seen.add(item.id);
+					return true;
+				});
+				return {
+					...current,
+					items: cursor ? [...current.items, ...fresh] : page.items,
+					nextCursor: page.nextCursor,
+					error: "",
+					loading: false,
+					loadingMore: false,
+				};
+			});
+		} catch (reason) {
+			if (generation !== generationRef.current) return;
+			setState((current) => ({
+				...current,
+				error: messageOf(reason, fallbackError),
+				loading: false,
+				loadingMore: false,
+			}));
+		}
+	}
+	useEffect(() => {
+		if (!suspended) void load();
+		else {
+			// 挂起：作废在途请求、收起加载指示；已读内容只读保留。
+			generationRef.current += 1;
+			setState((current) => ({
+				...current,
+				loading: false,
+				loadingMore: false,
+			}));
+		}
+	}, [suspended]);
+	// 卸载后的迟到响应不允许落地。
+	useEffect(() => {
+		return () => {
+			generationRef.current += 1;
+		};
+	}, []);
+	return { ...state, load };
+}
 
 /** Knowledge view keeps cursors tied to their server query and never polls while suspended. */
 export function useKnowledgeModule(
@@ -59,8 +154,16 @@ export function useKnowledgeModule(
 		Awaited<ReturnType<typeof api.browse>>["items"]
 	>([]);
 	const [next, setNext] = useState<string>();
- const [candidates,setCandidates]=useState<Awaited<ReturnType<typeof api.listCandidates>>["items"]>([]);
- const [imports,setImports]=useState<Awaited<ReturnType<typeof api.listImportBatches>>["items"]>([]);
+	const candidatesList = usePagedList<CandidateSummary>(
+		(cursor) => api.listCandidates(undefined, cursor),
+		props.suspended,
+		"无法读取待确认知识。",
+	);
+	const importsList = usePagedList<ImportBatchSummary>(
+		(cursor) => api.listImportBatches(cursor),
+		props.suspended,
+		"无法读取导入批次。",
+	);
 	const [error, setError] = useState("");
 	const [loading, setLoading] = useState(true);
 	// The coordinator supplies absolute workspace routes; remove the module prefix
@@ -90,8 +193,6 @@ export function useKnowledgeModule(
 	}
 	useEffect(() => {
 		void load();
- void Promise.resolve().then(() => api.listCandidates()).then(page => setCandidates(page.items)).catch(reason => setError(messageOf(reason,"无法读取待确认知识。")));
- void Promise.resolve().then(() => api.listImportBatches()).then(page => setImports(page.items)).catch(reason => setError(messageOf(reason,"无法读取导入批次。")));
 	}, []);
 	async function search() {
 		const value = query.trim();
@@ -164,10 +265,91 @@ export function useKnowledgeModule(
 						/>
 					</>
 				)}
- <h3 className="text-sm font-medium">待确认</h3>
- <EntityList items={candidates.map(item => ({id:item.id,title:item.draftTitle || `候选 ${item.id}`,subtitle:item.state}))} columns={["title","subtitle"]} onSelect={row => props.navigate(`/knowledge/candidates/${row.id}`)} emptyTitle="暂无待确认候选。" />
- <h3 className="text-sm font-medium">导入批次</h3>
- <EntityList items={imports.map(item => ({id:item.id,title:`导入 ${item.id}`,subtitle:item.state}))} columns={["title","subtitle"]} onSelect={row => props.navigate(`/knowledge/imports/${row.id}`)} emptyTitle="暂无导入批次。" />
+				<h3 className="text-sm font-medium">待确认</h3>
+				<EntityList
+					items={candidatesList.items.map((item) => ({
+						id: item.id,
+						title: item.draftTitle || `候选 ${item.id}`,
+						subtitle: item.state,
+					}))}
+					columns={["title", "subtitle"]}
+					onSelect={(row) =>
+						props.navigate(`/knowledge/candidates/${row.id}`)
+					}
+					loading={candidatesList.loading}
+					loadingLabel="正在读取待确认候选"
+					error={candidatesList.items.length ? undefined : candidatesList.error}
+					onRetry={
+						props.suspended
+							? undefined
+							: () => void candidatesList.load(candidatesList.nextCursor)
+					}
+					emptyTitle="暂无待确认候选。"
+				/>
+				{candidatesList.items.length > 0 && candidatesList.error && (
+					props.suspended ? (
+						// 挂起=只读：错误事实保留，重试入口隐藏。
+						<Alert variant="destructive">
+							<AlertDescription>{candidatesList.error}</AlertDescription>
+						</Alert>
+					) : (
+						<ErrorRetry
+							message={candidatesList.error}
+							onRetry={() =>
+								void candidatesList.load(candidatesList.nextCursor)
+							}
+						/>
+					)
+				)}
+				<LoadMoreButton
+					loading={candidatesList.loadingMore}
+					hasMore={!props.suspended && Boolean(candidatesList.nextCursor)}
+					onLoadMore={() =>
+						void candidatesList.load(candidatesList.nextCursor)
+					}
+				>
+					加载更多候选
+				</LoadMoreButton>
+				<h3 className="text-sm font-medium">导入批次</h3>
+				<EntityList
+					items={importsList.items.map((item) => ({
+						id: item.id,
+						title: `导入 ${item.id}`,
+						subtitle: item.state,
+					}))}
+					columns={["title", "subtitle"]}
+					onSelect={(row) => props.navigate(`/knowledge/imports/${row.id}`)}
+					loading={importsList.loading}
+					loadingLabel="正在读取导入批次"
+					error={importsList.items.length ? undefined : importsList.error}
+					onRetry={
+						props.suspended
+							? undefined
+							: () => void importsList.load(importsList.nextCursor)
+					}
+					emptyTitle="暂无导入批次。"
+				/>
+				{importsList.items.length > 0 && importsList.error && (
+					props.suspended ? (
+						<Alert variant="destructive">
+							<AlertDescription>{importsList.error}</AlertDescription>
+						</Alert>
+					) : (
+						<ErrorRetry
+							message={importsList.error}
+							onRetry={() =>
+								void importsList.load(importsList.nextCursor)
+							}
+						/>
+					)
+				)}
+				<LoadMoreButton
+					loading={importsList.loadingMore}
+					hasMore={!props.suspended && Boolean(importsList.nextCursor)}
+					onLoadMore={() => void importsList.load(importsList.nextCursor)}
+				>
+					加载更多批次
+				</LoadMoreButton>
 			</div>
 		</ScrollArea>
 	);
