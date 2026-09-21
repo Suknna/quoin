@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -79,6 +80,13 @@ func (stream *alertEventStream) serve(writer http.ResponseWriter, request *http.
 	}
 
 	flusher, canFlush := writer.(http.Flusher)
+	// SSE 是长连接：公共 server 的 30s WriteTimeout 会把每个事件流都在 30s
+	// 处掐断。豁免已认证的流式响应（与备份下载同一模式）；会话在 poll tick
+	// 上逐次复核（Q214），豁免不会变成不可撤销的长传输。
+	if err := http.NewResponseController(writer).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		writeStreamProblem(writer, http.StatusInternalServerError, "无法初始化告警变更流")
+		return
+	}
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-cache")
 	writer.Header().Set("X-Accel-Buffering", "no")

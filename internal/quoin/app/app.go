@@ -371,10 +371,15 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 		return err
 	}
 	serverSet.relay = grpc.NewServer(grpc.KeepaliveEnforcementPolicy(runtimeRelayKeepalivePolicy()), grpc.Creds(runtimeTLSCreds))
-	serverSet.beforeShutdown = application.runtime.CloseAll
 	// ADR-0011：Stele 网关流与出向编排。网关只持有自己的流投影（无发送
 	// 依赖），先构建再装配 relay 与控制服务。
 	steleGateway := NewSteleGateway()
+	// 关停必须同时结束 Plinth 控制流与 Stele 网关流：GracefulStop 等待全部
+	// 在飞 handler，只关 runtime 插槽会让网关 Recv 循环把 SIGTERM 永久挂住。
+	serverSet.beforeShutdown = func() {
+		application.runtime.CloseAll()
+		steleGateway.Close()
+	}
 	RegisterSteleRelay(serverSet.relay, NewSteleRelayServer(application.alerts, application.connections, steleGateway))
 	artifactStore, err := artifact.NewStore(database.SQL, filepath.Join(config.DataDirectory, "artifacts"))
 	if err != nil {
@@ -903,7 +908,21 @@ func (serverSet *servers) run(ctx context.Context, config contract.QuoinConfig) 
 		if serverSet.beforeShutdown != nil {
 			serverSet.beforeShutdown()
 		}
-		serverSet.relay.GracefulStop()
+		// GracefulStop 等待全部在飞 handler 结束。beforeShutdown 已通知两条
+		// 长流退出，正常路径即时返回；10s 兜底超时降级为 Stop()，保证
+		// SIGTERM 在关停预算内收口而不是被意外挂起的 handler 拖到 SIGKILL。
+		relayStopped := make(chan struct{})
+		go func() {
+			serverSet.relay.GracefulStop()
+			close(relayStopped)
+		}()
+		select {
+		case <-relayStopped:
+		case <-time.After(10 * time.Second):
+			sharedops.LogEvent("quoin", "error", "relay.graceful_stop_timeout", "GracefulStop exceeded 10s; forcing Stop")
+			serverSet.relay.Stop()
+			<-relayStopped
+		}
 		_ = serverSet.public.Shutdown(shutdownCtx)
 		return opsDrained
 	case err := <-errCh:

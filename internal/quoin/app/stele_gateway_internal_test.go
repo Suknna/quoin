@@ -321,3 +321,43 @@ func TestSteleGatewayStreamDetachWakesWaiters(t *testing.T) {
 		t.Fatal("waiter was not woken by stream detach")
 	}
 }
+
+// 进程关停时 Close 必须结束 Connect 的 Recv 循环（即使对端仍在保活），
+// GracefulStop 才能收尾——这是 SIGTERM 不被网关在飞 handler 永久挂住的关键。
+func TestSteleGatewayCloseEndsConnectLoop(t *testing.T) {
+	gateway := NewSteleGateway()
+	stream := newFakeGatewayStream(steleIdentityContext(t))
+	connected := make(chan error, 1)
+	go func() { connected <- gateway.Connect(stream) }()
+	stream.inbound <- gatewayHelloEnvelope(1, contract.ProtoAuthorityFingerprint)
+	if ack := awaitHelloAck(t, stream); !ack.GetAccepted() {
+		t.Fatalf("hello_ack=%+v, want accepted", ack)
+	}
+	// Connect 在 Recv 上阻塞等待下一帧；Close 必须让它返回。
+	gateway.Close()
+	// Close 幂等：重复调用不 panic。
+	gateway.Close()
+	select {
+	case err := <-connected:
+		if err == nil {
+			t.Fatal("closed gateway Connect must return a Canceled-status error, got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Connect loop did not return after gateway Close")
+	}
+	stream.cancel()
+}
+
+// 关停时未声明超时的出向调用必须收敛到部署默认（帧契约 timeout_ms > 0），
+// 而不是把契约禁止的 0 放上 wire。
+func TestTimeoutMillisOfDefaultsNonPositive(t *testing.T) {
+	if got := timeoutMillisOf(0); got != 30000 {
+		t.Fatalf("timeoutMillisOf(0)=%d, want 30000 (deployment default)", got)
+	}
+	if got := timeoutMillisOf(-time.Second); got != 30000 {
+		t.Fatalf("timeoutMillisOf(-1s)=%d, want 30000 (deployment default)", got)
+	}
+	if got := timeoutMillisOf(15 * time.Second); got != 15000 {
+		t.Fatalf("timeoutMillisOf(15s)=%d, want 15000", got)
+	}
+}

@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/investigation"
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -62,7 +63,8 @@ func (handler *Handler) streamInvestigationMessage(ctx context.Context, input *s
 		ParentID  string            `json:"parentId,omitempty"`
 		ThreadID  string            `json:"threadId,omitempty"`
 	}
-}) (*huma.StreamResponse, error) {
+},
+) (*huma.StreamResponse, error) {
 	principalID, err := handler.principal(ctx, input.Session)
 	if err != nil {
 		return nil, err
@@ -92,6 +94,16 @@ func (handler *Handler) streamInvestigationMessage(ctx context.Context, input *s
 		humaCtx.SetHeader("X-Vercel-Ai-Ui-Message-Stream", "v1")
 		humaCtx.SetHeader("X-Accel-Buffering", "no")
 		writer := humaCtx.BodyWriter()
+		// 回复流按 attempt 生命周期持续（模型调用预算 10 分钟），公共 server
+		// 的 30s WriteTimeout 会把每个长回复都在 30s 处掐断。humago 适配器的
+		// BodyWriter 底层即原始 http.ResponseWriter，豁免写法与备份下载一致；
+		// 会话在 check tick 上逐次复核（SEC-SESSION-002/003），豁免不会变成
+		// 不可撤销的长传输。
+		if responseWriter, ok := writer.(http.ResponseWriter); ok {
+			if err := http.NewResponseController(responseWriter).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+				sharedops.LogEvent("quoin", "error", "investigation.stream_deadline_failed", err.Error())
+			}
+		}
 		stream := newFrameStream(writer)
 		streamCtx := humaCtx.Context()
 		valid := handler.SessionValid

@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
@@ -171,6 +172,13 @@ func (application *apiServer) downloadArtifactContent(writer http.ResponseWriter
 		return
 	}
 	defer file.Close()
+	// 大产物（长工具输出、截图、附件）可以合法超过公共 server 的 30s
+	// WriteTimeout。豁免写法与备份下载一致（HTTP-FILE-007 禁止静默截断，
+	// 传输中途失败只能记日志——响应头已发出）。
+	if err := http.NewResponseController(writer).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		writeStreamProblem(writer, http.StatusInternalServerError, "无法初始化产物传输")
+		return
+	}
 	// The filename is server-generated from the stable locator and never
 	// derived from client input (HTTP-FILE-003).
 	writer.Header().Set("Content-Type", "application/octet-stream")

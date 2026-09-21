@@ -40,6 +40,10 @@ type steleGateway struct {
 	stream runtimev1.SteleRelay_ConnectServer
 	// streamDone 在当前流摘除时关闭，供等待侧感知流已失效。
 	streamDone chan struct{}
+	// closing 在进程关停时关闭：Connect 的 Recv 循环据此返回，gRPC
+	// GracefulStop 才能收尾（否则 SIGTERM 永久阻塞在网关上）。
+	closing   chan struct{}
+	closeOnce sync.Once
 	// bootID 来自已接受的 SteleHello，出向帧据此保持与流上下文一致的
 	// 围栏字段。
 	bootID string
@@ -59,6 +63,7 @@ type steleGateway struct {
 // NewSteleGateway 构建网关（无流状态；Connect 之后才有投影）。
 func NewSteleGateway() *steleGateway {
 	return &steleGateway{
+		closing: make(chan struct{}),
 		waiters: map[uint64]chan *runtimev1.ExecutePlatformCallResult{},
 		calls:   map[string]uint64{},
 	}
@@ -69,6 +74,13 @@ func (gateway *steleGateway) Connected() (bool, time.Time) {
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()
 	return gateway.stream != nil, gateway.heartbeat
+}
+
+// Close 通知当前网关流结束（进程关停）：Connect 的 Recv 循环与 Execute
+// 等待者随之返回，gRPC GracefulStop 不再无限等待网关在飞 handler。
+// 幂等；与 runtime.CloseAll 同语义（connection.close 的 sync.Once 模式）。
+func (gateway *steleGateway) Close() {
+	gateway.closeOnce.Do(func() { close(gateway.closing) })
 }
 
 // Connect 承接 Stele 的网关流握手与收发循环。首帧必须是 SteleHello：
@@ -129,11 +141,26 @@ func (gateway *steleGateway) Connect(stream runtimev1.SteleRelay_ConnectServer) 
 		return err
 	}
 	for {
-		envelope, err := stream.Recv()
-		if err != nil {
-			// 流结束（Stele 停机/替换）：deferred detach 摘除流并唤醒
-			// 全部等待者。
-			return nil
+		var envelope *runtimev1.SteleEnvelope
+		// 关停信号必须在 Recv 阻塞期间也能结束 RPC：与 runtime 控制流同一
+		// 模式（runtime_service.go 的 closing race），gRPC 两端同时拆流，
+		// GracefulStop 不再被网关在飞 handler 永久挂住。
+		received := make(chan error, 1)
+		go func() {
+			frame, recvErr := stream.Recv()
+			envelope = frame
+			received <- recvErr
+		}()
+		var err error
+		select {
+		case <-gateway.closing:
+			return status.Error(codes.Canceled, "quoin is shutting down")
+		case err = <-received:
+			if err != nil {
+				// 流结束（Stele 停机/替换）：deferred detach 摘除流并唤醒
+				// 全部等待者。
+				return nil
+			}
 		}
 		switch payload := envelope.GetMsg().(type) {
 		case *runtimev1.SteleEnvelope_Heartbeat:
@@ -332,10 +359,17 @@ func headerMapOf(header map[string][]string) map[string]string {
 	return out
 }
 
-// timeoutMillisOf 把请求超时序列化为帧字段；非正值由 Stele 侧默认值兜底。
+// gatewayDefaultTimeout 是调用方未声明超时时下发的部署默认值。帧契约
+// （runtime.proto ExecutePlatformCall.timeout_ms）要求 >0；此前非正值被
+// 序列化为 0，而 Stele 侧没有"默认值"概念，0 会被通用下限夹到 1s——新
+// 插件一旦忘记设 Timeout，大查询将系统性地以 1s 超时失败。
+const gatewayDefaultTimeout = 30 * time.Second
+
+// timeoutMillisOf 把请求超时序列化为帧字段（契约要求 >0）：非正值收敛到
+// 部署默认，而不是把契约禁止的 0 放上 wire。
 func timeoutMillisOf(timeout time.Duration) uint32 {
 	if timeout <= 0 {
-		return 0
+		timeout = gatewayDefaultTimeout
 	}
 	millis := timeout.Milliseconds()
 	if millis < 1 {
