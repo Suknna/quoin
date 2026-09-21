@@ -266,6 +266,9 @@ func RunToolCall(ctx context.Context, probe *client, modelID string, parallel bo
 	if completion.Usage != nil {
 		result.Usage = usage{Input: completion.Usage.PromptTokens, Output: completion.Usage.CompletionTokens, Total: completion.Usage.TotalTokens}
 	}
+	if len(completion.Choices) == 0 {
+		return result, "", errors.New("tool call response has no choices")
+	}
 	calls := completion.Choices[0].Message.ToolCalls
 	if len(calls) == 0 {
 		return result, "", errors.New("未观察到原生 tool call")

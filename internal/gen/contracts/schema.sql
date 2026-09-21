@@ -3215,12 +3215,14 @@ WHEN NOT EXISTS (
   JOIN connection_revisions r ON r.id = p.connection_revision_id
   WHERE p.id = NEW.probe_result_id AND p.connection_type = 'model_provider'
     AND json_extract(r.config_json, '$.chatModelId') = NEW.chat_model_id
-    AND (json_type(r.config_json, '$.embeddingModelId') IS NULL OR json_extract(r.config_json, '$.embeddingModelId') = NEW.embedding_model_id)
+    AND (NEW.embedding_supported = 0 OR json_type(r.config_json, '$.embeddingModelId') IS NULL OR json_extract(r.config_json, '$.embeddingModelId') = NEW.embedding_model_id)
     AND (json_type(r.config_json, '$.contextBudgetTokens') IS NULL OR json_extract(r.config_json, '$.contextBudgetTokens') = NEW.context_budget_tokens)
     AND (json_type(r.config_json, '$.maxOutputTokens') IS NULL OR json_extract(r.config_json, '$.maxOutputTokens') = NEW.max_output_tokens)
-    AND EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = p.attempt_id AND m.operation = 'chat' AND m.status = 'succeeded')
-    AND (NEW.embedding_supported = 0 OR EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = p.attempt_id AND m.operation = 'embedding' AND m.status = 'succeeded'))
-    AND EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = p.attempt_id AND m.operation = 'chat' AND m.status = 'cancelled' AND m.termination_reason = 'cancelled')
+    AND (p.outcome <> 'passed' OR (
+      EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = p.attempt_id AND m.operation = 'chat' AND m.status = 'succeeded')
+      AND (NEW.embedding_supported = 0 OR EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = p.attempt_id AND m.operation = 'embedding' AND m.status = 'succeeded'))
+      AND EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = p.attempt_id AND m.operation = 'chat' AND m.status = 'cancelled' AND m.termination_reason = 'cancelled')
+    ))
 )
 BEGIN SELECT RAISE(ABORT, 'model-provider probe child must match its header, provider config and real calls'); END;
 CREATE TRIGGER trg_thanos_connection_probe_results_closure BEFORE INSERT ON thanos_connection_probe_results

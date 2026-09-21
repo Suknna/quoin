@@ -8,7 +8,9 @@ package connections_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -236,6 +238,101 @@ func TestQueuedDispatchBindsOnConnect(t *testing.T) {
 	// A second binder loses the race harmlessly.
 	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-late", 3, 5*time.Minute); err != nil || ok {
 		t.Fatalf("second bind must be a no-op, got %v %v", err, ok)
+	}
+}
+
+// modelProviderProbeFixture 建立一个已 Accept（Running）的 model_provider
+// 探测 attempt。embedConfigured 决定 revision 是否配置 embedding model。
+func modelProviderProbeFixture(t *testing.T, embedConfigured bool) (*connections.Service, *sql.DB, int64, string, uint64) {
+	t.Helper()
+	service, database, _ := newService(t)
+	ctx := adminContext(t, nextCorrelation())
+	config := map[string]any{"type": "model_provider", "baseUrl": "https://api.example.com", "chatModelId": "probe-chat", "contextBudgetTokens": 1024, "maxOutputTokens": 256}
+	if embedConfigured {
+		config["embeddingModelId"] = "probe-embed"
+	}
+	projection, _ := json.Marshal(config)
+	secret, _ := json.Marshal(map[string]string{"type": "model_provider", "apiKey": "probe-api-key"})
+	summary, err := service.Create(ctx, connections.CreateInput{
+		Name: "mp-probe-provider", Type: connections.TypeModelProvider,
+		NonSecretJSON: projection, Secret: secret, SecretPresent: true,
+	}, 1, "cmd-mp-probe-create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID, err := service.StartProbe(ctx, summary.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "mp-boot", 11, 5*time.Minute); err != nil || !ok {
+		t.Fatalf("fixture bind failed: %v %v", err, ok)
+	}
+	if err := service.AcceptProbe(context.Background(), attemptID, "mp-boot", 11); err != nil {
+		t.Fatal(err)
+	}
+	return service, database, attemptID, "mp-boot", 11
+}
+
+// TestModelProviderFailedProbeClosesWithoutChatEvidence 覆盖最常见失败形状：
+// 供应商在首个动作就不可达（坏 URL/坏 key），没有任何 succeeded chat 物理调
+// 用。failed typed 子行仍必须能封存——否则探测永远停在 Running，单活动探测
+// 围栏（StartProbe 的 active 检查）会阻塞该连接的一切后续探测与 Enable。
+func TestModelProviderFailedProbeClosesWithoutChatEvidence(t *testing.T) {
+	service, database, attemptID, boot, epoch := modelProviderProbeFixture(t, true)
+	ctx := context.Background()
+	detail := []byte(`{"kind":"model_provider","error":"chat stream 请求失败: connection refused"}`)
+	result := connections.TypedProbeResult{Outcome: "failed", Detail: detail, ResultDigest: strings.Repeat("d1", 32), StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z"}
+	child := &connections.TypedChild{ModelProvider: &connections.ModelProviderProbeChild{
+		ChatModelID: "probe-chat", ContextBudgetTokens: 1024, MaxOutputTokens: 256, DetailJSON: string(detail),
+	}}
+	if err := service.CommitProbeResult(ctx, attemptID, boot, epoch, result, child); err != nil {
+		t.Fatalf("failed model-provider probe must seal without succeeded chat evidence: %v", err)
+	}
+	var state, outcome, reason string
+	if err := database.QueryRow(`SELECT a.state,p.outcome,COALESCE(a.termination_reason,'') FROM execution_attempts a JOIN connection_probe_results p ON p.attempt_id=a.id WHERE a.id=?`, attemptID).Scan(&state, &outcome, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if state != "Failed" || outcome != "failed" || reason != "invalid_response" {
+		t.Fatalf("failed probe=(%s,%s,%s), want (Failed,failed,invalid_response)", state, outcome, reason)
+	}
+	// 失败探测不得占用单活动围栏：紧接的新探测可以创建。
+	if _, err := service.StartProbe(adminContext(t, nextCorrelation()), "mp-probe-provider"); err != nil {
+		t.Fatalf("failed probe must release the one-active fence: %v", err)
+	}
+}
+
+// TestModelProviderProbeInterruptCancels cleanly 关闭 Running 的
+// model_provider 探测：失联/租约到期的 Interrupted 闭包与管理员取消的
+// cancelled 闭包都不依赖任何已完成的物理模型调用。
+func TestModelProviderProbeInterruptAndCancelConverge(t *testing.T) {
+	service, database, attemptID, _, _ := modelProviderProbeFixture(t, true)
+	if err := service.InterruptProbe(context.Background(), attemptID, "lease_expired"); err != nil {
+		t.Fatalf("interrupting a never-executed model-provider probe must converge: %v", err)
+	}
+	var state, reason string
+	if err := database.QueryRow(`SELECT state,COALESCE(termination_reason,'') FROM execution_attempts WHERE id=?`, attemptID).Scan(&state, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if state != "Interrupted" || reason != "lease_expired" {
+		t.Fatalf("interrupted probe=(%s,%s)", state, reason)
+	}
+
+	service, database, attemptID, _, _ = modelProviderProbeFixture(t, false)
+	var rowVersion int64
+	if err := database.QueryRow(`SELECT row_version FROM execution_attempts WHERE id=?`, attemptID).Scan(&rowVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CancelProbe(adminContext(t, nextCorrelation()), attemptID, rowVersion); err != nil {
+		t.Fatalf("cancelling a model-provider probe must commit its fence: %v", err)
+	}
+	if err := service.RecordCancelAck(context.Background(), attemptID); err != nil {
+		t.Fatalf("cancel ack must finalize: %v", err)
+	}
+	if err := database.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "Cancelled" {
+		t.Fatalf("cancelled probe state=%s, want Cancelled", state)
 	}
 }
 

@@ -46,6 +46,11 @@ func Run(ctx context.Context, config Config, apiKey string, embeddingConfigured 
 	probe := newClient(config, apiKey)
 	outcome := Outcome{ChatModelID: config.ChatModelID, EmbeddingModelID: config.EmbeddingModelID}
 	failures := []string{}
+	complete := func(ctx context.Context, id int64, result *runtimev1.CompleteModelCall) {
+		if !ledger.Complete(ctx, id, result) {
+			failures = append(failures, "model call completion was not acknowledged")
+		}
+	}
 	begin := func(callSeq int, operation runtimev1.ModelOperation, body string) (int64, bool) {
 		inputDigest := sha256.Sum256([]byte("connection_probe_v1"))
 		rendered := sha256.Sum256([]byte(body))
@@ -54,13 +59,17 @@ func Run(ctx context.Context, config Config, apiKey string, embeddingConfigured 
 	}
 
 	// 1. chat-stream
-	streamResult, chunks, assembled, err := RunChatStream(ctx, probe, config, config.ChatModelID)
 	requestBody, _ := json.Marshal(map[string]any{"model": config.ChatModelID, "stream": true})
 	callID, ok := begin(1, runtimev1.ModelOperation_MODEL_OPERATION_CHAT, string(requestBody))
+	if !ok {
+		outcome.Detail = "model call admission rejected"
+		return outcome
+	}
+	streamResult, chunks, assembled, err := RunChatStream(ctx, probe, config, config.ChatModelID)
 	if err != nil {
 		failures = append(failures, ActionChatStream+": "+err.Error())
 		if ok {
-			ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{
+			complete(ctx, callID, &runtimev1.CompleteModelCall{
 				AttemptId: attemptOf(ctx), ModelCallId: callID,
 				Outcome:       runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED,
 				FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_TRANSPORT_ERROR,
@@ -69,11 +78,11 @@ func Run(ctx context.Context, config Config, apiKey string, embeddingConfigured 
 	} else if len(chunks) >= 2 {
 		outcome.Capability.StreamingSupported = true
 		if ok {
-			ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{
+			complete(ctx, callID, &runtimev1.CompleteModelCall{
 				AttemptId: attemptOf(ctx), ModelCallId: callID,
 				Outcome:           runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_SUCCEEDED,
 				ProviderRequestId: streamResult.RequestID,
-				InputTokens:       12, OutputTokens: uint64(len(assembled)), TotalTokens: 12 + uint64(len(assembled)),
+				InputTokens:       uint64(streamResult.Usage.Input), OutputTokens: uint64(streamResult.Usage.Output), TotalTokens: uint64(streamResult.Usage.Total),
 				FinishReason: "stop", AssistantText: assembled,
 				ResponseDigest: digestOf(assembled), ResponseComplete: true,
 			})
@@ -81,7 +90,7 @@ func Run(ctx context.Context, config Config, apiKey string, embeddingConfigured 
 	} else {
 		failures = append(failures, ActionChatStream+": chunks<2")
 		if ok {
-			ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{
+			complete(ctx, callID, &runtimev1.CompleteModelCall{
 				AttemptId: attemptOf(ctx), ModelCallId: callID,
 				Outcome:       runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED,
 				FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE,
@@ -90,88 +99,108 @@ func Run(ctx context.Context, config Config, apiKey string, embeddingConfigured 
 	}
 
 	// 2. native tool call
-	toolResult, _, err := RunToolCall(ctx, probe, config.ChatModelID, false)
 	callID, ok = begin(2, runtimev1.ModelOperation_MODEL_OPERATION_CHAT, `{"tools":["probe_noop"]}`)
+	if !ok {
+		outcome.Detail = "model call admission rejected"
+		return outcome
+	}
+	toolResult, _, err := RunToolCall(ctx, probe, config.ChatModelID, false)
 	if err != nil {
 		failures = append(failures, ActionToolCall+": "+err.Error())
 		if ok {
-			ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE})
+			complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE})
 		}
 	} else {
 		outcome.Capability.NativeToolCalling = true
 		if ok {
-			ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_SUCCEEDED, ProviderRequestId: toolResult.RequestID, InputTokens: 14, OutputTokens: 8, TotalTokens: 22, FinishReason: "tool_calls", ResponseDigest: digestOf(`{"tool_calls":1}`), ResponseComplete: true})
+			complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_SUCCEEDED, ProviderRequestId: toolResult.RequestID, InputTokens: uint64(toolResult.Usage.Input), OutputTokens: uint64(toolResult.Usage.Output), TotalTokens: uint64(toolResult.Usage.Total), FinishReason: "tool_calls", ResponseDigest: digestOf(`{"tool_calls":1}`), ResponseComplete: true})
 		}
 	}
 
 	// 3. parallel tool calls
-	parallelResult, _, err := RunToolCall(ctx, probe, config.ChatModelID, true)
 	callID, ok = begin(3, runtimev1.ModelOperation_MODEL_OPERATION_CHAT, `{"tools":["probe_noop","probe_noop_second"]}`)
+	if !ok {
+		outcome.Detail = "model call admission rejected"
+		return outcome
+	}
+	parallelResult, _, err := RunToolCall(ctx, probe, config.ChatModelID, true)
 	if err != nil {
 		failures = append(failures, ActionParallel+": "+err.Error())
 		if ok {
-			ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE})
+			complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE})
 		}
 	} else {
 		outcome.Capability.MultiToolCall = true
 		if ok {
-			ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_SUCCEEDED, ProviderRequestId: parallelResult.RequestID, InputTokens: 16, OutputTokens: 12, TotalTokens: 28, FinishReason: "tool_calls", ResponseDigest: digestOf(`{"tool_calls":2}`), ResponseComplete: true})
+			complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_SUCCEEDED, ProviderRequestId: parallelResult.RequestID, InputTokens: uint64(parallelResult.Usage.Input), OutputTokens: uint64(parallelResult.Usage.Output), TotalTokens: uint64(parallelResult.Usage.Total), FinishReason: "tool_calls", ResponseDigest: digestOf(`{"tool_calls":2}`), ResponseComplete: true})
 		}
 	}
 
 	// 4. cancellation
-	cancelResult, _, err := RunCancellation(ctx, probe, config.ChatModelID)
 	callID, ok = begin(4, runtimev1.ModelOperation_MODEL_OPERATION_CHAT, `{"stream":true,"cancel":true}`)
+	if !ok {
+		outcome.Detail = "model call admission rejected"
+		return outcome
+	}
+	cancelResult, _, err := RunCancellation(ctx, probe, config.ChatModelID)
 	if err != nil {
 		failures = append(failures, ActionCancel+": "+err.Error())
 		if ok {
-			ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE})
+			complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE})
 		}
 	} else {
 		outcome.Capability.CancellationObserved = true
 		if ok {
-			ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_CANCELLED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_CANCELLED, ProviderRequestId: cancelResult.RequestID})
+			complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_CANCELLED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_CANCELLED, ProviderRequestId: cancelResult.RequestID})
 		}
 	}
 
 	// 5. usage + request id
-	usageResult, _, err := RunUsageAndRequestID(ctx, probe, config.ChatModelID)
 	callID, ok = begin(5, runtimev1.ModelOperation_MODEL_OPERATION_CHAT, `{"usage_probe":true}`)
+	if !ok {
+		outcome.Detail = "model call admission rejected"
+		return outcome
+	}
+	usageResult, _, err := RunUsageAndRequestID(ctx, probe, config.ChatModelID)
 	if err != nil {
 		failures = append(failures, ActionUsage+": "+err.Error())
 		if ok {
-			ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE})
+			complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE})
 		}
 	} else if usageResult.RequestID == "" {
 		failures = append(failures, ActionUsage+": request id 未观察到")
 		if ok {
-			ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE})
+			complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE})
 		}
 	} else {
 		outcome.Capability.UsageObserved = true
 		outcome.Capability.RequestIDObserved = true
 		if ok {
-			ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_SUCCEEDED, ProviderRequestId: usageResult.RequestID, InputTokens: uint64(usageResult.Usage.Input), OutputTokens: uint64(usageResult.Usage.Output), TotalTokens: uint64(usageResult.Usage.Total), FinishReason: "stop", ResponseDigest: digestOf(`{"usage":true}`), ResponseComplete: true})
+			complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_SUCCEEDED, ProviderRequestId: usageResult.RequestID, InputTokens: uint64(usageResult.Usage.Input), OutputTokens: uint64(usageResult.Usage.Output), TotalTokens: uint64(usageResult.Usage.Total), FinishReason: "stop", ResponseDigest: digestOf(`{"usage":true}`), ResponseComplete: true})
 		}
 	}
 
 	// 6. embedding (optional; reflects configuration)
 	if embeddingConfigured {
-		embeddingResult, vectors, err := RunEmbedding(ctx, probe, config.EmbeddingModelID)
 		embDigest := sha256.Sum256([]byte("connection_probe_v1"))
 		rendered := sha256.Sum256([]byte(`{"model":"` + config.EmbeddingModelID + `"}`))
 		callID, grant, beginOK := ledger.Begin(ctx, 6, runtimev1.ModelOperation_MODEL_OPERATION_EMBEDDING, config.EmbeddingModelID, hex.EncodeToString(embDigest[:]), hex.EncodeToString(rendered[:]), 0, 0)
 		_ = grant
+		if !beginOK {
+			outcome.Detail = "embedding admission rejected"
+			return outcome
+		}
+		embeddingResult, vectors, err := RunEmbedding(ctx, probe, config.EmbeddingModelID)
 		if err != nil {
 			failures = append(failures, ActionEmbedding+": "+err.Error())
 			if beginOK {
-				ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE})
+				complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_FAILED, FailureReason: runtimev1.ModelCallFailureReason_MODEL_CALL_FAILURE_REASON_INVALID_RESPONSE})
 			}
 		} else {
 			outcome.Capability.EmbeddingSupported = true
 			outcome.Capability.EmbeddingVectorDim = len(vectors[0])
 			if beginOK {
-				ledger.Complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_SUCCEEDED, ProviderRequestId: embeddingResult.RequestID, InputTokens: uint64(embeddingResult.Usage.Input), TotalTokens: uint64(embeddingResult.Usage.Total), ResponseDigest: digestOf(`{"vectors":1}`), ResponseComplete: true, EmbeddingVectors: []*runtimev1.EmbeddingVector{{InputIndex: 0, SourceDigest: embDigest[:], Values: toFloat32(vectors[0])}}})
+				complete(ctx, callID, &runtimev1.CompleteModelCall{AttemptId: attemptOf(ctx), ModelCallId: callID, Outcome: runtimev1.ModelCallOutcome_MODEL_CALL_OUTCOME_SUCCEEDED, ProviderRequestId: embeddingResult.RequestID, InputTokens: uint64(embeddingResult.Usage.Input), TotalTokens: uint64(embeddingResult.Usage.Total), ResponseDigest: digestOf(`{"vectors":1}`), ResponseComplete: true, EmbeddingVectors: []*runtimev1.EmbeddingVector{{InputIndex: 0, SourceDigest: embDigest[:], Values: toFloat32(vectors[0])}}})
 			}
 		}
 	}
@@ -181,7 +210,7 @@ func Run(ctx context.Context, config Config, apiKey string, embeddingConfigured 
 		outcome.Detail = "all frozen capabilities observed"
 	} else {
 		outcome.Detail = strings.Join(failures, "; ")
-		sharedops.LogEvent("plinth", "info", "probe.model_provider_failed", outcome.Detail)
+		sharedops.LogEvent("plinth", "info", "probe.model_provider_failed", "capability probe failed")
 	}
 	return outcome
 }
