@@ -6,7 +6,7 @@ import { streamInvestigationMessage } from '@/features/investigation/stream'
 import { type ToolCallItem } from '@/features/investigation/tools/api'
 
 const { api, uploadAttachment } = vi.hoisted(() => ({ api: {
-  list: vi.fn(), get: vi.fn(), listMessages: vi.fn(), listAttempts: vi.fn(), businessSystems: vi.fn(), create: vi.fn(), sendMessage: vi.fn(), cancelAttempt: vi.fn(), retryAttempt: vi.fn(), undo: vi.fn(),
+  list: vi.fn(), get: vi.fn(), listMessages: vi.fn(), listAttempts: vi.fn(), create: vi.fn(), sendMessage: vi.fn(), cancelAttempt: vi.fn(), retryAttempt: vi.fn(), undo: vi.fn(),
 }, uploadAttachment: vi.fn() }))
 vi.mock('@/features/investigation/api', () => ({ api, sourceLabel: (type: string) => type }))
 vi.mock('@/features/investigation/attachments/api', () => ({ attachmentCommandId: () => 'upload-command', uploadAttachment }))
@@ -17,15 +17,15 @@ vi.mock('@/features/knowledge/api', () => ({ api: { createMessageCandidate: vi.f
 const user = { id: 'u', username: 'operator', displayName: 'Operator', role: 'operator' as const, passwordChangeRequired: false, authRevision: 1, enabled: true, initialized: true, lastLoginAt: null, rowVersion: 1 }
 function View({ route, suspended = false, navigate = vi.fn() }: { route: string; suspended?: boolean; navigate?: (route: string) => void }) { const view = useInvestigationsModule({ user, route, suspended, navigate, openEvidence: vi.fn() }); return <>{view.list}{view.content}</> }
 const detail = { id: 'i1', displayTitle: 'CPU 排查', lastActivityAt: '2026-01-01T00:00:00Z', createdAt: '2026-01-01T00:00:00Z', createdBy: 'u', headMessageId: 'm1', activeAttemptId: 'a1', messageCount: 1, attemptCount: 1, sources: [] }
-beforeEach(() => { api.businessSystems.mockResolvedValue([]); Element.prototype.scrollIntoView ??= vi.fn() })
+beforeEach(() => { Element.prototype.scrollIntoView ??= vi.fn() })
 afterEach(() => { cleanup(); vi.clearAllMocks() })
 describe('investigations module', () => {
   it('shows the new-conversation workspace on the default route without creating an investigation', async () => {
     api.list.mockResolvedValue({ items: [] })
     render(<View route="/investigations" />)
     expect(await screen.findByRole('textbox', { name: '消息内容' })).toBeInTheDocument()
-    expect(screen.getByRole('combobox', { name: '业务系统' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '创建并发送' })).toBeDisabled()
+    expect(screen.queryByRole('combobox', { name: '业务系统' })).not.toBeInTheDocument()
     expect(screen.queryByText('从左侧创建或打开一次调查。')).not.toBeInTheDocument()
     expect(api.create).not.toHaveBeenCalled()
   })
@@ -34,36 +34,32 @@ describe('investigations module', () => {
     render(<View route="/investigations/new?occurrence=o1&initialAnalysis=a1" />)
     fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '排查 CPU' } })
     fireEvent.click(screen.getByRole('button', { name: '创建并发送' }))
-    await waitFor(() => expect(api.create).toHaveBeenCalledWith('排查 CPU', [{ type: 'occurrence', sourceId: 'o1' }, { type: 'initial_analysis', sourceId: 'a1' }], [], ''))
+    await waitFor(() => expect(api.create).toHaveBeenCalledWith('排查 CPU', [{ type: 'occurrence', sourceId: 'o1' }, { type: 'initial_analysis', sourceId: 'a1' }], []))
   })
   it('creates only after a default-route workspace send', async () => {
     api.list.mockResolvedValue({ items: [] }); api.create.mockResolvedValue({ ...detail, id: 'i2' })
     render(<View route="/investigations" />)
     fireEvent.change(await screen.findByRole('textbox', { name: '消息内容' }), { target: { value: '排查 CPU' } })
     fireEvent.click(screen.getByRole('button', { name: '创建并发送' }))
-    await waitFor(() => expect(api.create).toHaveBeenCalledWith('排查 CPU', [], [], ''))
+    await waitFor(() => expect(api.create).toHaveBeenCalledWith('排查 CPU', [], []))
   })
-  it('describes default enabled-source authorization and treats business binding as historical context', async () => {
-    // Copy contract (ADR-0004): enabled integrations are always the attempt's
-    // source-level authority, so an unbound conversation is not "generic only";
-    // an explicit business key is frozen descriptive context, never a grant.
-    api.list.mockResolvedValue({ items: [] })
-    render(<View route="/investigations/new" />)
-    expect(await screen.findByRole('combobox', { name: '业务系统' })).toBeInTheDocument()
-    expect(screen.getByText('不绑定业务系统')).toBeInTheDocument()
-    expect(screen.getByText(/默认可使用已启用接入授权的只读指标/)).toBeInTheDocument()
-    expect(screen.getByText(/历史上下文，并非授权前提/)).toBeInTheDocument()
-    expect(screen.queryByText(/仅通用对话/)).not.toBeInTheDocument()
-    expect(screen.queryByText(/才能使用该系统已授权的只读指标/)).not.toBeInTheDocument()
-  })
-  it('sends the explicit business-system selection with the first message', async () => {
-    api.list.mockResolvedValue({ items: [] }); api.businessSystems.mockResolvedValue([{ key: 'mall-live-prometheus', displayName: 'Mall Live Prometheus' }]); api.create.mockResolvedValue({ ...detail, id: 'i2' })
-    render(<View route="/investigations/new" />)
-    fireEvent.click(await screen.findByRole('combobox', { name: '业务系统' }))
-    fireEvent.click(await screen.findByText('Mall Live Prometheus'))
-    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '检查商城延迟' } })
-    fireEvent.click(screen.getByRole('button', { name: '创建并发送' }))
-    await waitFor(() => expect(api.create).toHaveBeenCalledWith('检查商城延迟', [], [], 'mall-live-prometheus'))
+  it('sends the appended alert sources with the next message (ADR-0012「+ 引入告警」)', async () => {
+    api.get.mockResolvedValue(detail); api.listMessages.mockResolvedValue({ items: [] }); api.listAttempts.mockResolvedValue({ items: [] })
+    api.sendMessage.mockResolvedValue({ id: 'm2', seq: 2, role: 'user', status: 'active', content: '结合这条告警看', attachments: [], evidenceIds: null, createdAt: '2026-01-01T00:00:00Z' })
+    const { streamInvestigationMessage } = await import('@/features/investigation/stream')
+    vi.mocked(streamInvestigationMessage).mockReturnValue((async function* () {})())
+    const { fetchAlerts } = await import('@/features/alerts/api')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ snapshotSeq: 1, items: [
+      { id: 'alert-9', source: 'alertmanager', state: 'Firing', rowVersion: 1, severity: 'critical', title: 'CheckoutLatencyHigh', firstSeenAt: '2026-01-01T00:00:00Z', lastStateChangeAt: '2026-01-01T00:00:00Z', labels: {}, correlations: [] },
+    ] }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+    void fetchAlerts
+    render(<View route="/investigations/i1" />)
+    fireEvent.click(await screen.findByRole('button', { name: '引入告警' }))
+    fireEvent.click(await screen.findByRole('button', { name: /CheckoutLatencyHigh/ }))
+    expect(await screen.findByText('告警 CheckoutLatencyHigh')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '结合这条告警看' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(api.sendMessage).toHaveBeenCalledWith('i1', '结合这条告警看', 'm1', [], [{ type: 'occurrence', sourceId: 'alert-9' }]))
   })
   it('disables the first-send action until content or an attachment is supplied', async () => {
     api.list.mockResolvedValue({ items: [] }); render(<View route="/investigations/new" />)

@@ -44,15 +44,15 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 const firing = {
-  id: '7', state: 'Firing', rowVersion: 1,
+  id: '7', state: 'Firing', rowVersion: 1, source: 'alertmanager', severity: 'critical', title: 'LiveOne',
   firstSeenAt: '2026-08-18T10:00:00Z', lastStateChangeAt: '2026-08-18T10:00:00Z',
-  labels: { alertname: 'LiveOne', severity: 'critical' },
+  labels: { alertname: 'LiveOne', severity: 'critical' }, correlations: [],
 }
 const resolved = { ...firing, state: 'Resolved', rowVersion: 2, resolvedAt: '2026-08-18T10:05:00Z' }
 
 /** Minimal observer for the public hook result; it deliberately asserts no UI. */
-function LiveAlertsHarness({ view, businessSystemKey = '', enabled = true }: { view: 'Firing' | 'Resolved'; businessSystemKey?: string; enabled?: boolean }) {
-  const alerts = useLiveAlerts(view, businessSystemKey, enabled)
+function LiveAlertsHarness({ view, viewKey = '', enabled = true }: { view: 'Firing' | 'Resolved'; viewKey?: string; enabled?: boolean }) {
+  const alerts = useLiveAlerts(view, { viewKey }, enabled)
   return <><output data-testid="projection">{alerts.items.map((item) => `${item.id}:${item.state}:${item.rowVersion}`).join(',')}</output><button type="button" onClick={alerts.refresh}>refresh</button></>
 }
 

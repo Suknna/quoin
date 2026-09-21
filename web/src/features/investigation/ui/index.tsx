@@ -1,6 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
 
 import {
+	BellPlus,
 	Bot,
 	FileText,
 	LoaderCircle,
@@ -47,14 +48,16 @@ import {
 	MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
 import {
-	Select,
-	SelectContent,
-	SelectItem,
-	SelectTrigger,
-	SelectValue,
-} from "@/components/ui/select";
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
+} from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
+import {
+	type AlertOccurrenceSummary,
+	fetchAlerts,
+} from "@/features/alerts/api";
 import {
 	appendFeedback,
 	type FeedbackEvent,
@@ -193,19 +196,8 @@ function NewInvestigation({
 	const analysis = query.get("initialAnalysis");
 	const [body, setBody] = useState("");
 	const [files, setFiles] = useState<TextAttachmentSummary[]>([]);
-	const [systems, setSystems] = useState<
-		Array<{ key: string; displayName: string }>
-	>([]);
-	const [businessSystemKey, setBusinessSystemKey] = useState("");
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
-	useEffect(() => {
-		void Promise.resolve(api.businessSystems())
-			.then(setSystems)
-			.catch((reason: unknown) =>
-				setError(messageOf(reason, "无法加载可用业务系统。")),
-			);
-	}, []);
 	const create = async () => {
 		if (!body.trim() && files.length === 0)
 			return setError("请输入第一条消息或添加附件。");
@@ -214,9 +206,9 @@ function NewInvestigation({
 		try {
 			const sources = occurrence
 				? [
-						{ type: "occurrence", sourceId: occurrence },
+						{ type: "occurrence" as const, sourceId: occurrence },
 						...(analysis
-							? [{ type: "initial_analysis", sourceId: analysis }]
+							? [{ type: "initial_analysis" as const, sourceId: analysis }]
 							: []),
 					]
 				: [];
@@ -224,7 +216,6 @@ function NewInvestigation({
 				body,
 				sources,
 				files.map((file) => file.id),
-				businessSystemKey,
 			);
 			notify.success("已创建调查");
 			window.dispatchEvent(new Event("investigation-created"));
@@ -258,37 +249,6 @@ function NewInvestigation({
 						</AlertDescription>
 					</Alert>
 				)}
-				<div>
-					<label
-						className="mb-1 block text-sm font-medium"
-						htmlFor="business-system"
-					>
-						业务系统（可选）
-					</label>
-					<Select
-						value={businessSystemKey || "__none"}
-						onValueChange={(value) =>
-							setBusinessSystemKey(value === "__none" ? "" : value)
-						}
-						disabled={suspended || busy}
-					>
-						<SelectTrigger id="business-system" aria-label="业务系统">
-							<SelectValue placeholder="不绑定业务系统" />
-						</SelectTrigger>
-						<SelectContent>
-							<SelectItem value="__none">不绑定业务系统</SelectItem>
-							{systems.map((system) => (
-								<SelectItem key={system.key} value={system.key}>
-									{system.displayName}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
-					<p className="mt-1 text-xs text-muted-foreground">
-						AI SRE
-						默认可使用已启用接入授权的只读指标；绑定业务系统仅冻结其声明作为历史上下文，并非授权前提。
-					</p>
-				</div>
 				<div className="grid gap-2 sm:grid-cols-2">
 					{starterPrompts.map((prompt) => (
 						<Button
@@ -385,13 +345,6 @@ function InvestigationView({
 				<h1 className="break-words text-lg font-semibold">
 					{detail.displayTitle}
 				</h1>
-				{detail.businessSystemKey && (
-					<div className="mt-2">
-						<Badge variant="outline">
-							业务系统：{detail.businessSystemName || detail.businessSystemKey}
-						</Badge>
-					</div>
-				)}
 				<div className="mt-2 flex flex-wrap gap-2">
 					{detail.sources.map((source) => (
 						<SourceLink
@@ -471,6 +424,10 @@ function Thread({
 }) {
 	const [body, setBody] = useState("");
 	const [files, setFiles] = useState<TextAttachmentSummary[]>([]);
+	// ADR-0012「+ 引入告警」：随下一条消息幂等追加的告警来源。
+	const [pendingSources, setPendingSources] = useState<
+		AlertOccurrenceSummary[]
+	>([]);
 	const [mutating, setMutating] = useState(false);
 	const [events, setEvents] = useState<FeedbackEvent[]>([]);
 	const [streamText, setStreamText] = useState("");
@@ -530,12 +487,17 @@ function Thread({
 				body,
 				detail.headMessageId ?? null,
 				files.map((file) => file.id),
+				pendingSources.map((alert) => ({
+					type: "occurrence" as const,
+					sourceId: alert.id,
+				})),
 			);
 			// Refresh the durable projection before opening the stream. This prevents the
 			// submitted user turn from briefly disappearing while the server assigns it.
 			await reload();
 			setBody("");
 			setFiles([]);
+			setPendingSources([]);
 			setStreaming(true);
 			controller.current = new AbortController();
 			for await (const update of streamInvestigationMessage(
@@ -689,6 +651,8 @@ function Thread({
 						setBody={setBody}
 						files={files}
 						setFiles={setFiles}
+						pendingSources={pendingSources}
+						setPendingSources={setPendingSources}
 						disabled={!canCompose}
 						placeholder={
 							active || streaming || stopping
@@ -996,6 +960,8 @@ function Composer({
 	setBody,
 	files,
 	setFiles,
+	pendingSources,
+	setPendingSources,
 	disabled,
 	placeholder,
 	onSubmit,
@@ -1006,6 +972,8 @@ function Composer({
 	setBody: (value: string) => void;
 	files: TextAttachmentSummary[];
 	setFiles: Dispatch<SetStateAction<TextAttachmentSummary[]>>;
+	pendingSources?: AlertOccurrenceSummary[];
+	setPendingSources?: Dispatch<SetStateAction<AlertOccurrenceSummary[]>>;
 	disabled: boolean;
 	placeholder: string;
 	onSubmit: () => void;
@@ -1070,6 +1038,31 @@ function Composer({
 					))}
 				</div>
 			)}
+			{pendingSources && pendingSources.length > 0 && (
+				<div className="flex flex-wrap gap-1 px-1 pb-2">
+					{pendingSources.map((alert) => (
+						<Badge key={alert.id} variant="secondary">
+							<BellPlus />
+							告警 {alert.title || alert.id}
+							<Button
+								type="button"
+								variant="ghost"
+								size="icon-xs"
+								className="ml-1 hover:text-destructive"
+								aria-label={`移除告警来源 ${alert.title || alert.id}`}
+								disabled={disabled}
+								onClick={() =>
+									setPendingSources?.((current) =>
+										current.filter((item) => item.id !== alert.id),
+									)
+								}
+							>
+								<X className="size-3" />
+							</Button>
+						</Badge>
+					))}
+				</div>
+			)}
 			{pendingUploads > 0 && (
 				<p className="px-1 pb-2 text-xs text-muted-foreground" role="status">
 					正在上传附件…
@@ -1081,6 +1074,7 @@ function Composer({
 				</p>
 			)}
 			<div className="flex items-center justify-between gap-2 px-1">
+				<div className="flex items-center gap-3">
 				<label className="inline-flex cursor-pointer items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
 					<Paperclip className="size-4" />
 					添加附件
@@ -1095,10 +1089,26 @@ function Composer({
 						}}
 					/>
 				</label>
+				{setPendingSources && (
+					<AlertSourcePicker
+						disabled={blocked}
+						onSelect={(alert) =>
+							setPendingSources((current) =>
+								current.some((item) => item.id === alert.id)
+									? current
+									: [...current, alert],
+							)
+						}
+					/>
+				)}
+				</div>
 				<Button
 					type="button"
 					size="sm"
-					disabled={blocked || (!body.trim() && files.length === 0)}
+					disabled={
+						blocked ||
+						(!body.trim() && files.length === 0 && !pendingSources?.length)
+					}
 					onClick={onSubmit}
 				>
 					{submitting ? (
@@ -1114,5 +1124,83 @@ function Composer({
 				</Button>
 			</div>
 		</div>
+	);
+}
+
+/** 「+ 引入告警」选择器（ADR-0012）：弹出最近 firing 告警列表，点击追加为
+ * 下一条消息的来源（重复选择幂等忽略）。 */
+function AlertSourcePicker({
+	disabled,
+	onSelect,
+}: {
+	disabled: boolean;
+	onSelect: (alert: AlertOccurrenceSummary) => void;
+}) {
+	const [alerts, setAlerts] = useState<AlertOccurrenceSummary[] | null>(null);
+	const [error, setError] = useState("");
+	const load = useCallback(async (open: boolean) => {
+		if (!open || alerts) return;
+		try {
+			setAlerts((await fetchAlerts("Firing")).items);
+			setError("");
+		} catch (reason) {
+			setError(messageOf(reason, "无法加载近期告警。"));
+		}
+	}, [alerts]);
+	return (
+		<Popover onOpenChange={(open) => void load(open)}>
+			<PopoverTrigger asChild>
+				<Button
+					type="button"
+					variant="ghost"
+					size="xs"
+					className="text-xs text-muted-foreground hover:text-foreground"
+					disabled={disabled}
+				>
+					<BellPlus className="size-4" />
+					引入告警
+				</Button>
+			</PopoverTrigger>
+			<PopoverContent align="start" className="w-80 p-2">
+				<p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
+					选择要引入对话的近期告警
+				</p>
+				<div className="max-h-64 overflow-y-auto">
+					{error ? (
+						<p className="px-2 py-2 text-xs text-destructive" role="alert">
+							{error}
+						</p>
+					) : alerts === null ? (
+						<p className="px-2 py-2 text-xs text-muted-foreground" role="status">
+							正在加载告警…
+						</p>
+					) : alerts.length === 0 ? (
+						<p className="px-2 py-2 text-xs text-muted-foreground">
+							当前没有触发中的告警。
+						</p>
+					) : (
+						alerts.map((alert) => (
+							<Button
+								key={alert.id}
+								type="button"
+								variant="ghost"
+								size="sm"
+								className="w-full justify-start whitespace-normal text-left"
+								onClick={() => onSelect(alert)}
+							>
+								<span className="min-w-0 flex-1">
+									<span className="block truncate font-medium">
+										{alert.title || alert.id}
+									</span>
+									<span className="block truncate text-xs text-muted-foreground">
+										{alert.severity} · {alert.state}
+									</span>
+								</span>
+							</Button>
+						))
+					)}
+				</div>
+			</PopoverContent>
+		</Popover>
 	);
 }

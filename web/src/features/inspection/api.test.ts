@@ -52,7 +52,6 @@ describe("inspection HTTP wire contract", () => {
     const page = await listInspectionRuns();
     expect(page.items).toHaveLength(1);
     expect(page.items[0]).toMatchObject({ id: "1", connectionName: "mall-prometheus", planKey: "basic-mall-prometheus" });
-    expect(page.items[0].businessSystemKey).toBeUndefined();
     expect(page.nextCursor).toBeUndefined();
     expect(calls[0].url).toContain("/api/v1/inspections/runs?limit=100");
     expect(calls[0].url).not.toContain("planKey");

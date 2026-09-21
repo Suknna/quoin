@@ -1,28 +1,16 @@
-export type AttributionStatus = 'attributed' | 'unattributed' | 'conflict'
-
 /**
- * Immutable delivery-time evidence emitted by the alert API. The JSON fields
- * intentionally remain strings until the server contract publishes typed arrays.
+ * ADR-0012 告警归一化层读模型：severity/title/resource/annotations 均来自
+ * occurrence 首观测冻结列；correlations 是首观测命中的业务视图快照
+ * （多命中全记录）；enrichment 是首观测富化终值（fields）。
  */
-export interface AttributionDiagnostic {
-  status: AttributionStatus
-  candidateSystemIdsJson: string
-  candidateConfigVersionIdsJson: string
-  reasonJson: string
+export interface AlertCorrelation {
+  viewKey: string
+  displayName: string
 }
 
-/**
- * The real business-view attribution frozen at first receipt (ADR-0008).
- * Attributed rows carry the unique view identity; ambiguous rows keep every
- * candidate snapshot in candidatesJson; unattributed rows carry the reason.
- */
-export interface ViewAttributionDiagnostic {
-  status: 'attributed' | 'ambiguous' | 'unattributed'
-  viewKey?: string
-  viewName?: string
-  candidatesJson: string
-  reasonJson: string
-  createdAt: string
+export interface AlertEnrichment {
+  fields: Record<string, string>
+  ruleKeys?: string[]
 }
 
 export interface AlertOccurrenceSummary {
@@ -30,9 +18,9 @@ export interface AlertOccurrenceSummary {
   source: 'alertmanager' | 'platform'
   state: 'Firing' | 'Resolved'
   rowVersion: number
-  businessSystemKey?: string
-  attribution?: AttributionDiagnostic
-  viewAttribution?: ViewAttributionDiagnostic
+  severity: 'critical' | 'high' | 'warning' | 'info'
+  title: string
+  resource?: string
   component?: 'plinth'
   reason?: string
   firstSeenAt: string
@@ -40,6 +28,8 @@ export interface AlertOccurrenceSummary {
   resolvedAt?: string
   labels: Record<string, string>
   annotations?: Record<string, string>
+  correlations: AlertCorrelation[]
+  enrichment?: AlertEnrichment
 }
 
 export interface AlertSnapshot {
@@ -90,7 +80,7 @@ export interface CreateAlertSourceRequest {
 
 export interface IntakeIssue {
   id: string
-  kind: 'identity_conflict' | 'fingerprint_mismatch' | 'delivery_truncated'
+  kind: 'identity_conflict' | 'fingerprint_mismatch' | 'delivery_truncated' | 'normalizer_missing'
   issueKey: string
   detailJson: string
   firstSeenAt: string
@@ -99,22 +89,8 @@ export interface IntakeIssue {
   rowVersion: number
 }
 
-export interface BusinessSystemOption {
-  key: string
-  displayName: string
-}
-
-/** A restricted projection keeps alert and AI SRE consumers independent of management reads. */
-export async function fetchBusinessSystems(): Promise<BusinessSystemOption[]> {
-  const response = await fetch('/api/v1/business-context', { credentials: 'include' })
-  if (!response.ok) throw new Error('业务上下文列表加载失败')
-  const page = (await response.json()) as { items?: BusinessSystemOption[] }
-  return page.items ?? []
-}
-
-export async function fetchAlerts(state: 'Firing' | 'Resolved' = 'Firing', businessSystemKey = '', viewKey = ''): Promise<AlertSnapshot> {
+export async function fetchAlerts(state: 'Firing' | 'Resolved' = 'Firing', viewKey = ''): Promise<AlertSnapshot> {
   const params = new URLSearchParams({ state })
-  if (businessSystemKey) params.set('businessSystemKey', businessSystemKey)
   if (viewKey) params.set('viewKey', viewKey)
   const response = await fetch(`/api/v1/alerts?${params.toString()}`, { credentials: 'include' })
   if (!response.ok) throw new Error('告警列表加载失败')

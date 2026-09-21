@@ -37,6 +37,12 @@ export const platformGroup: SettingsNavGroup = {
 			adminOnly: true,
 		},
 		{
+			key: "enrichment-rules",
+			label: "富化规则",
+			route: "/settings/platform/enrichment-rules",
+			adminOnly: true,
+		},
+		{
 			key: "model-providers",
 			label: "模型提供方",
 			route: "/settings/platform/model-providers",

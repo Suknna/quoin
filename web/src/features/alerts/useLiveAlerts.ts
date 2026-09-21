@@ -3,6 +3,8 @@
 // occurrence detail when a newer rowVersion arrives and reconciles the list
 // in place (UI-LIST-003), buffering new rows behind an explicit merge so the
 // reading position is never disturbed (UI-LIST-002).
+// ADR-0012：过滤单轨化——只按业务视图（viewKey，基于首观测冻结的关联快照），
+// 旧 businessSystemKey 轨道已删除。
 
 import { messageOf } from "@/app/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -25,22 +27,16 @@ export interface LiveAlerts {
 }
 
 export interface LiveAlertsFilter {
-	/** Legacy declaration filter; stays compatible with historical rows. */
-	businessSystemKey?: string;
-	/** Business-view attribution filter (ADR-0008); the primary UI filter. */
+	/** Business-view filter (ADR-0012): matches the frozen correlation snapshots. */
 	viewKey?: string;
 }
 
 export function useLiveAlerts(
 	view: "Firing" | "Resolved",
-	filter: string | LiveAlertsFilter = "",
+	filter: LiveAlertsFilter = {},
 	enabled = true,
 ): LiveAlerts {
-	// String form stays the legacy businessSystemKey filter for existing callers.
-	const scope: LiveAlertsFilter =
-		typeof filter === "string" ? { businessSystemKey: filter } : filter;
-	const businessSystemKey = scope.businessSystemKey ?? "";
-	const viewKey = scope.viewKey ?? "";
+	const viewKey = filter.viewKey ?? "";
 	const stream = useAlertEventStream();
 	// `enabled` pauses reconciliation for this list only; another consumer may
 	// still own the shared SSE stream for its independent projection.
@@ -63,9 +59,9 @@ export function useLiveAlerts(
 	pendingRef.current = pending;
 	const viewRef = useRef(view);
 	viewRef.current = view;
-	const filterRef = useRef({ businessSystemKey, viewKey });
-	filterRef.current = { businessSystemKey, viewKey };
-	const projectionKey = `${view}\u0000${businessSystemKey}\u0000${viewKey}`;
+	const filterRef = useRef({ viewKey });
+	filterRef.current = { viewKey };
+	const projectionKey = `${view}\u0000${viewKey}`;
 	const renderedProjectionKeyRef = useRef(projectionKey);
 	// React updates refs during render before its effects run. Invalidate the
 	// old projection here so a browser SSE task cannot race that small window
@@ -79,7 +75,7 @@ export function useLiveAlerts(
 	const loadSnapshot = useCallback(
 		async (
 			snapshotView: "Firing" | "Resolved",
-			snapshotFilter: { businessSystemKey: string; viewKey: string },
+			snapshotFilter: { viewKey: string },
 			clearVisibleProjection: boolean,
 			allowPaused = false,
 		) => {
@@ -103,7 +99,6 @@ export function useLiveAlerts(
 			try {
 				const snapshot = await fetchAlerts(
 					snapshotView,
-					snapshotFilter.businessSystemKey,
 					snapshotFilter.viewKey,
 				);
 				if (
@@ -136,7 +131,7 @@ export function useLiveAlerts(
 	);
 
 	useEffect(() => {
-		if (enabled) void loadSnapshot(view, { businessSystemKey, viewKey }, true);
+		if (enabled) void loadSnapshot(view, { viewKey }, true);
 		else {
 			// Invalidate every in-flight snapshot before it can start/restart this
 			// shared stream. Other consumers retain their own subscriptions.
@@ -144,7 +139,7 @@ export function useLiveAlerts(
 			projectionReadyRef.current = false;
 			setLoading(false);
 		}
-	}, [enabled, loadSnapshot, view, businessSystemKey, viewKey]);
+	}, [enabled, loadSnapshot, view, viewKey]);
 
 	useEffect(() => {
 		return stream.onResync(() => {
@@ -210,25 +205,15 @@ export function useLiveAlerts(
 			}
 			versions.current.set(detail.id, detail.rowVersion);
 			lastSeqRef.current = seq;
-			// The mechanical filter mirrors the server-side businessSystemKey /
-			// viewKey projections: events only carry ids, so the re-read detail
-			// decides membership in the filtered view (未归属 rows only match no
-			// filter).
+			// The mechanical filter mirrors the server-side viewKey projection:
+			// events only carry ids, so the re-read detail decides membership in
+			// the filtered view (无关联告警只匹配未过滤视图).
 			const scope = filterRef.current;
-			const legacyKey = scope.businessSystemKey;
-			if (legacyKey !== "" && (detail.businessSystemKey ?? "") !== legacyKey) {
-				setItems((previous) =>
-					previous.filter((item) => item.id !== detail.id),
-				);
-				setPending((previous) =>
-					previous.filter((item) => item.id !== detail.id),
-				);
-				return;
-			}
-			const scopedViewKey = scope.viewKey;
 			if (
-				scopedViewKey !== "" &&
-				(detail.viewAttribution?.viewKey ?? "") !== scopedViewKey
+				scope.viewKey !== "" &&
+				!(detail.correlations ?? []).some(
+					(correlation) => correlation.viewKey === scope.viewKey,
+				)
 			) {
 				setItems((previous) =>
 					previous.filter((item) => item.id !== detail.id),

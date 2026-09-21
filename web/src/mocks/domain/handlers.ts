@@ -360,11 +360,15 @@ export const domainHandlers = [
 		if (denied) return denied;
 		const url = new URL(request.url);
 		const state = url.searchParams.get("state") ?? "Firing";
-		const businessSystemKey = url.searchParams.get("businessSystemKey");
+		// ADR-0012：viewKey 过滤按首观测冻结的关联快照精确匹配。
+		const viewKey = url.searchParams.get("viewKey");
 		const items = getMockState().alerts.filter(
 			(item) =>
 				item.state === state &&
-				(!businessSystemKey || item.businessSystemKey === businessSystemKey),
+				(!viewKey ||
+					(item.correlations ?? []).some(
+						(correlation) => correlation.viewKey === viewKey,
+					)),
 		);
 		return json({ snapshotSeq: 10, items });
 	}),
@@ -858,15 +862,6 @@ export const domainHandlers = [
 		return item ? json(item) : problem(404, "未找到连接。");
 	}),
 
-	http.get("*/api/v1/business-context", () => {
-		const denied = required();
-		return (
-			denied ??
-			page(
-				getMockState().businessContext,
-			)
-		);
-	}),
 	http.get("*/api/v1/label-contracts", () => {
 		const denied = required();
 		return denied ?? page(getMockState().labels);
@@ -875,6 +870,80 @@ export const domainHandlers = [
 	// Business views are optional admin-scoped scope-and-description objects
 	// (ADR 0004). The mock keeps the real command shapes: clientCommandId on
 	// writes, expectedRowVersion fencing on updates, and viewKey immutability.
+	http.get("*/api/v1/enrichment-rules", () => {
+		const denied = adminRequired();
+		return denied ?? page(getMockState().enrichmentRules);
+	}),
+	http.post("*/api/v1/enrichment-rules", ({ request }) =>
+		replayableCommand("create_enrichment_rule", request, async () => {
+			const denied = adminRequired();
+			if (denied) return denied;
+			const input = await body<{
+				ruleKey: string;
+				displayName: string;
+				description?: string;
+				enabled?: boolean;
+				labelConditions?: Record<string, string>;
+				alertSourceKeys?: string[];
+				outputs: Record<string, string>;
+				priority?: number;
+			}>(request);
+			if (!input.ruleKey || !input.displayName || !input.outputs)
+				return problem(422, "规则 key、显示名称与富化字段必填。", "validation_failed");
+			if (getMockState().enrichmentRules.some((rule) => rule.ruleKey === input.ruleKey))
+				return problem(409, "规则 key 已存在。", "rule_key_exists");
+			const now = "2026-09-09T09:30:00.000Z";
+			const rule = {
+				ruleKey: input.ruleKey,
+				displayName: input.displayName,
+				description: input.description ?? "",
+				enabled: input.enabled ?? true,
+				labelConditions: { ...(input.labelConditions ?? {}) },
+				alertSourceKeys: [...(input.alertSourceKeys ?? [])],
+				outputs: { ...input.outputs },
+				priority: input.priority || 100,
+				rowVersion: 1,
+				createdAt: now,
+				updatedAt: now,
+			};
+			getMockState().enrichmentRules.unshift(rule);
+			return json(rule, { status: 201 });
+		}),
+	),
+	http.put("*/api/v1/enrichment-rules/:ruleKey", ({ params, request }) =>
+		replayableCommand("update_enrichment_rule", request, async () => {
+			const denied = adminRequired();
+			if (denied) return denied;
+			const rule = getMockState().enrichmentRules.find(
+				(item) => item.ruleKey === params.ruleKey,
+			);
+			if (!rule) return problem(404, "未找到富化规则。", "not_found");
+			const input = await body<{
+				displayName: string;
+				description: string;
+				enabled: boolean;
+				labelConditions: Record<string, string>;
+				alertSourceKeys: string[];
+				outputs: Record<string, string>;
+				priority: number;
+				expectedRowVersion: number;
+			}>(request);
+			const stale = conflict(input.expectedRowVersion, rule.rowVersion);
+			if (stale) return stale;
+			Object.assign(rule, {
+				displayName: input.displayName,
+				description: input.description,
+				enabled: input.enabled,
+				labelConditions: { ...input.labelConditions },
+				alertSourceKeys: [...input.alertSourceKeys],
+				outputs: { ...input.outputs },
+				priority: input.priority || 100,
+				rowVersion: rule.rowVersion + 1,
+				updatedAt: "2026-09-09T09:31:00.000Z",
+			});
+			return json(rule);
+		}),
+	),
 	http.get("*/api/v1/business-views", () => {
 		const denied = adminRequired();
 		return denied ?? page(getMockState().businessViews);

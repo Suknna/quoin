@@ -45,23 +45,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/business-context": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 当前用户可用的业务上下文（已发布配置的业务系统键与名称） */
-        get: operations["listBusinessContext"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/business-views": {
         parameters: {
             query?: never;
@@ -96,6 +79,47 @@ export interface paths {
          * @description 更新必须携带 expectedRowVersion 和 clientCommandId；viewKey 由路径唯一携带，请求体不重复。
          */
         put: operations["updateBusinessView"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/enrichment-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 富化规则列表（ADR-0012） */
+        get: operations["listEnrichmentRules"];
+        put?: never;
+        /** 创建富化规则 */
+        post: operations["createEnrichmentRule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/enrichment-rules/{ruleKey}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                ruleKey: string;
+            };
+            cookie?: never;
+        };
+        /** 读取富化规则 */
+        get: operations["getEnrichmentRule"];
+        /**
+         * 更新富化规则
+         * @description 更新必须携带 expectedRowVersion 和 clientCommandId；ruleKey 由路径唯一携带，请求体不重复。规则永不删除——退役 = enabled=0，key 不复用；更新不回写任何已冻结的首观测富化文档。
+         */
+        put: operations["updateEnrichmentRule"];
         post?: never;
         delete?: never;
         options?: never;
@@ -2032,12 +2056,6 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        BusinessContextItem: {
-            /** @description 业务系统键 */
-            key: string;
-            /** @description 展示名 */
-            displayName: string;
-        };
         PluginInspectionScope: {
             /** @constant */
             kind: "integration";
@@ -2140,6 +2158,66 @@ export interface components {
                 /** @description 显式参与告警归属的 Alertmanager 告警源 key（ADR-0008）；非空时必须至少一个标签条件。 */
                 alertSourceKeys?: components["schemas"]["StableKey"][];
             };
+            clientCommandId: string;
+            expectedRowVersion: number;
+        };
+        EnrichmentRule: {
+            /** @description 退役不复用；不可改写、行不可删除（退役 = enabled=0）。 */
+            ruleKey: components["schemas"]["StableKey"];
+            displayName: string;
+            description: string;
+            /** @description false = 规则停用（不参与首观测富化求值），即退役形态。 */
+            enabled: boolean;
+            /** @description 精确 label=value 匹配条件（与业务视图同语义）；空对象 = 全局规则，命中一切。 */
+            labelConditions: {
+                [key: string]: string;
+            };
+            /** @description 规则适用的告警源 key（必须存在且启用）；空数组 = 不限来源。 */
+            alertSourceKeys: components["schemas"]["StableKey"][];
+            /** @description 命中时叠加的富化字段；按规则 priority 升序叠加，后命中不覆盖已写字段。 */
+            outputs: {
+                [key: string]: string;
+            };
+            /** @description 叠加序（升序先生效）；缺省 100。 */
+            priority: number;
+            rowVersion: number;
+            createdAt: components["schemas"]["Timestamp"];
+            updatedAt: components["schemas"]["Timestamp"];
+        };
+        EnrichmentRuleInput: {
+            ruleKey: components["schemas"]["StableKey"];
+            displayName: string;
+            description: string;
+            enabled: boolean;
+            labelConditions: {
+                [key: string]: string;
+            };
+            /** @description 引用的告警源必须存在且启用；自动去重并按稳定序存储。 */
+            alertSourceKeys?: components["schemas"]["StableKey"][];
+            /** @description 至少一个字段，值为非空字符串。 */
+            outputs: {
+                [key: string]: string;
+            };
+            /** @description 叠加序（升序先生效）；0 或缺省视为 100。 */
+            priority?: number;
+            clientCommandId: string;
+        };
+        /** @description 更新富化规则的可变字段与并发前提；ruleKey 由路径唯一携带，不在此重复。 */
+        UpdateEnrichmentRuleRequest: {
+            displayName: string;
+            description: string;
+            enabled: boolean;
+            labelConditions: {
+                [key: string]: string;
+            };
+            /** @description 引用的告警源必须存在且启用；空数组 = 不限来源。 */
+            alertSourceKeys?: components["schemas"]["StableKey"][];
+            /** @description 至少一个字段，值为非空字符串。 */
+            outputs: {
+                [key: string]: string;
+            };
+            /** @description 叠加序（升序先生效）；0 或缺省视为 100。 */
+            priority?: number;
             clientCommandId: string;
             expectedRowVersion: number;
         };
@@ -2449,43 +2527,43 @@ export interface components {
             /** @enum {string} */
             state: "Firing" | "Resolved";
             rowVersion: number;
-            businessSystemKey?: components["schemas"]["StableKey"];
-            /** @description 首次观测时冻结的声明归属判定；不是对当前声明的重新计算。历史行专用，新 occurrence 不再写入。 */
-            attribution?: components["schemas"]["AlertAttributionDiagnostic"];
-            /** @description 首次接收时冻结的业务视图归属（ADR-0008）；展示的 key/name 取自冻结候选快照，不随视图改名漂移。 */
-            viewAttribution?: components["schemas"]["AlertViewAttributionDiagnostic"];
+            /**
+             * @description 首观测经插件 AlertNormalizer 冻结的统一严重度（ADR-0012）；平台故障按故障类别在入库侧映射。缺失/解析失败降为 info 并记 normalizer_missing 接入问题。
+             * @enum {string}
+             */
+            severity: "critical" | "high" | "warning" | "info";
+            /** @description 统一人面告警名（Alertmanager：labels.alertname）；平台故障为固定平台标题。缺省为空字符串。 */
+            title: string;
+            /** @description 受影响对象的最佳身份（Alertmanager：labels.instance，回退 labels.job）。 */
+            resource?: string;
             firstSeenAt: components["schemas"]["Timestamp"];
             lastStateChangeAt: components["schemas"]["Timestamp"];
             resolvedAt?: components["schemas"]["Timestamp"];
             labels: {
                 [key: string]: string;
             };
+            /** @description 首观测冻结的规范化注释全量快照（ADR-0012 annotations_canonical）；平台故障为入库侧投影。 */
             annotations?: {
                 [key: string]: string;
             };
+            /** @description 首观测时冻结的全部命中视图证据（ADR-0012，多命中全记录，替代旧唯一归属状态机）；按 matched_at 稳定序，视图改名/退役后不漂移。 */
+            correlations: components["schemas"]["AlertCorrelation"][];
+            /** @description 首观测时冻结的富化投影（ADR-0012）；无规则命中时 fields 为空对象（与未求值区分），详情面额外携带 ruleKeys 溯源。 */
+            enrichment?: components["schemas"]["AlertEnrichment"];
         };
-        AlertAttributionDiagnostic: {
-            /** @enum {string} */
-            status: "attributed" | "unattributed" | "conflict";
-            /** @description 冻结候选业务系统 locator 的 JSON 数组。 */
-            candidateSystemIdsJson: string;
-            /** @description 冻结候选配置版本 locator 的 JSON 数组。 */
-            candidateConfigVersionIdsJson: string;
-            /** @description 冻结归属诊断的 JSON 对象，至少含 code。 */
-            reasonJson: string;
+        AlertCorrelation: {
+            /** @description 命中视图的冻结 key 快照。 */
+            viewKey: components["schemas"]["StableKey"];
+            /** @description 命中视图的冻结显示名快照。 */
+            displayName: string;
         };
-        AlertViewAttributionDiagnostic: {
-            /** @enum {string} */
-            status: "attributed" | "ambiguous" | "unattributed";
-            /** @description 唯一匹配时冻结的视图 key；来自候选快照首元素，未归属/歧义时缺省。 */
-            viewKey?: components["schemas"]["StableKey"];
-            /** @description 唯一匹配时冻结的视图显示名；来自候选快照首元素。 */
-            viewName?: string;
-            /** @description 冻结候选视图完整快照的 JSON 数组（viewId/viewKey/displayName/scope），唯一归属恰一元素。 */
-            candidatesJson: string;
-            /** @description 冻结归属诊断的 JSON 对象，至少含 code（source_mismatch/label_mismatch/exactly_one_matching_view/multiple_matching_views）。 */
-            reasonJson: string;
-            createdAt: components["schemas"]["Timestamp"];
+        AlertEnrichment: {
+            /** @description 按规则 priority 升序叠加、后命中不覆盖已写字段的富化终值。 */
+            fields: {
+                [key: string]: string;
+            };
+            /** @description 命中规则的溯源 key 列表（求值序：priority 升序、同序按创建序）；仅详情面返回。 */
+            ruleKeys?: string[];
         };
         AlertOccurrenceDetail: components["schemas"]["AlertOccurrenceSummary"] & {
             /** @description 不可变观测总数；完整时间线经 listAlertObservations 游标读取。 */
@@ -2538,7 +2616,7 @@ export interface components {
             startedAt?: components["schemas"]["Timestamp"];
             endedAt?: components["schemas"]["Timestamp"];
             /** @enum {string} */
-            terminationReason?: "context_too_large" | "timeout" | "rate_limited" | "provider_unavailable" | "invalid_response" | "tool_error" | "artifact_commit_failed" | "artifact_body_expired" | "sandbox_unavailable" | "worker_protocol_error" | "cancelled" | "connection_disabled" | "business_system_disabled" | "lease_expired" | "replaced" | "revoked";
+            terminationReason?: "context_too_large" | "timeout" | "rate_limited" | "provider_unavailable" | "invalid_response" | "tool_error" | "artifact_commit_failed" | "artifact_body_expired" | "sandbox_unavailable" | "worker_protocol_error" | "cancelled" | "connection_disabled" | "lease_expired" | "replaced" | "revoked";
             createdAt: components["schemas"]["Timestamp"];
         };
         ToolCallSummary: {
@@ -2574,8 +2652,11 @@ export interface components {
             sourceId?: components["schemas"]["LocatorId"];
             /** @description 告警源的人类稳定 key；列表不得以 sourceId 作为主要识别信息。 */
             sourceKey?: components["schemas"]["StableKey"];
-            /** @enum {string} */
-            kind?: "identity_conflict" | "fingerprint_mismatch" | "delivery_truncated";
+            /**
+             * @description normalizer_missing（ADR-0012）：来源协议无 AlertNormalizer 或归一化失败，首观测以缺省语义冻结；来源级问题，不指向具体条目。
+             * @enum {string}
+             */
+            kind?: "identity_conflict" | "fingerprint_mismatch" | "delivery_truncated" | "normalizer_missing";
             deliveryId?: components["schemas"]["LocatorId"];
             deliveryItemId?: components["schemas"]["LocatorId"];
             firstSeenAt?: components["schemas"]["Timestamp"];
@@ -2653,6 +2734,8 @@ export interface components {
         SendMessageRequest: components["schemas"]["CommandBase"] & components["schemas"]["MessageContentInput"] & {
             /** @description 当前 head locator（DATA-INVEST-001）；Undo 撤回全部消息后可为 null，其余情况必须与当前 head 一致；head 已变化返回 409。 */
             expectedHeadMessageId: components["schemas"]["NullableLocatorId"];
+            /** @description ADR-0012「+ 引入告警」：随消息追加的告警来源（幂等——已链接的来源忽略）；新来源并入下一次模型输入。 */
+            sources?: components["schemas"]["InvestigationSourceInput"][];
         };
         /**
          * @description adapter 兼容面：字段形态取自 Issue #18 证据 commit 34a46c7 的服务器输入结构（Huma v2.39.1 严格校验要求
@@ -2708,8 +2791,6 @@ export interface components {
         };
         InspectionRunSummary: {
             id: components["schemas"]["LocatorId"];
-            /** @description 仅旧业务声明产生的历史 Run 保留此字段。 */
-            businessSystemKey?: string | null;
             /** @description 本次执行冻结的来源接入名称。 */
             connectionName?: string;
             planKey: components["schemas"]["StableKey"];
@@ -3637,13 +3718,15 @@ export interface components {
     };
     pathItems: never;
 }
-export type BusinessContextItem = components['schemas']['BusinessContextItem'];
 export type PluginInspectionScope = components['schemas']['PluginInspectionScope'];
 export type PluginInspectionPlan = components['schemas']['PluginInspectionPlan'];
 export type BusinessView = components['schemas']['BusinessView'];
 export type PluginInspectionPlanInput = components['schemas']['PluginInspectionPlanInput'];
 export type BusinessViewInput = components['schemas']['BusinessViewInput'];
 export type UpdateBusinessViewRequest = components['schemas']['UpdateBusinessViewRequest'];
+export type EnrichmentRule = components['schemas']['EnrichmentRule'];
+export type EnrichmentRuleInput = components['schemas']['EnrichmentRuleInput'];
+export type UpdateEnrichmentRuleRequest = components['schemas']['UpdateEnrichmentRuleRequest'];
 export type LocatorId = components['schemas']['LocatorId'];
 export type NullableLocatorId = components['schemas']['NullableLocatorId'];
 export type ChangeSeq = components['schemas']['ChangeSeq'];
@@ -3685,8 +3768,8 @@ export type RuntimeSlot = components['schemas']['RuntimeSlot'];
 export type AlertSnapshot = components['schemas']['AlertSnapshot'];
 export type AdminAbout = components['schemas']['AdminAbout'];
 export type AlertOccurrenceSummary = components['schemas']['AlertOccurrenceSummary'];
-export type AlertAttributionDiagnostic = components['schemas']['AlertAttributionDiagnostic'];
-export type AlertViewAttributionDiagnostic = components['schemas']['AlertViewAttributionDiagnostic'];
+export type AlertCorrelation = components['schemas']['AlertCorrelation'];
+export type AlertEnrichment = components['schemas']['AlertEnrichment'];
 export type AlertOccurrenceDetail = components['schemas']['AlertOccurrenceDetail'];
 export type ObservationSummary = components['schemas']['ObservationSummary'];
 export type InitialAnalysisSummary = components['schemas']['InitialAnalysisSummary'];
@@ -3938,37 +4021,6 @@ export interface operations {
             503: components["responses"]["ServiceUnavailable"];
         };
     };
-    listBusinessContext: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 业务上下文条目（无业务系统时为空数组） */
-            200: {
-                headers: {
-                    "Cache-Control"?: "no-store";
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        items: components["schemas"]["BusinessContextItem"][];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            /** @description 读取失败（problem 详情） */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
     listBusinessViews: {
         parameters: {
             query?: never;
@@ -4071,6 +4123,119 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BusinessView"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listEnrichmentRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 实际持久化的结果。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["EnrichmentRule"][];
+                        nextCursor?: components["schemas"]["Cursor"];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createEnrichmentRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnrichmentRuleInput"];
+            };
+        };
+        responses: {
+            /** @description 实际持久化的结果。 */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentRule"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getEnrichmentRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                ruleKey: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 实际持久化的结果。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentRule"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateEnrichmentRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                ruleKey: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateEnrichmentRuleRequest"];
+            };
+        };
+        responses: {
+            /** @description 实际持久化的结果。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrichmentRule"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -4813,8 +4978,7 @@ export interface operations {
         parameters: {
             query?: {
                 state?: "Firing" | "Resolved";
-                businessSystemKey?: components["schemas"]["StableKey"];
-                /** @description 按冻结的业务视图归属过滤（ADR-0008）；设置后平台内部故障不并入列表。 */
+                /** @description 按冻结的视图关联过滤（ADR-0012）：occurrence 命中该视图的任一冻结关联行即入选；设置后平台内部故障不并入列表。 */
                 viewKey?: components["schemas"]["StableKey"];
                 /** @description 不透明分页游标（HTTP-PAGE-001）；由上一响应 nextCursor 原样回传。 */
                 cursor?: components["parameters"]["Cursor"];

@@ -30,70 +30,57 @@ describe("alerts module", () => {
     expect(fetchMock.mock.calls.some(([url]) => /observations|analyses/.test(String(url)))).toBe(false);
   });
 
-  it("shows frozen unmatched attribution evidence without interpreting current declarations", async () => {
+  // ADR-0012：详情读归一化语义（severity/title/annotations）与首观测冻结的
+  // 关联视图快照、富化终值；不再有旧归属诊断卡。
+  it("shows normalized semantics, correlation views and enrichment fields", async () => {
     const fetchMock = vi.fn().mockImplementation((input: string) => Promise.resolve({ ok: true, json: async () => {
-      if (input === "/api/v1/alerts/alert-unmatched") return { id: "alert-unmatched", source: "alertmanager", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "Unmatched alert" }, attribution: { status: "unattributed", candidateSystemIdsJson: "[]", candidateConfigVersionIdsJson: "[]", reasonJson: '{"code":"label_mismatch"}' } };
+      if (input === "/api/v1/alerts/alert-normalized") return {
+        id: "alert-normalized", source: "alertmanager", state: "Firing", rowVersion: 1,
+        severity: "critical", title: "CheckoutLatencyHigh", resource: "checkout-8080",
+        firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z",
+        labels: { alertname: "CheckoutLatencyHigh", service: "checkout" },
+        annotations: { summary: "P95 over threshold" },
+        correlations: [
+          { viewKey: "payments-prod", displayName: "支付生产" },
+          { viewKey: "payments-canary", displayName: "支付金丝雀" },
+        ],
+        enrichment: { fields: { team: "payments", tier: "gold" } },
+      };
       return { snapshotSeq: 1, items: [] };
     } }));
     vi.stubGlobal("fetch", fetchMock);
-    render(<View route="/alerts/list?id=alert-unmatched" />);
+    render(<View route="/alerts/list?id=alert-normalized" />);
 
-    await screen.findByRole("heading", { name: "Unmatched alert" });
-    expect(screen.getByRole("alert", { name: "未归属诊断" })).toHaveTextContent("告警标签不满足任何参与视图的标签条件");
-    expect(screen.getByRole("alert", { name: "未归属诊断" })).toHaveTextContent("候选业务系统 ID无");
-    expect(screen.getByText("以上为告警首次接收时冻结的归属证据，不会按当前业务声明重新解释。")).toBeInTheDocument();
+    await screen.findByRole("heading", { name: "CheckoutLatencyHigh" });
+    expect(screen.getByText("关联视图 · 支付生产、支付金丝雀")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "关联视图" })).toBeInTheDocument();
+    expect(screen.getByText("支付生产")).toBeInTheDocument();
+    expect(screen.getByText("支付金丝雀")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "富化字段" })).toBeInTheDocument();
+    expect(screen.getByText("payments")).toBeInTheDocument();
+    expect(screen.getByText("gold")).toBeInTheDocument();
+    expect(screen.getByText("P95 over threshold")).toBeInTheDocument();
+    expect(screen.queryByRole("alert", { name: /诊断/ })).not.toBeInTheDocument();
   });
 
-  it("shows frozen view attribution diagnostics for unattributed and ambiguous rows", async () => {
+  it("shows the uncorrelated badge without any diagnostic card", async () => {
     const fetchMock = vi.fn().mockImplementation((input: string) => Promise.resolve({ ok: true, json: async () => {
-      if (input === "/api/v1/alerts/alert-view-unmatched") return { id: "alert-view-unmatched", source: "alertmanager", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "View unmatched" }, viewAttribution: { status: "unattributed", candidatesJson: "[]", reasonJson: '{"code":"source_mismatch"}', createdAt: "2026-01-01T00:00:00Z" } };
-      if (input === "/api/v1/alerts/alert-view-ambiguous") return { id: "alert-view-ambiguous", source: "alertmanager", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "View ambiguous" }, viewAttribution: { status: "ambiguous", candidatesJson: '[{"viewId":1,"viewKey":"payments-prod","displayName":"支付生产","scope":{"alertSourceKeys":["am-prod"],"labelConditions":{"service":"payments"}}},{"viewId":2,"viewKey":"payments-canary","displayName":"支付金丝雀","scope":{"alertSourceKeys":["am-prod"],"labelConditions":{"service":"payments"}}}]', reasonJson: '{"code":"multiple_matching_views"}', createdAt: "2026-01-01T00:00:00Z" } };
-      if (input === "/api/v1/alerts/alert-view-attributed") return { id: "alert-view-attributed", source: "alertmanager", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "View attributed" }, viewAttribution: { status: "attributed", viewKey: "payments-prod", viewName: "支付生产", candidatesJson: '[{"viewId":1,"viewKey":"payments-prod","displayName":"支付生产","scope":{"alertSourceKeys":["am-prod"],"labelConditions":{"service":"payments"}}}]', reasonJson: '{"code":"exactly_one_matching_view"}', createdAt: "2026-01-01T00:00:00Z" } };
+      if (input === "/api/v1/alerts/alert-uncorrelated") return {
+        id: "alert-uncorrelated", source: "alertmanager", state: "Firing", rowVersion: 1,
+        severity: "warning", title: "Uncorrelated alert",
+        firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z",
+        labels: { alertname: "Uncorrelated alert" }, correlations: [],
+      };
       return { snapshotSeq: 1, items: [] };
     } }));
     vi.stubGlobal("fetch", fetchMock);
-    const { unmount } = render(<View route="/alerts/list?id=alert-view-unmatched" />);
+    render(<View route="/alerts/list?id=alert-uncorrelated" />);
 
-    await screen.findByRole("heading", { name: "View unmatched" });
-    const unmatched = screen.getByRole("alert", { name: "未归属诊断" });
-    expect(unmatched).toHaveTextContent("交付告警源不在任何参与视图的声明范围内");
-    expect(unmatched).toHaveTextContent("历史记录不会按当前视图配置重新计算");
-    unmount();
-
-    const ambiguousView = render(<View route="/alerts/list?id=alert-view-ambiguous" />);
-    await screen.findByRole("heading", { name: "View ambiguous" });
-    const ambiguous = screen.getByRole("alert", { name: "归属歧义诊断" });
-    expect(ambiguous).toHaveTextContent("多个业务视图同时匹配");
-    expect(ambiguous).toHaveTextContent("payments-prod, payments-canary");
-    ambiguousView.unmount();
-
-    const attributedView = render(<View route="/alerts/list?id=alert-view-attributed" />);
-    await screen.findByRole("heading", { name: "View attributed" });
-    expect(screen.getByText("归属视图 · 支付生产")).toBeInTheDocument();
-    expect(screen.getByText("来源：Alertmanager")).toBeInTheDocument();
-    expect(screen.queryByRole("alert", { name: "未归属诊断" })).not.toBeInTheDocument();
-    attributedView.unmount();
-  });
-
-  it("shows conflict candidates and handles old occurrences without diagnostics", async () => {
-    const fetchMock = vi.fn().mockImplementation((input: string) => Promise.resolve({ ok: true, json: async () => {
-      if (input === "/api/v1/alerts/alert-conflict") return { id: "alert-conflict", source: "alertmanager", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "Conflicting alert" }, attribution: { status: "conflict", candidateSystemIdsJson: "[12,34]", candidateConfigVersionIdsJson: "[101,202]", reasonJson: '{"code":"multiple_matching_declarations"}' } };
-      if (input === "/api/v1/alerts/alert-legacy") return { id: "alert-legacy", source: "alertmanager", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "Legacy alert" } };
-      return { snapshotSeq: 1, items: [] };
-    } }));
-    vi.stubGlobal("fetch", fetchMock);
-    const view = render(<View route="/alerts/list?id=alert-conflict" />);
-
-    await screen.findByRole("heading", { name: "Conflicting alert" });
-    const diagnostic = screen.getByRole("alert", { name: "归属冲突诊断" });
-    expect(diagnostic).toHaveTextContent("多个业务声明同时匹配");
-    expect(diagnostic).toHaveTextContent("候选业务系统 ID12, 34");
-    expect(diagnostic).toHaveTextContent("候选配置版本 ID101, 202");
-
-    view.rerender(<View route="/alerts/list?id=alert-legacy" />);
-    await screen.findByRole("heading", { name: "Legacy alert" });
-    expect(screen.queryByRole("alert", { name: /归属.*诊断/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "归属诊断" })).not.toBeInTheDocument();
+    await screen.findByRole("heading", { name: "Uncorrelated alert" });
+    expect(screen.getByText("未关联视图")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "关联视图" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "富化字段" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("renders the history view when the route includes its query string", async () => {

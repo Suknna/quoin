@@ -15,6 +15,7 @@ import { parseRoute } from "@/lib/parse-route";
 import { SettingsNavigation, settingsNavGroups } from "../nav";
 import { About } from "../platform/about/About";
 import { Backups } from "../platform/backups/Backups";
+import { EnrichmentRulesPage } from "../platform/enrichment-rules";
 import { ModelProviderPage } from "../platform/model-providers/ModelProviderModule";
 import { Users } from "../platform/users/Users";
 import { AuthConfigPage } from "../platform/auth-config/AuthConfig";
@@ -53,6 +54,12 @@ export function useSettingsModule(
 	}
 	if (pathname.startsWith("/settings/platform/users")) {
 		return platform(<Users suspended={props.suspended} />, "用户");
+	}
+	if (pathname.startsWith("/settings/platform/enrichment-rules")) {
+		return platform(
+			<EnrichmentRulesPage suspended={props.suspended} />,
+			"富化规则",
+		);
 	}
 	if (pathname.startsWith("/settings/platform/auth-config")) {
 		return platform(<AuthConfigPage />, "认证配置");

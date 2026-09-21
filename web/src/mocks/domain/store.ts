@@ -1,5 +1,6 @@
 import type {
 	BusinessView,
+	EnrichmentRule,
 	PluginInspectionPlan,
 	UserSummary,
 } from "../../api/generated/types";
@@ -176,7 +177,7 @@ export interface MockState {
 	probes: Record<string, ProbeAttemptView[]>;
 	probeResults: Record<string, ProbeResultView[]>;
 	labels: LabelContractSummary[];
-	businessContext: { key: string; displayName: string }[];
+	enrichmentRules: EnrichmentRule[];
 	businessViews: BusinessView[];
 	inspectionPlans: PluginInspectionPlan[];
 	inspectionRuns: InspectionRunDetail[];
@@ -196,11 +197,15 @@ export interface MockState {
 
 function baseState(scenario: MockScenario): MockState {
 	// Platform-fault frontend currently requires explicit source metadata on every unified alert fixture.
+	// ADR-0012 归一化语义 fixture：severity/title/correlations/enrichment 均
+	// 为首观测冻结投影。
 	const webAlert: AlertOccurrenceSummary = {
 		id: "alert-checkout-latency",
 		state: "Firing",
 		rowVersion: 3,
-		businessSystemKey: "checkout",
+		severity: "critical",
+		title: "CheckoutLatencyHigh",
+		resource: "checkout-8080",
 		firstSeenAt: "2026-09-09T08:10:00Z",
 		lastStateChangeAt: "2026-09-09T09:20:00Z",
 		source: "alertmanager",
@@ -210,12 +215,15 @@ function baseState(scenario: MockScenario): MockState {
 			severity: "critical",
 		},
 		annotations: { summary: "结算接口 P95 延迟超过阈值" },
+		correlations: [{ viewKey: "checkout", displayName: "结算" }],
+		enrichment: { fields: { team: "payments", tier: "gold" } },
 	};
 	const resolvedAlert: AlertOccurrenceSummary = {
 		id: "alert-catalog-errors",
 		state: "Resolved",
 		rowVersion: 2,
-		businessSystemKey: "catalog",
+		severity: "warning",
+		title: "CatalogErrors",
 		firstSeenAt: "2026-09-08T07:00:00Z",
 		lastStateChangeAt: "2026-09-08T08:20:00Z",
 		resolvedAt: "2026-09-08T08:20:00Z",
@@ -226,6 +234,7 @@ function baseState(scenario: MockScenario): MockState {
 			severity: "warning",
 		},
 		annotations: { summary: "目录错误率已恢复" },
+		correlations: [{ viewKey: "catalog", displayName: "目录服务" }],
 	};
 	const analysis: InitialAnalysisDetail = {
 		id: "analysis-1",
@@ -323,7 +332,6 @@ function baseState(scenario: MockScenario): MockState {
 	};
 	const run: InspectionRunDetail = {
 		id: "inspection-run-1",
-		businessSystemKey: "checkout",
 		planKey: "checkout-health",
 		state: "Completed",
 		rowVersion: 2,
@@ -335,6 +343,20 @@ function baseState(scenario: MockScenario): MockState {
 		],
 		reportCount: 1,
 		analysisActive: false,
+	};
+	// ADR-0012 富化规则 fixture：命中即叠加 outputs 的声明式配置。
+	const checkoutTierRule: EnrichmentRule = {
+		ruleKey: "payments-tier",
+		displayName: "结算服务富化",
+		description: "按 team/tier 标注结算域告警",
+		enabled: true,
+		labelConditions: { service: "checkout" },
+		alertSourceKeys: [],
+		outputs: { team: "payments", tier: "gold" },
+		priority: 100,
+		rowVersion: 1,
+		createdAt: now,
+		updatedAt: now,
 	};
 	// Optional business views (ADR 0004): scope-and-description only, never permissions.
 	const checkoutView: BusinessView = {
@@ -668,7 +690,7 @@ function baseState(scenario: MockScenario): MockState {
 				activatedAt: now,
 			},
 		],
-		businessContext: [{ key: "checkout", displayName: "结算系统" }],
+		enrichmentRules: [checkoutTierRule],
 		businessViews: [checkoutView, catalogView],
 		inspectionPlans: [latencyPlan],
 		inspectionRuns: [activeRun, run],
@@ -728,7 +750,7 @@ function baseState(scenario: MockScenario): MockState {
 		state.probes = {};
 		state.probeResults = {};
 		state.labels = [];
-		state.businessContext = [];
+		state.enrichmentRules = [];
 		state.businessViews = [];
 		state.inspectionPlans = [];
 		state.inspectionRuns = [];

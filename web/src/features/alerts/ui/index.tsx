@@ -67,12 +67,10 @@ import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { PropertyList } from "@/components/workbench/PropertyList";
 import {
 	type AlertOccurrenceSummary,
-	type AttributionDiagnostic,
 	fetchAlerts,
 	fetchObservations,
 	fetchOccurrence,
 	type ObservationSummary,
-	type ViewAttributionDiagnostic,
 } from "@/features/alerts/api";
 import { useLiveAlerts } from "@/features/alerts/useLiveAlerts";
 import {
@@ -113,9 +111,9 @@ export function useAlertsModule(
 	const { path, query } = parts(props.route);
 	const postmortems = path === "/postmortems";
 	const view = query.get("view") === "history" ? "history" : "current";
-	// 归属过滤按业务视图（ADR-0008）；旧 system 参数保持兼容读取。
+	// 归属过滤按业务视图（ADR-0012：首观测冻结的关联快照）；单轨化后无旧
+	// businessSystemKey 通道。
 	const viewKey = query.get("viewKey") ?? "";
-	const legacySystem = query.get("system") ?? "";
 	const selectedId = query.get("id");
 	useEffect(() => {
 		if (path === "/alerts")
@@ -139,20 +137,20 @@ export function useAlertsModule(
 				{...props}
 				view={view}
 				viewKey={viewKey}
-				legacySystem={legacySystem}
 				selectedId={selectedId}
 			/>
 		),
 	};
 }
 
+/** ADR-0012 统一四级 severity（critical>high>warning>info）的展示色。 */
 function severityTone(value?: string) {
 	switch (value?.toLowerCase()) {
 		case "critical":
 			return "bg-destructive";
-		case "warning":
+		case "high":
 			return "bg-warning";
-		case "info":
+		case "warning":
 			return "bg-info";
 		default:
 			return "bg-muted-foreground";
@@ -183,157 +181,25 @@ const effectLabels: Record<string, string> = {
 	late_firing_after_resolved: "恢复后迟触发",
 };
 
-const attributionReasonLabels: Record<string, string> = {
-	no_declaration_labels: "没有可用于归属的业务声明标签",
-	source_mismatch: "交付告警源不在任何参与视图的声明范围内",
-	label_mismatch: "告警标签不满足任何参与视图的标签条件",
-	no_matching_declaration: "没有匹配的业务声明",
-	no_matching_view: "没有匹配的业务视图",
-	exactly_one_matching_view: "唯一匹配的业务视图",
-	multiple_matching_views: "多个业务视图同时匹配",
-	multiple_matching_declarations: "多个业务声明同时匹配",
-};
-
-/** Parse only immutable server evidence; malformed legacy payloads stay visible without inference. */
-function diagnosticValues(value: string): string {
-	try {
-		const parsed: unknown = JSON.parse(value);
-		return Array.isArray(parsed) &&
-			parsed.every(
-				(entry) => typeof entry === "string" || typeof entry === "number",
-			)
-			? parsed.map(String).join(", ") || "无"
-			: value;
-	} catch {
-		return value || "无";
-	}
+/** 富化徽标摘要（ADR-0012）：key=value 逗号连接，超长截断。 */
+function enrichmentSummary(fields: Record<string, string>) {
+	const entries = Object.entries(fields);
+	if (entries.length === 0) return "";
+	const summary = entries.map(([key, value]) => `${key}=${value}`).join(" ");
+	const runes = [...summary];
+	return runes.length > 60 ? `${runes.slice(0, 60).join("")}…` : summary;
 }
 
-function attributionReason(reasonJson: string): string {
-	try {
-		const parsed: unknown = JSON.parse(reasonJson);
-		if (
-			typeof parsed === "object" &&
-			parsed !== null &&
-			"code" in parsed &&
-			typeof parsed.code === "string"
-		)
-			return attributionReasonLabels[parsed.code] ?? parsed.code;
-	} catch {
-		/* Preserve the recorded payload below when a legacy response is malformed. */
-	}
-	return reasonJson || "未提供";
-}
-
-function AttributionDiagnosticNotice({
-	attribution,
-}: {
-	attribution: AttributionDiagnostic;
-}) {
-	if (attribution.status === "attributed") return null;
-	const conflict = attribution.status === "conflict";
-	return (
-		<Alert
-			variant={conflict ? "destructive" : "default"}
-			aria-label={conflict ? "归属冲突诊断" : "未归属诊断"}
-		>
-			<AlertTriangle />
-			<AlertTitle>{conflict ? "归属冲突" : "未归属"}</AlertTitle>
-			<AlertDescription>
-				<p>
-					{conflict
-						? "该告警首次接收时匹配多个业务声明，未归属到任一业务系统。"
-						: "该告警首次接收时未匹配业务声明。"}
-				</p>
-				<PropertyList
-					mono
-					entries={[
-						{ label: "原因", value: attributionReason(attribution.reasonJson) },
-						{
-							label: "候选业务系统 ID",
-							value: diagnosticValues(attribution.candidateSystemIdsJson),
-						},
-						{
-							label: "候选配置版本 ID",
-							value: diagnosticValues(
-								attribution.candidateConfigVersionIdsJson,
-							),
-						},
-					]}
-				/>
-				<p>以上为告警首次接收时冻结的归属证据，不会按当前业务声明重新解释。</p>
-			</AlertDescription>
-		</Alert>
-	);
-}
-
-/** 冻结的候选视图快照（ADR-0008）：唯一归属与多候选歧义都保留完整身份可追溯。 */
-function viewCandidates(value: string): string {
-	try {
-		const parsed: unknown = JSON.parse(value);
-		if (!Array.isArray(parsed)) return value;
-		const keys = parsed
-			.map((entry) =>
-				entry &&
-				typeof entry === "object" &&
-				"viewKey" in entry &&
-				typeof entry.viewKey === "string"
-					? entry.viewKey
-					: "",
-			)
-			.filter(Boolean);
-		return keys.length ? keys.join(", ") : value;
-	} catch {
-		return value || "无";
-	}
-}
-
-function ViewAttributionNotice({
-	attribution,
-}: {
-	attribution: ViewAttributionDiagnostic;
-}) {
-	if (attribution.status === "attributed") return null;
-	const ambiguous = attribution.status === "ambiguous";
-	return (
-		<Alert
-			variant={ambiguous ? "destructive" : "default"}
-			aria-label={ambiguous ? "归属歧义诊断" : "未归属诊断"}
-		>
-			<AlertTriangle />
-			<AlertTitle>{ambiguous ? "归属歧义" : "未归属"}</AlertTitle>
-			<AlertDescription>
-				<p>
-					{ambiguous
-						? "该告警首次接收时匹配多个业务视图，未归属到任一视图；请调整视图的告警源或标签条件后，由新告警重新归属。"
-						: "该告警首次接收时未匹配任何业务视图。"}
-				</p>
-				<PropertyList
-					mono
-					entries={[
-						{ label: "原因", value: attributionReason(attribution.reasonJson) },
-						...(ambiguous
-							? [
-									{
-										label: "候选视图",
-										value: viewCandidates(attribution.candidatesJson),
-									},
-								]
-							: []),
-					]}
-				/>
-				<p>
-					以上为告警首次接收时冻结的归属证据；历史记录不会按当前视图配置重新计算。
-				</p>
-			</AlertDescription>
-		</Alert>
+/** 关联视图标签（ADR-0012）：多命中全展示冻结快照名。 */
+function correlationLabels(item: AlertOccurrenceSummary) {
+	return (item.correlations ?? []).map(
+		(correlation) => correlation.displayName || correlation.viewKey,
 	);
 }
 
 function AlertList({
 	view,
 	viewKey,
-	legacySystem,
 	selectedId,
 	navigate,
 	suspended,
@@ -341,16 +207,14 @@ function AlertList({
 }: WorkspaceModuleProps & {
 	view: "current" | "history";
 	viewKey: string;
-	legacySystem: string;
 	selectedId: string | null;
 }) {
 	const [views, setViews] = useState<
 		{ viewKey: string; displayName: string }[]
 	>([]);
 	const [query, setQuery] = useState("");
-	// 归属过滤统一走业务视图；旧声明过滤只在 URL 显式携带时生效（兼容历史链接）。
-	const filter = legacySystem ? legacySystem : viewKey;
-	const filterKind = legacySystem ? "businessSystemKey" : "viewKey";
+	// ADR-0012 单轨：过滤只按业务视图（首观测关联快照精确匹配）。
+	const filter = viewKey;
 	// Counts are independently snapshotted so neither tab presents a misleading zero before load.
 	const [counts, setCounts] = useState<{
 		key: string;
@@ -360,7 +224,7 @@ function AlertList({
 	const stream = useAlertEventStream();
 	const countScopeRef = useRef("");
 	const countGenerationRef = useRef(0);
-	const countScope = `${filter}\u0000${filterKind}\u0000${suspended}`;
+	const countScope = `${filter}\u0000${suspended}`;
 	// Invalidate count reads while rendering the new route scope so a delayed
 	// old filter response cannot replace the badges before effect cleanup.
 	if (countScopeRef.current !== countScope) {
@@ -370,9 +234,7 @@ function AlertList({
 	// The list is live by default; workbench suspension is the only local pause boundary.
 	const live = useLiveAlerts(
 		view === "history" ? "Resolved" : "Firing",
-		filterKind === "viewKey"
-			? { viewKey: filter }
-			: { businessSystemKey: filter },
+		{ viewKey: filter },
 		!suspended,
 	);
 	const { setAtTop } = live;
@@ -405,16 +267,8 @@ function AlertList({
 				// Counts always come from the two server projections; never derive them
 				// from the visible list because it may intentionally buffer new rows.
 				const [firing, resolved] = await Promise.all([
-					fetchAlerts(
-						"Firing",
-						filterKind === "businessSystemKey" ? filter : "",
-						filterKind === "viewKey" ? filter : "",
-					),
-					fetchAlerts(
-						"Resolved",
-						filterKind === "businessSystemKey" ? filter : "",
-						filterKind === "viewKey" ? filter : "",
-					),
+					fetchAlerts("Firing", filter),
+					fetchAlerts("Resolved", filter),
 				]);
 				if (requestGeneration === countGenerationRef.current && !suspended)
 					setCounts({
@@ -426,7 +280,7 @@ function AlertList({
 				/* Keep the most recent verified counts until the next snapshot. */
 			}
 		},
-		[filter, filterKind, suspended],
+		[filter, suspended],
 	);
 	useEffect(() => {
 		if (!suspended) void refreshCounts();
@@ -472,55 +326,28 @@ function AlertList({
 			? "当前没有正在触发的告警。"
 			: "尚未加载到已恢复的告警记录。";
 	const listItems: EntityListItem[] = filteredItems.map((item) => {
-		// 归属标签展示真实新归属；旧历史行退回旧声明诊断，仅作历史事实展示。
-		const attributedView =
-			item.source === "alertmanager" &&
-			item.viewAttribution?.status === "attributed"
-				? item.viewAttribution.viewName || item.viewAttribution.viewKey
-				: undefined;
-		const diagnosticLabel =
-			item.source === "alertmanager"
-				? item.viewAttribution?.status === "ambiguous"
-					? "归属歧义"
-					: item.viewAttribution?.status === "unattributed"
-						? "未归属"
-						: !item.viewAttribution && item.attribution?.status === "conflict"
-							? "归属冲突"
-							: !item.viewAttribution &&
-									item.attribution?.status === "unattributed"
-								? "未归属"
-								: undefined
-				: undefined;
+		// ADR-0012：标题/摘要优先读归一化 title 与规范 annotations；关联视图
+		// 快照作为副标题兜底。
+		const views = correlationLabels(item);
 		return {
 			id: item.id,
-			title: item.labels.alertname ?? item.id,
+			title: item.title || item.labels.alertname || item.id,
 			subtitle:
 				item.annotations?.summary ??
 				item.annotations?.description ??
-				attributedView ??
-				item.businessSystemKey ??
-				diagnosticLabel ??
+				(views.length > 0 ? views.join("、") : undefined) ??
 				"未提供摘要",
 			badge: {
 				text:
 					item.source === "platform"
 						? `平台内部 · ${alertStateLabels[item.state] ?? item.state}`
-						: diagnosticLabel
-							? `${diagnosticLabel} · ${alertStateLabels[item.state] ?? item.state}`
-							: (alertStateLabels[item.state] ?? item.state),
+						: (alertStateLabels[item.state] ?? item.state),
 				variant: item.state === "Firing" ? "destructive" : "secondary",
 			},
 			media: (
 				<span
-					className={cn(
-						"size-2 rounded-full",
-						severityTone(item.labels.severity),
-					)}
-					title={
-						item.labels.severity
-							? `严重性：${item.labels.severity}`
-							: "严重性：未知"
-					}
+					className={cn("size-2 rounded-full", severityTone(item.severity))}
+					title={`严重性：${item.severity}`}
 				/>
 			),
 			time: (
@@ -841,17 +668,13 @@ function AlertDetailSheet({
 		: [];
 	const description =
 		occurrence?.annotations?.description ?? occurrence?.annotations?.summary;
-	// 真实归属徽标：优先新视图归属，旧历史行退回旧声明 key，平台故障展示组件。
+	// ADR-0012：关联视图徽标读首观测冻结的 correlations 快照（多命中全展示）。
 	const attributionBadge = occurrence
 		? occurrence.source === "platform"
 			? `平台内部 · ${occurrence.component ?? "未知组件"}`
-			: occurrence.viewAttribution?.status === "attributed"
-				? `归属视图 · ${occurrence.viewAttribution.viewName || occurrence.viewAttribution.viewKey}`
-				: occurrence.viewAttribution?.status === "ambiguous"
-					? "归属歧义"
-					: occurrence.viewAttribution?.status === "unattributed"
-						? "未归属"
-						: (occurrence.businessSystemKey ?? "未归属")
+			: correlationLabels(occurrence).length > 0
+				? `关联视图 · ${correlationLabels(occurrence).join("、")}`
+				: "未关联视图"
 		: "";
 	return (
 		<Sheet
@@ -866,7 +689,7 @@ function AlertDetailSheet({
 			>
 				<SheetHeader className="shrink-0 border-b px-6 py-5 pr-12">
 					<SheetTitle className="text-lg">
-						{occurrence?.labels.alertname ?? "告警详情"}
+						{occurrence?.title || occurrence?.labels.alertname || "告警详情"}
 					</SheetTitle>
 					<SheetDescription>
 						{occurrence?.source === "platform"
@@ -881,6 +704,15 @@ function AlertDetailSheet({
 								}
 							>
 								{alertStateLabels[occurrence.state] ?? occurrence.state}
+							</Badge>
+							<Badge
+								variant="outline"
+								className={cn(
+									"border-transparent text-white",
+									severityTone(occurrence.severity),
+								)}
+							>
+								{occurrence.severity}
 							</Badge>
 							<Separator
 								orientation="vertical"
@@ -969,60 +801,68 @@ function AlertDetailSheet({
 										)}
 									</section>
 									{occurrence.source === "alertmanager" &&
-										occurrence.viewAttribution && (
+										correlationLabels(occurrence).length > 0 && (
 											<>
 												<Separator />
 												<section
 													className="flex flex-col gap-3"
-													aria-labelledby="attribution-diagnostic-title"
+													aria-labelledby="correlation-context-title"
 												>
 													<h2
-														id="attribution-diagnostic-title"
+														id="correlation-context-title"
 														className="text-sm font-medium"
 													>
-														归属诊断
+														关联视图
 													</h2>
-													{occurrence.viewAttribution.status ===
-														"attributed" && (
-														<p className="text-sm text-muted-foreground">
-															该告警首次接收时唯一匹配业务视图{" "}
-															{occurrence.viewAttribution.viewName ||
-																occurrence.viewAttribution.viewKey}
-															，来源为
-															Alertmanager；证据已冻结，不随视图配置变化。
-														</p>
-													)}
-													{occurrence.viewAttribution.status !==
-														"attributed" && (
-														<ViewAttributionNotice
-															attribution={occurrence.viewAttribution}
-														/>
-													)}
+													<div className="flex flex-wrap gap-2">
+														{(occurrence.correlations ?? []).map(
+															(correlation) => (
+																<Badge
+																	key={correlation.viewKey}
+																	variant="outline"
+																>
+																	{correlation.displayName ||
+																		correlation.viewKey}
+																</Badge>
+															),
+														)}
+													</div>
+													<p className="text-sm text-muted-foreground">
+														视图关联在告警首次接收时冻结，不随视图配置变化。
+													</p>
 												</section>
 											</>
 										)}
-									{occurrence.source === "alertmanager" &&
-										!occurrence.viewAttribution &&
-										occurrence.attribution &&
-										occurrence.attribution.status !== "attributed" && (
+									{occurrence.enrichment &&
+										Object.keys(occurrence.enrichment.fields).length > 0 && (
 											<>
 												<Separator />
 												<section
 													className="flex flex-col gap-3"
-													aria-labelledby="attribution-diagnostic-title"
+													aria-labelledby="enrichment-context-title"
 												>
 													<h2
-														id="attribution-diagnostic-title"
+														id="enrichment-context-title"
 														className="text-sm font-medium"
 													>
-														归属诊断
+														富化字段
 													</h2>
-													<p className="text-sm text-muted-foreground">
-														以下为旧业务声明时代的冻结证据，仅作历史事实展示。
-													</p>
-													<AttributionDiagnosticNotice
-														attribution={occurrence.attribution}
+													<PropertyList
+														mono
+														entries={Object.entries(
+															occurrence.enrichment.fields,
+														).map(([key, value]) => ({
+															label: key,
+															value,
+														}))}
 													/>
+													<p className="text-sm text-muted-foreground">
+														首观测时命中的富化规则叠加终值（
+														{enrichmentSummary(
+															occurrence.enrichment.fields,
+														)}
+														）；已冻结，不随规则修改重算。
+													</p>
 												</section>
 											</>
 										)}
