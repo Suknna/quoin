@@ -18,15 +18,7 @@ const values = Object.fromEntries(
 			return match ? [[match[1], match[2]]] : [];
 		}),
 );
-for (const key of [
-	"url",
-	"username",
-	"initialPassword",
-	"finalPassword",
-	"contactEmail",
-	"smtpPassword",
-	"otpRecordFile",
-]) {
+for (const key of ["url", "username", "initialPassword", "finalPassword"]) {
 	if (!values[key]) throw new Error(`generated credentials.yaml lacks ${key}`);
 }
 const repoRoot = new URL("../../", import.meta.url).pathname;

@@ -48,7 +48,6 @@ if [[ -f "${runtime_root}/credentials.yaml" ]]; then
 		chmod 640 "${runtime_root}/fixture/prometheus-tls.key"
 		chmod 644 "${runtime_root}/fixture/prometheus-tls.crt"
 	fi
-	ensure_otp_fixture
 	if "${compose[@]}" ps --status running --services 2>/dev/null | grep -qx gateway; then
 		printf 'QUOIN_E2E_URL=%s\nQUOIN_E2E_RUNTIME=%s\nQUOIN_E2E_CREDENTIALS_FILE=%s\n' \
 			"$origin" "$runtime_root" "${runtime_root}/credentials.yaml"
@@ -62,7 +61,7 @@ if [[ -e "${runtime_root}" && ! -f "${runtime_root}/credentials.yaml" ]]; then
 fi
 
 umask 077
-mkdir -p "${runtime_root}"/{config,data,backups,secrets,gateway/tls,logs,plinth-state,plinth-workspaces,fixture/secrets}
+mkdir -p "${runtime_root}"/{config,data,backups,secrets,gateway/tls,logs,plinth-state,plinth-workspaces,stele-data,fixture/secrets}
 # Fixture credentials do not belong in the deployment secret mount: Quoin
 # bootstrap changes that mount to the runtime UID. Keep this user-owned 0600
 # fixture-only directory readable by Playwright and mount it read-only only to
@@ -141,11 +140,7 @@ if [[ ! -s "${runtime_root}/fixture/prometheus-tls.crt" || ! -s "${runtime_root}
 fi
 chmod 644 "${runtime_root}/config"/*.yaml "${runtime_root}/gateway/Caddyfile" "${runtime_root}/gateway/tls/tls.crt" "${runtime_root}/fixture/prometheus-tls.crt"
 chmod 640 "${runtime_root}/gateway/tls/tls.key" "${runtime_root}/fixture/prometheus-tls.key"
-ensure_otp_fixture
-
-# Build the real visible services, the unmodified production Plinth adapter and
-# the test-only OTP receiver. Lintel stays out because #102 only proves the
-# Plinth lifecycle.
+# Build all four production services used by the isolated topology.
 QUOIN_IMAGE_COMPONENTS=frontend,quoin,plinth,stele bash "${repo_root}/deploy/images/build.sh"
 export QUOIN_E2E_RUNTIME="$runtime_root" QUOIN_E2E_PORT="$port"
 # #97 always uses its own Compose project, so it cannot reuse or disturb an
@@ -157,7 +152,7 @@ if [[ "$runtime_root" == "${repo_root}/.artifacts/e2e-97" ]]; then export QUOIN_
 # the repository operator script produces the ADR-0009 set on the host.
 bash "${repo_root}/scripts/generate-deployment-secrets.sh" "${runtime_root}/secrets"
 sudo chmod 600 "${runtime_root}/secrets"/*
-sudo chown -R 65532:65532 "${runtime_root}/data" "${runtime_root}/backups" "${runtime_root}/secrets" "${runtime_root}/plinth-state" "${runtime_root}/plinth-workspaces"
+sudo chown -R 65532:65532 "${runtime_root}/data" "${runtime_root}/backups" "${runtime_root}/secrets" "${runtime_root}/plinth-state" "${runtime_root}/plinth-workspaces" "${runtime_root}/stele-data"
 
 # First startup seeds the pending built-in administrator with a randomly
 # generated initial password (ADR-0010): no public default credential exists.
