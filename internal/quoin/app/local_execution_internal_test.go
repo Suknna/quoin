@@ -20,6 +20,7 @@ import (
 	"time"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
+	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
 	"github.com/Suknna/quoin/internal/quoin/connections"
@@ -182,5 +183,110 @@ func TestLocalProbeExecutionWithoutGatewayFailsClosed(t *testing.T) {
 	mustQuery(t, db, `SELECT outcome FROM connection_probe_results WHERE attempt_id=?`, &outcome, attemptID)
 	if outcome != "failed" {
 		t.Fatalf("executor-less probe outcome=%s, want failed", outcome)
+	}
+}
+
+// TestModelProviderProbeDispatchesToPlinth 覆盖资格探测的帧协议路径：
+// model_provider 探测不再落本地 default 失败分支，而是绑定到当前 Plinth
+// 流并下发 DispatchAttempt（双 grant 随快照携带，supervisor 经
+// model_probe_chat 拉取凭据）。Plinth 离线时保持 Queued 重试。
+func TestModelProviderProbeDispatchesToPlinth(t *testing.T) {
+	db, service, _ := newLocalProbeFixture(t)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// model_provider 连接 + 双 purpose grant 的 Queued 探测 attempt。
+	mustExec(t, db, `INSERT INTO connections(id,name,type,enabled,row_version,revalidation_required,created_at) VALUES(2,'main-model','model_provider',0,1,0,?)`, now)
+	mustExec(t, db, `INSERT INTO connection_revisions(id,connection_id,revision_seq,config_json,created_at) VALUES(2,2,1,'{"type":"openai","baseUrl":"https://provider.test","chatModelId":"chat-1"}',?)`, now)
+	mustExec(t, db, `INSERT INTO credential_generations(id,connection_id,generation_seq,envelope_version,key_binding_revision,nonce,ciphertext,created_at) VALUES(2,2,1,1,1,?,?,?)`, []byte("model-nonce!"), make([]byte, 16), now)
+	mustExec(t, db, `UPDATE connections SET current_revision_id=2,current_credential_generation_id=2,row_version=2 WHERE id=2`)
+	mustExec(t, db, `INSERT INTO execution_attempts(id,attempt_type,scope_type,scope_id,state,quoin_release_version,operation_correlation_id,initiator_type,initiator_id,created_at)
+		VALUES(6,'connection_probe','connection',2,'Queued','q','corr-model-probe','system',0,?)`, now)
+	modelDigest := sha256HexOf([]byte(`{"connectionName":"main-model"}`))
+	mustExec(t, db, `INSERT INTO attempt_input_snapshots(id,attempt_id,schema_kind,renderer_version,content_digest,created_at) VALUES(6,6,'connection_probe_v1','v1',?,?)`, modelDigest, now)
+	mustExec(t, db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,connection_revision_id) VALUES(6,1,'connection_config',?,2)`, modelDigest)
+	mustExec(t, db, `INSERT INTO attempt_connection_grants(id,attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,created_at) VALUES(6,6,'model_probe_chat',2,2,2,?),(7,6,'model_probe_embedding',2,2,2,?)`, now, now)
+
+	// Plinth 离线：探测保持 Queued，不产生任何帧。
+	service.runLocalExecutionPass(context.Background())
+	var queuedState string
+	mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=?`, &queuedState, 6)
+	if queuedState != "Queued" {
+		t.Fatalf("offline plinth left probe in %s, want Queued", queuedState)
+	}
+
+	// Plinth 上线：派发帧经当前流下发，attempt 进入 Assigned。
+	var sent []*runtimev1.ControlEnvelope
+	service.Slots.AttachStreamWithSender(qruntime.SlotPlinth, "plinth-boot", 3, func(envelope any) error {
+		sent = append(sent, envelope.(*runtimev1.ControlEnvelope))
+		return nil
+	})
+	service.runLocalExecutionPass(context.Background())
+	var state, boot string
+	var epoch int64
+	mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=?`, &state, 6)
+	mustQuery(t, db, `SELECT boot_id FROM execution_attempts WHERE id=?`, &boot, 6)
+	mustQuery(t, db, `SELECT connection_epoch FROM execution_attempts WHERE id=?`, &epoch, 6)
+	if state != "Assigned" || boot != "plinth-boot" || epoch != 3 {
+		t.Fatalf("probe binding=(%s,%s,%d), want (Assigned,plinth-boot,3)", state, boot, epoch)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("frames=%d, want exactly one DispatchAttempt", len(sent))
+	}
+	dispatch := sent[0].GetDispatchAttempt()
+	if dispatch == nil {
+		t.Fatalf("frame is not DispatchAttempt: %+v", sent[0].GetMsg())
+	}
+	if dispatch.GetAttemptId() != 6 || dispatch.GetAttemptType() != runtimev1.AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE {
+		t.Fatalf("dispatch=%+v", dispatch)
+	}
+	grants := dispatch.GetInput().GetConnectionGrants()
+	if len(grants) != 2 || grants[0].GetPurpose() != "model_probe_chat" || grants[1].GetPurpose() != "model_probe_embedding" {
+		t.Fatalf("grants=%+v, want model_probe_chat + model_probe_embedding", grants)
+	}
+	if dispatch.GetOperationCorrelationId() != "corr-model-probe" {
+		t.Fatalf("correlation=%q, want the persisted corr-model-probe", dispatch.GetOperationCorrelationId())
+	}
+	if sent[0].GetBootId() != "plinth-boot" || sent[0].GetConnectionEpoch() != 3 {
+		t.Fatalf("envelope fence=(%s,%d), want current stream (plinth-boot,3)", sent[0].GetBootId(), sent[0].GetConnectionEpoch())
+	}
+
+	// Accept 路由回 connections 聚合：Assigned → Running。
+	service.handleAttemptAcceptRouted(context.Background(), &runtimev1.ControlEnvelope{
+		ConnectionEpoch: 3, BootId: "plinth-boot",
+		Msg: &runtimev1.ControlEnvelope_AttemptAccept{AttemptAccept: &runtimev1.AttemptAccept{AttemptId: 6}},
+	}, &runtimev1.AttemptAccept{AttemptId: 6})
+	var running string
+	mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=?`, &running, 6)
+	if running != "Running" {
+		t.Fatalf("accepted probe state=%s, want Running", running)
+	}
+}
+
+// TestModelProviderProbeRejectConverges 覆盖 Plinth 拒绝（如版本错配导致
+// INPUT_UNSUPPORTED）：attempt 确定性中断而不是悬挂在 Assigned 阻塞 Enable。
+func TestModelProviderProbeRejectConverges(t *testing.T) {
+	db, service, _ := newLocalProbeFixture(t)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	lease := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	mustExec(t, db, `INSERT INTO connections(id,name,type,enabled,row_version,revalidation_required,created_at) VALUES(2,'main-model','model_provider',0,1,0,?)`, now)
+	mustExec(t, db, `INSERT INTO connection_revisions(id,connection_id,revision_seq,config_json,created_at) VALUES(2,2,1,'{}',?)`, now)
+	mustExec(t, db, `INSERT INTO credential_generations(id,connection_id,generation_seq,envelope_version,key_binding_revision,nonce,ciphertext,created_at) VALUES(2,2,1,1,1,?,?,?)`, []byte("model-nonce!"), make([]byte, 16), now)
+	mustExec(t, db, `UPDATE connections SET current_revision_id=2,current_credential_generation_id=2,row_version=2 WHERE id=2`)
+	mustExec(t, db, `INSERT INTO execution_attempts(id,attempt_type,scope_type,scope_id,state,quoin_release_version,operation_correlation_id,initiator_type,initiator_id,created_at)
+		VALUES(6,'connection_probe','connection',2,'Queued','q','corr-model-probe','system',0,?)`, now)
+	modelDigest := sha256HexOf([]byte(`{"connectionName":"main-model"}`))
+	mustExec(t, db, `INSERT INTO attempt_input_snapshots(id,attempt_id,schema_kind,renderer_version,content_digest,created_at) VALUES(6,6,'connection_probe_v1','v1',?,?)`, modelDigest, now)
+	mustExec(t, db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,connection_revision_id) VALUES(6,1,'connection_config',?,2)`, modelDigest)
+	mustExec(t, db, `INSERT INTO attempt_connection_grants(id,attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,created_at) VALUES(6,6,'model_probe_chat',2,2,2,?),(7,6,'model_probe_embedding',2,2,2,?)`, now, now)
+	mustExec(t, db, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='plinth-boot',connection_epoch=3,lease_until=?,runtime_release_version='q',row_version=row_version+1 WHERE id=6`, lease)
+
+	service.handleAttemptRejectRouted(context.Background(), &runtimev1.ControlEnvelope{
+		ConnectionEpoch: 3, BootId: "plinth-boot",
+		Msg: &runtimev1.ControlEnvelope_AttemptReject{AttemptReject: &runtimev1.AttemptReject{AttemptId: 6, Reason: runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED}},
+	}, &runtimev1.AttemptReject{AttemptId: 6, Reason: runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED})
+	var state, reason string
+	mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=?`, &state, 6)
+	mustQuery(t, db, `SELECT termination_reason FROM execution_attempts WHERE id=?`, &reason, 6)
+	if state != "Interrupted" || reason != "worker_protocol_error" {
+		t.Fatalf("rejected probe=(%s,%s), want (Interrupted,worker_protocol_error)", state, reason)
 	}
 }

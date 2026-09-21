@@ -1,10 +1,12 @@
 package supervisor
 
-// Plinth supervisor task slice (ADR-0011): Plinth 是纯推理沙箱——只执行
-// 模型推理(四种 agent attempt 经 worker 沙箱 + EMBEDDING 直连模型)。
-// 连接探测、来源观测、巡检采集与插件工具执行已全部移交 Quoin(权限/
-// 审计/派发)+ Stele(凭证/限流/传输),不再派发 Plinth;收到这些类型的
-// DispatchAttempt 一律按 INPUT_UNSUPPORTED 拒绝。
+// Plinth supervisor task slice (ADR-0011): Plinth 是纯推理沙箱——执行
+// 模型推理(四种 agent attempt 经 worker 沙箱 + EMBEDDING 直连模型)与
+// model_provider 资格探测(CONTEXT「模型调用边界」:provider 启用前的真实
+// 能力探测必须由 Plinth supervisor 执行且不启动 worker)。来源观测、巡检
+// 采集、metrics 探测与插件工具执行已全部移交 Quoin(权限/审计/派发)+
+// Stele(凭证/限流/传输),不再派发 Plinth;收到这些类型的 DispatchAttempt
+// 一律按 INPUT_UNSUPPORTED 拒绝。
 
 import (
 	"context"
@@ -45,10 +47,13 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 	// join attempts by id instead of echoing any runtime-supplied identity.
 	parent = dispatchContext(parent, dispatch)
 
-	// Supervisor scope (ADR-0011): 推理沙箱只承载 EMBEDDING 与四种 agent
-	// attempt;CONNECTION_PROBE / OBSERVATION_RUN / INSPECTION_COLLECTION 已
-	// 改由 Quoin 直接经 Stele 执行,不应再派发到这里——收到了也显式拒绝。
+	// Supervisor scope (ADR-0011): 推理沙箱承载 EMBEDDING、四种 agent
+	// attempt 与 model_provider 资格探测;OBSERVATION_RUN /
+	// INSPECTION_COLLECTION / metrics 探测已改由 Quoin 直接经 Stele
+	// 执行,不应再派发到这里——收到了也显式拒绝。
 	switch dispatch.GetAttemptType() {
+	case runtimev1.AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE:
+		supervisor.runProbe(parent, sink, client, dispatch, binding, stopTask)
 	case runtimev1.AttemptType_ATTEMPT_TYPE_EMBEDDING:
 		supervisor.runEmbedding(parent, sink, client, dispatch, binding, stopTask)
 	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION, runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION:

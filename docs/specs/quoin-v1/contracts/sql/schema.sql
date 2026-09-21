@@ -3185,8 +3185,12 @@ WHEN NOT EXISTS (
         END)
 )
 BEGIN SELECT RAISE(ABORT, 'connection probe result must close over its Running supervisor probe Attempt and exact connection binding'); END;
+-- Assigned → Interrupted 豁免：已派发但从未被 Accept 的探测没有任何观察
+-- 可封存（拒绝/失联发生在执行前），终态行与 termination_reason 就是全部
+-- 事实记录；其余终态转换仍要求匹配的不可变 typed 结果。
 CREATE TRIGGER trg_connection_probe_attempt_terminal_closure BEFORE UPDATE OF state ON execution_attempts
 WHEN OLD.attempt_type = 'connection_probe' AND NEW.state IN ('Succeeded','Failed','Cancelled','Interrupted')
+  AND NOT (OLD.state = 'Assigned' AND NEW.state = 'Interrupted')
   AND NOT EXISTS (
     SELECT 1 FROM connection_probe_results p
     WHERE p.attempt_id = OLD.id

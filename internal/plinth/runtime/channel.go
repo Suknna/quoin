@@ -375,6 +375,31 @@ func (sink *FrameSink) Epoch() uint64 { return sink.channel.epoch }
 // BootID is the live boot identity.
 func (sink *FrameSink) BootID() string { return sink.channel.bootID }
 
+// NewFrameSinkForTest builds a sink bound to the given channel so
+// supervisor-level tests can drive task handlers without a live gRPC
+// connection. Production sinks only come from RunConnect.
+func NewFrameSinkForTest(channel *Channel) *FrameSink { return &FrameSink{channel: channel} }
+
+// SetSendStreamForTest installs a fake outbound stream and resets the
+// per-direction sequence, letting tests observe and answer outbound frames
+// without RunConnect. Production code never calls it.
+func (channel *Channel) SetSendStreamForTest(stream interface {
+	Send(*runtimev1.ControlEnvelope) error
+},
+) {
+	channel.outboundMu.Lock()
+	defer channel.outboundMu.Unlock()
+	channel.sendStream = stream
+	channel.outboundSeq = 1
+}
+
+// DispatchServerFrameForTest injects one inbound frame into the dispatcher
+// (ack/reply routing included) so tests can answer channel requests without
+// a live stream. Production frames only arrive via RunConnect.
+func (channel *Channel) DispatchServerFrameForTest(sink *FrameSink, client runtimev1.RuntimeControlClient, envelope *runtimev1.ControlEnvelope) {
+	channel.dispatchServerFrame(context.Background(), sink, client, envelope)
+}
+
 func (channel *Channel) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	caBody, err := os.ReadFile(channel.Config.QuoinRuntimeCAFile)
 	if err != nil {

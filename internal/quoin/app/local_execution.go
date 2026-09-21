@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
@@ -32,6 +33,8 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/Suknna/quoin/internal/quoin/observation"
+	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -265,11 +268,23 @@ type metricsProbeResultJSON struct {
 	Detail       string `json:"detail,omitempty"`
 }
 
-// executeLocalProbe 本地执行一次连接探测：绑定 → metrics_probe → 与原 Plinth
-// supervisor 相同语义的 probeResultJSON 载荷 → CommitProbeResult 收口。
+// executeLocalProbe 执行一次连接探测：metrics 类型本地执行（绑定 →
+// metrics_probe → 与原 Plinth supervisor 相同语义的 probeResultJSON 载荷
+// → CommitProbeResult 收口）；model_provider 资格探测必须由 Plinth
+// supervisor 真实执行模型调用（CONTEXT「模型调用边界」），分流到
+// dispatchPlinthProbe 经帧协议派发。
 func (service *RuntimeService) executeLocalProbe(ctx context.Context, attemptID int64) error {
 	if service.Connections == nil {
 		return nil
+	}
+	var connectionType string
+	if err := service.Connections.Reader().QueryRowContext(ctx, `
+		SELECT c.type FROM execution_attempts a JOIN connections c ON c.id=a.scope_id
+		WHERE a.id=? AND a.attempt_type='connection_probe'`, attemptID).Scan(&connectionType); err != nil {
+		return fmt.Errorf("resolve probe connection type: %w", err)
+	}
+	if connectionType == connections.TypeModelProvider {
+		return service.dispatchPlinthProbe(ctx, attemptID)
 	}
 	_, _, _, bound, err := service.Connections.BindQueuedToStream(ctx, attemptID, localExecutionBootID, localExecutionEpoch, localExecutionLease)
 	if err != nil {
@@ -284,16 +299,16 @@ func (service *RuntimeService) executeLocalProbe(ctx context.Context, attemptID 
 	}
 	startedAt := time.Now().UTC()
 	var connectionID, revisionID int64
-	var connectionType, configJSON string
+	var configJSON string
 	if err := service.Connections.Reader().QueryRowContext(ctx, `
-		SELECT c.id, c.type, g.connection_revision_id, r.config_json
+		SELECT c.id, g.connection_revision_id, r.config_json
 		FROM execution_attempts a
 		JOIN connections c ON c.id = a.scope_id
 		JOIN attempt_connection_grants g ON g.attempt_id = a.id AND g.connection_id = c.id
 		JOIN connection_revisions r ON r.id = g.connection_revision_id
 		WHERE a.id=? AND a.attempt_type='connection_probe'
 		ORDER BY g.id LIMIT 1`, attemptID).
-		Scan(&connectionID, &connectionType, &revisionID, &configJSON); err != nil {
+		Scan(&connectionID, &revisionID, &configJSON); err != nil {
 		return fmt.Errorf("resolve probe connection: %w", err)
 	}
 	conn := plugins.Connection{ID: connectionID, RevisionID: revisionID, Type: connectionType, Settings: json.RawMessage(configJSON)}
@@ -325,9 +340,8 @@ func (service *RuntimeService) executeLocalProbe(ctx context.Context, attemptID 
 			}
 		}
 	default:
-		// model_provider 资格探测需要真实的模型调用资格验证，本地指标工具集
-		// 不覆盖；按确定性失败收口，保持 attempt 与探测结果历史的诚实。
-		// <--Waiting for Implementation-->
+		// model_provider 已在入口分流到 Plinth 派发；其余未知类型按确定性
+		// 失败收口，保持 attempt 与探测结果历史的诚实。
 		outcome = "failed"
 		detail["error"] = "该连接类型暂无本地探测执行器"
 	}
@@ -349,6 +363,79 @@ func (service *RuntimeService) executeLocalProbe(ctx context.Context, attemptID 
 		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// connection_probe：model_provider 资格探测（Plinth supervisor 真实执行）
+// ---------------------------------------------------------------------------
+
+// dispatchPlinthProbe 把一次 model_provider 资格探测派发给 Plinth
+// supervisor（CONTEXT「模型调用边界」：provider 启用前的真实能力探测必须由
+// Plinth supervisor 执行且不启动 worker；metrics 探测已由上面的本地路径
+// 覆盖）。Plinth 未连接时保持 Queued，等下一轮扫描或连接事件再试。
+func (service *RuntimeService) dispatchPlinthProbe(ctx context.Context, attemptID int64) error {
+	view, err := service.Slots.View(ctx, qruntime.SlotPlinth)
+	if err != nil {
+		return fmt.Errorf("plinth view: %w", err)
+	}
+	if !view.Connected || view.ConnectionEpoch == nil {
+		// Plinth 离线：保持 Queued。资格探测没有可降级路径（真实模型调用是
+		// 资格闭包的成立前提），本地循环的下一轮会重试。
+		return nil
+	}
+	_, _, input, bound, err := service.Connections.BindQueuedToStream(ctx, attemptID, view.BootID, *view.ConnectionEpoch, attempt.DispatchLease)
+	if err != nil {
+		return fmt.Errorf("bind: %w", err)
+	}
+	if !bound {
+		return nil
+	}
+	var scopeID int64
+	if err := service.Connections.Reader().QueryRowContext(ctx, `SELECT scope_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&scopeID); err != nil {
+		return fmt.Errorf("resolve probe scope: %w", err)
+	}
+	// 输入快照携带 attempt 的全部 grant（model_provider 派发 chat +
+	// embedding 双 purpose，supervisor 经 model_probe_chat 拉取凭据）。
+	var grants []*runtimev1.ConnectionGrant
+	rows, err := service.Connections.Reader().QueryContext(ctx, `SELECT id,connection_revision_id,credential_generation_id,purpose,qualified_probe_result_id FROM attempt_connection_grants WHERE attempt_id=? ORDER BY id`, attemptID)
+	if err != nil {
+		return fmt.Errorf("load probe grants: %w", err)
+	}
+	for rows.Next() {
+		var grantID, revisionID, generationID int64
+		var purpose string
+		var probeResultID sql.NullInt64
+		if err := rows.Scan(&grantID, &revisionID, &generationID, &purpose, &probeResultID); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("load probe grants: %w", err)
+		}
+		grant := &runtimev1.ConnectionGrant{GrantId: grantID, ConnectionRevisionId: revisionID, CredentialGenerationId: generationID, Purpose: purpose}
+		if probeResultID.Valid {
+			grant.ConnectionProbeResultId = probeResultID.Int64
+		}
+		grants = append(grants, grant)
+	}
+	if err := rows.Close(); err != nil || rows.Err() != nil {
+		return fmt.Errorf("load probe grants: close=%v err=%v", err, rows.Err())
+	}
+	operationCorrelationID, err := dispatchOperationCorrelation(ctx, service.Connections.Reader(), attemptID)
+	if err != nil {
+		return fmt.Errorf("probe correlation: %w", err)
+	}
+	digest := sha256.Sum256(input)
+	return service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
+		ConnectionEpoch: *view.ConnectionEpoch, CorrelationId: uint64(attemptID), BootId: view.BootID,
+		Msg: &runtimev1.ControlEnvelope_DispatchAttempt{DispatchAttempt: &runtimev1.DispatchAttempt{
+			AttemptId: attemptID, AttemptType: runtimev1.AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE,
+			ScopeType: runtimev1.ScopeType_SCOPE_TYPE_CONNECTION, ScopeId: scopeID,
+			OperationCorrelationId: operationCorrelationID,
+			LeaseDeadline:          timestamppb.New(time.Now().UTC().Add(attempt.DispatchLease)),
+			Input: &runtimev1.AttemptInputSnapshot{
+				SchemaKind: "connection_probe_v1", CanonicalJson: input, ContentDigest: digest[:],
+				ConnectionGrants: grants,
+			},
+		}},
+	})
 }
 
 // ---------------------------------------------------------------------------

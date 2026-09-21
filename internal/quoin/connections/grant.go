@@ -273,12 +273,14 @@ func (service *Service) CancelProbe(ctx context.Context, attemptID int64, expect
 // records nothing (the caller sees a converged idempotent success).
 var errProbeAlreadyTerminal = errors.New("connection probe attempt already terminal")
 
-// InterruptProbe closes a Running probe with its immutable interrupted typed
-// result before advancing the Attempt terminal state. Generic Attempt
-// interruption cannot be used here because the SQL terminal fence requires
-// the typed result to exist first; restart/reconciliation therefore uses this
-// dedicated audited closure path. An already-terminal attempt converges
-// silently (no state change, no audit row).
+// InterruptProbe closes a probe with its immutable interrupted typed result
+// before advancing the Attempt terminal state. Generic Attempt interruption
+// cannot be used here because the SQL terminal fence requires the typed
+// result to exist first; restart/reconciliation therefore uses this dedicated
+// audited closure path. An already-terminal attempt converges silently (no
+// state change, no audit row). Assigned (dispatched but never accepted, e.g.
+// a Plinth reject before AttemptAccept) converges the same way: the typed
+// interrupted result records that no observation ever ran.
 func (service *Service) InterruptProbe(ctx context.Context, attemptID int64, reason string) error {
 	ctx, err := service.probeLifecycleContext(ctx, attemptID)
 	if err != nil {
@@ -293,8 +295,17 @@ func (service *Service) InterruptProbe(ctx context.Context, attemptID int64, rea
 		if state == "Interrupted" || state == "Succeeded" || state == "Failed" || state == "Cancelled" {
 			return 0, errProbeAlreadyTerminal
 		}
+		if state == "Assigned" {
+			// 已派发但从未被 Accept（如 Plinth 在 Accept 前拒绝）：没有任何
+			// 观察发生，typed 结果无可封存——终态行与原因就是全部事实记录
+			//（schema 对 Assigned → Interrupted 豁免 typed 结果闭包）。
+			if _, err := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Interrupted',ended_at=?,termination_reason=?,row_version=row_version+1 WHERE id=? AND state='Assigned'`, timestampOf(service.now), reason, attemptID); err != nil {
+				return 0, err
+			}
+			return attemptID, nil
+		}
 		if state != "Running" {
-			return 0, fmt.Errorf("connection probe %d is %s; interrupted closure requires Running", attemptID, state)
+			return 0, fmt.Errorf("connection probe %d is %s; interrupted closure requires Running or Assigned", attemptID, state)
 		}
 		var connectionType string
 		var revisionID, generationID int64
@@ -325,7 +336,7 @@ func (service *Service) InterruptProbe(ctx context.Context, attemptID int64, rea
 		if err := writeInterruptedChild(ctx, tx, headerID, connectionType, revisionID); err != nil {
 			return 0, err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Interrupted',ended_at=?,termination_reason=?,row_version=row_version+1 WHERE id=? AND state='Running'`, now, reason, attemptID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Interrupted',ended_at=?,termination_reason=?,row_version=row_version+1 WHERE id=? AND state=?`, now, reason, attemptID, state); err != nil {
 			return 0, err
 		}
 		return attemptID, nil

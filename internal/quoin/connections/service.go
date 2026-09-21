@@ -687,11 +687,13 @@ func boolInt(value bool) int {
 
 // Rotate creates the next revision and credential generation as one durable,
 // replayable command that atomically switches the current pair (T09,
-// HTTP-COMMAND-013): the old secret stops being handed out immediately;
-// enabled model providers are disabled first (v1: disable-then-switch) and
-// every rotated connection requires a fresh passed probe before enabling
-// again (revalidation_required). The manual rotate audit is replaced by the
-// runner's automatic audit row in the same transaction.
+// HTTP-COMMAND-013): enabled model providers are disabled first (v1:
+// disable-then-switch) and every rotated connection requires a fresh passed
+// probe before enabling again (revalidation_required). Grants already frozen
+// into a running attempt keep their snapshot until the attempt ends (grant
+// 冻结语义，见 grant.go 头注）——轮换只截断新 grant 的下发，不追溯在途
+// attempt。The manual rotate audit is replaced by the runner's automatic
+// audit row in the same transaction.
 func (service *Service) Rotate(ctx context.Context, name string, expectedRowVersion int64, input CreateInput, createdBy int64, clientCommandID string) (Summary, error) {
 	digest := auth.DigestCommand(opRotate, map[string]any{
 		"name": name, "type": input.Type,

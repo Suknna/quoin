@@ -120,9 +120,9 @@ func (service *RuntimeService) dispatchQueuedAnalyses(ctx context.Context) {
 }
 
 // handleAttemptAcceptRouted records Assigned -> Running for whichever task
-// slice owns the attempt (RUNTIME-TASK-004). The locally-executed types
-// (connection_probe, inspection_collection) never arrive here: nothing
-// dispatches them onto the stream anymore.
+// slice owns the attempt (RUNTIME-TASK-004). Locally-executed types
+// (inspection_collection 与 metrics 探测) never arrive here；model_provider
+// 资格探测经 dispatchPlinthProbe 派发，Accept 回到 connections 聚合。
 func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, envelope *runtimev1.ControlEnvelope, accept *runtimev1.AttemptAccept) {
 	// A received frame must finish its bounded adjudication even if transport closes.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -133,6 +133,12 @@ func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, en
 		return
 	}
 	switch attemptType {
+	case "connection_probe":
+		if service.Connections != nil {
+			if err := service.Connections.AcceptProbe(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
+				sharedops.LogEvent("quoin", "error", "probe.accept_failed", err.Error())
+			}
+		}
 	case "inspection_analysis":
 		if service.Inspections != nil {
 			if err := service.Inspections.Attempts().Accept(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
@@ -329,11 +335,24 @@ func (service *RuntimeService) attemptTypeOf(ctx context.Context, attemptID int6
 
 // handleAttemptRejectRouted closes a knowledge import only for a terminal
 // dispatch rejection. Capacity rejection deliberately preserves Assigned so a
-// later reconnect/reconcile can replay the frozen dispatch.
+// later reconnect/reconcile can replay the frozen dispatch. Plinth 对
+// model_provider 探测的拒绝（如 INPUT_UNSUPPORTED）按确定性中断收口，
+// 避免 Assigned 探测无限悬挂、阻塞 Enable。
 func (service *RuntimeService) handleAttemptRejectRouted(ctx context.Context, envelope *runtimev1.ControlEnvelope, reject *runtimev1.AttemptReject) {
 	attemptType, err := service.attemptTypeOf(ctx, reject.GetAttemptId())
 	if err != nil {
 		sharedops.LogEvent("quoin", "error", "reject.lookup_failed", err.Error())
+		return
+	}
+	if attemptType == "connection_probe" {
+		if service.Connections != nil {
+			// Plinth 在 Accept 前拒绝（INPUT_UNSUPPORTED 等）：探测从未执行，
+			// 经 typed interrupted 结果确定性收口，避免 Assigned 悬挂阻塞
+			// Enable（Running 探测的拒绝同路径覆盖）。
+			if err := service.Connections.InterruptProbe(ctx, reject.GetAttemptId(), "worker_protocol_error"); err != nil {
+				sharedops.LogEvent("quoin", "error", "probe.reject_converge_failed", fmt.Sprintf("attempt=%d %v", reject.GetAttemptId(), err))
+			}
+		}
 		return
 	}
 	if service.Knowledge == nil || (attemptType != "knowledge_extraction" && attemptType != "embedding") {
