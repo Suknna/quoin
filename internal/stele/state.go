@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
@@ -19,7 +20,9 @@ import (
 )
 
 // queueSchemaVersion 是本地库结构的唯一版本号（PRAGMA user_version）。
-const queueSchemaVersion = 1
+// v2：dead_letters 增加 credential_id/credential_snapshot_version 两列
+// （重放需要把事件按原凭据重新入队；v1 库经 ALTER TABLE 原地迁移）。
+const queueSchemaVersion = 2
 
 // 固定纳秒宽度的 UTC 时间布局：等宽文本使字典序与时间序一致，next_retry_at
 // 的字符串比较才可靠。
@@ -121,6 +124,30 @@ func (queue *Queue) bootstrap() error {
 	if version == queueSchemaVersion {
 		return nil
 	}
+	if version == 1 {
+		// v1 → v2：dead_letters 补凭据列（重放入队需要）；既有死信行的
+		// 凭据记为 0，重放时必须显式指定有效凭据（CLI 强制校验）。
+		tx, err := queue.db.Begin()
+		if err != nil {
+			return fmt.Errorf("stele: begin v2 migration: %w", err)
+		}
+		if _, err := tx.Exec(`ALTER TABLE dead_letters ADD COLUMN credential_id INTEGER NOT NULL DEFAULT 0`); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("stele: migrate dead_letters credential_id: %w", err)
+		}
+		if _, err := tx.Exec(`ALTER TABLE dead_letters ADD COLUMN credential_snapshot_version INTEGER NOT NULL DEFAULT 0`); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("stele: migrate dead_letters credential_snapshot_version: %w", err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, queueSchemaVersion)); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("stele: stamp schema v2: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("stele: commit v2 migration: %w", err)
+		}
+		return nil
+	}
 	if version != 0 {
 		return fmt.Errorf("stele: state database schema version %d is not supported (want %d)", version, queueSchemaVersion)
 	}
@@ -144,6 +171,8 @@ func (queue *Queue) bootstrap() error {
 			id TEXT PRIMARY KEY,
 			source_kind TEXT NOT NULL,
 			source_id INTEGER NOT NULL,
+			credential_id INTEGER NOT NULL DEFAULT 0,
+			credential_snapshot_version INTEGER NOT NULL DEFAULT 0,
 			event_type TEXT NOT NULL,
 			payload BLOB NOT NULL,
 			reason TEXT NOT NULL,
@@ -315,9 +344,9 @@ func (queue *Queue) markUnavailable(ctx context.Context, id string, now time.Tim
 		var event QueuedEvent
 		var receivedAt string
 		err := tx.QueryRowContext(ctx, `SELECT
-			id, source_kind, source_id, event_type, received_at, payload
+			id, source_kind, source_id, credential_id, credential_snapshot_version, event_type, received_at, payload
 			FROM events_outbox WHERE id=?`, id).Scan(
-			&event.ID, &event.SourceKind, &event.SourceID, &event.EventType, &receivedAt, &event.Payload)
+			&event.ID, &event.SourceKind, &event.SourceID, &event.CredentialID, &event.CredentialSnapshotVersion, &event.EventType, &receivedAt, &event.Payload)
 		if err != nil {
 			_ = tx.Rollback()
 			if err == sql.ErrNoRows {
@@ -326,9 +355,9 @@ func (queue *Queue) markUnavailable(ctx context.Context, id string, now time.Tim
 			return false, fmt.Errorf("stele: load exhausted event: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO dead_letters(
-			id, source_kind, source_id, event_type, payload, reason, attempts, first_received_at, dead_at
-		) VALUES (?,?,?,?,?,'exhausted',?,?,?)`,
-			event.ID, event.SourceKind, event.SourceID, event.EventType, event.Payload,
+			id, source_kind, source_id, credential_id, credential_snapshot_version, event_type, payload, reason, attempts, first_received_at, dead_at
+		) VALUES (?,?,?,?,?,?,?,'exhausted',?,?,?)`,
+			event.ID, event.SourceKind, event.SourceID, event.CredentialID, event.CredentialSnapshotVersion, event.EventType, event.Payload,
 			attempts, receivedAt, formatStateTime(now)); err != nil {
 			_ = tx.Rollback()
 			return false, fmt.Errorf("stele: dead-letter exhausted event: %w", err)
@@ -365,9 +394,9 @@ func (queue *Queue) moveToDeadLetter(ctx context.Context, id, reason string, now
 	var event QueuedEvent
 	var receivedAt string
 	err = tx.QueryRowContext(ctx, `SELECT
-		id, source_kind, source_id, event_type, received_at, payload, attempts
+		id, source_kind, source_id, credential_id, credential_snapshot_version, event_type, received_at, payload, attempts
 		FROM events_outbox WHERE id=?`, id).Scan(
-		&event.ID, &event.SourceKind, &event.SourceID, &event.EventType, &receivedAt, &event.Payload, &event.Attempts)
+		&event.ID, &event.SourceKind, &event.SourceID, &event.CredentialID, &event.CredentialSnapshotVersion, &event.EventType, &receivedAt, &event.Payload, &event.Attempts)
 	if err != nil {
 		_ = tx.Rollback()
 		if err == sql.ErrNoRows {
@@ -376,9 +405,9 @@ func (queue *Queue) moveToDeadLetter(ctx context.Context, id, reason string, now
 		return false, fmt.Errorf("stele: load rejected event: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO dead_letters(
-		id, source_kind, source_id, event_type, payload, reason, attempts, first_received_at, dead_at
-	) VALUES (?,?,?,?,?,?,?,?,?)`,
-		event.ID, event.SourceKind, event.SourceID, event.EventType, event.Payload,
+		id, source_kind, source_id, credential_id, credential_snapshot_version, event_type, payload, reason, attempts, first_received_at, dead_at
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		event.ID, event.SourceKind, event.SourceID, event.CredentialID, event.CredentialSnapshotVersion, event.EventType, event.Payload,
 		reason, event.Attempts, receivedAt, formatStateTime(now)); err != nil {
 		_ = tx.Rollback()
 		return false, fmt.Errorf("stele: dead-letter rejected event: %w", err)
@@ -400,6 +429,139 @@ func (queue *Queue) QueueDepth(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("stele: count queue depth: %w", err)
 	}
 	return depth, nil
+}
+
+// DeadLetter 是一条死信的管理面投影（ADR-0011：超限/超龄/被拒事件保留原文
+// 可重放；本结构与重放出口兑现该承诺）。
+type DeadLetter struct {
+	ID                        string
+	SourceKind                string
+	SourceID                  int64
+	CredentialID              int64
+	CredentialSnapshotVersion uint64
+	EventType                 string
+	Payload                   []byte
+	Reason                    string
+	Attempts                  int
+	FirstReceivedAt           time.Time
+	DeadAt                    time.Time
+}
+
+// DeadLetterFilter 是死信列表的可选过滤（零值不过滤）。
+type DeadLetterFilter struct {
+	SourceKind string
+	Reason     string
+	Limit      int
+}
+
+// ListDeadLetters 按 dead_at 倒序列出死信（管理面只读；Limit<=0 时默认 50，
+// 上限 500，避免一次性捞出全部原文）。
+func (queue *Queue) ListDeadLetters(ctx context.Context, filter DeadLetterFilter) ([]DeadLetter, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	query := `SELECT id, source_kind, source_id, credential_id, credential_snapshot_version,
+		event_type, payload, reason, attempts, first_received_at, dead_at
+		FROM dead_letters`
+	var clauses []string
+	var args []any
+	if filter.SourceKind != "" {
+		clauses = append(clauses, "source_kind = ?")
+		args = append(args, filter.SourceKind)
+	}
+	if filter.Reason != "" {
+		clauses = append(clauses, "reason = ?")
+		args = append(args, filter.Reason)
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += " ORDER BY dead_at DESC, id LIMIT ?"
+	args = append(args, limit)
+	rows, err := queue.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("stele: list dead letters: %w", err)
+	}
+	defer rows.Close()
+	var letters []DeadLetter
+	for rows.Next() {
+		var letter DeadLetter
+		var firstReceivedAt, deadAt string
+		if err := rows.Scan(&letter.ID, &letter.SourceKind, &letter.SourceID, &letter.CredentialID,
+			&letter.CredentialSnapshotVersion, &letter.EventType, &letter.Payload, &letter.Reason,
+			&letter.Attempts, &firstReceivedAt, &deadAt); err != nil {
+			return nil, fmt.Errorf("stele: scan dead letter: %w", err)
+		}
+		if letter.FirstReceivedAt, err = time.Parse(stateTimeLayout, firstReceivedAt); err != nil {
+			return nil, fmt.Errorf("stele: parse first_received_at: %w", err)
+		}
+		if letter.DeadAt, err = time.Parse(stateTimeLayout, deadAt); err != nil {
+			return nil, fmt.Errorf("stele: parse dead_at: %w", err)
+		}
+		letters = append(letters, letter)
+	}
+	return letters, rows.Err()
+}
+
+// ReplayDeadLetters 把选中的死信在单事务内重新入队（attempts 复位、立即到
+// 期）并删除死信行；event_id 主键使重复重放必然冲突而不是静默双写。
+// credentialID/snapshotVersion 指定重放使用的凭据：轮换场景下原凭据已吊销，
+// 操作者必须显式给出当前有效凭据（来自 Quoin 告警源详情）；传 0 则沿死信
+// 行原凭据（Quoin 侧仍会按当前有效性裁决，无效会再次被拒并回到死信）。
+func (queue *Queue) ReplayDeadLetters(ctx context.Context, ids []string, credentialID int64, snapshotVersion uint64) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	tx, err := queue.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("stele: begin dead-letter replay: %w", err)
+	}
+	replayed := 0
+	for _, id := range ids {
+		var letter DeadLetter
+		var receivedAt string
+		err := tx.QueryRowContext(ctx, `SELECT id, source_kind, source_id, credential_id, credential_snapshot_version,
+			event_type, payload, first_received_at FROM dead_letters WHERE id=?`, id).
+			Scan(&letter.ID, &letter.SourceKind, &letter.SourceID, &letter.CredentialID, &letter.CredentialSnapshotVersion,
+				&letter.EventType, &letter.Payload, &receivedAt)
+		if err != nil {
+			_ = tx.Rollback()
+			if err == sql.ErrNoRows {
+				return replayed, fmt.Errorf("stele: dead letter %q not found (%d already replayed)", id, replayed)
+			}
+			return replayed, fmt.Errorf("stele: load dead letter: %w", err)
+		}
+		useCredential, useSnapshot := credentialID, snapshotVersion
+		if useCredential == 0 {
+			useCredential, useSnapshot = letter.CredentialID, letter.CredentialSnapshotVersion
+		}
+		if useCredential <= 0 {
+			_ = tx.Rollback()
+			return replayed, fmt.Errorf("stele: dead letter %q has no usable credential; pass an explicit valid credential id", id)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO events_outbox(
+			id, source_kind, source_id, credential_id, credential_snapshot_version,
+			event_type, received_at, payload, state, attempts, next_retry_at, created_at
+		) VALUES (?,?,?,?,?,?,?,?,'pending',0,NULL,?)`,
+			letter.ID, letter.SourceKind, letter.SourceID, useCredential, useSnapshot,
+			letter.EventType, receivedAt, letter.Payload, formatStateTime(time.Now().UTC())); err != nil {
+			_ = tx.Rollback()
+			return replayed, fmt.Errorf("stele: re-enqueue dead letter %q: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM dead_letters WHERE id=?`, id); err != nil {
+			_ = tx.Rollback()
+			return replayed, fmt.Errorf("stele: delete replayed dead letter %q: %w", id, err)
+		}
+		replayed++
+	}
+	if err := tx.Commit(); err != nil {
+		return replayed, fmt.Errorf("stele: commit dead-letter replay: %w", err)
+	}
+	return replayed, nil
 }
 
 // AddRateCounters 把一个连接的 allowed/denied 增量累加进 rate_counters。

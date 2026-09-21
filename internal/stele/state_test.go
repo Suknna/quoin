@@ -231,3 +231,128 @@ func TestQueueFilePermissions(t *testing.T) {
 		t.Fatalf("data directory mode = %o, want group/other bits clear", dir.Mode().Perm())
 	}
 }
+
+// 死信管理面（ADR-0011「保留原文可重放」）：列表投影携带凭据与原文，
+// 重放按原凭据或显式新凭据重新入队（attempts 复位、立即到期），
+// event_id 主键使重复重放必然冲突。
+func TestDeadLetterListAndReplay(t *testing.T) {
+	ctx := context.Background()
+	queue := openTestQueue(t)
+	if err := queue.EnqueueEvents(ctx, []QueuedEvent{sampleEvent("evt-dead-1")}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// 被拒绝 → 死信（reason=rejected），凭据随行保存。
+	if _, err := queue.MarkResult(ctx, "evt-dead-1", 2, time.Now().UTC()); err != nil { // EVENT_DELIVERY_STATUS_REJECTED
+		t.Fatalf("mark rejected: %v", err)
+	}
+	letters, err := queue.ListDeadLetters(ctx, DeadLetterFilter{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(letters) != 1 || letters[0].ID != "evt-dead-1" || letters[0].Reason != "rejected" {
+		t.Fatalf("letters=%+v", letters)
+	}
+	if letters[0].CredentialID != 9 || letters[0].CredentialSnapshotVersion != 3 {
+		t.Fatalf("dead letter lost its credential binding: %+v", letters[0])
+	}
+	if string(letters[0].Payload) != `{"status":"firing"}` {
+		t.Fatalf("payload=%s", letters[0].Payload)
+	}
+	// 过滤：source/reason 命中与落空。
+	if hit, _ := queue.ListDeadLetters(ctx, DeadLetterFilter{SourceKind: "alertmanager", Reason: "rejected"}); len(hit) != 1 {
+		t.Fatalf("filtered list=%d, want 1", len(hit))
+	}
+	if miss, _ := queue.ListDeadLetters(ctx, DeadLetterFilter{Reason: "exhausted"}); len(miss) != 0 {
+		t.Fatalf("filtered list=%d, want 0", len(miss))
+	}
+
+	// 按原凭据重放：回到 outbox、attempts 复位、立即到期可取。
+	replayed, err := queue.ReplayDeadLetters(ctx, []string{"evt-dead-1"}, 0, 0)
+	if err != nil || replayed != 1 {
+		t.Fatalf("replay=(%d,%v), want (1,nil)", replayed, err)
+	}
+	if remaining, _ := queue.ListDeadLetters(ctx, DeadLetterFilter{}); len(remaining) != 0 {
+		t.Fatalf("dead letters after replay=%d, want 0", len(remaining))
+	}
+	batch, err := queue.FetchDueBatch(ctx, 5, time.Now().UTC())
+	if err != nil || len(batch) != 1 || batch[0].ID != "evt-dead-1" {
+		t.Fatalf("replayed batch=%+v err=%v", batch, err)
+	}
+	if batch[0].Attempts != 0 || batch[0].CredentialID != 9 {
+		t.Fatalf("replayed event=(attempts=%d,credential=%d), want (0,9)", batch[0].Attempts, batch[0].CredentialID)
+	}
+
+	// 再次死信后用显式新凭据重放（轮换场景：原凭据已吊销）。
+	if _, err := queue.MarkResult(ctx, "evt-dead-1", 2, time.Now().UTC()); err != nil {
+		t.Fatalf("re-mark rejected: %v", err)
+	}
+	replayed, err = queue.ReplayDeadLetters(ctx, []string{"evt-dead-1"}, 42, 7)
+	if err != nil || replayed != 1 {
+		t.Fatalf("replay with new credential=(%d,%v)", replayed, err)
+	}
+	batch, _ = queue.FetchDueBatch(ctx, 5, time.Now().UTC())
+	if len(batch) != 1 || batch[0].CredentialID != 42 || batch[0].CredentialSnapshotVersion != 7 {
+		t.Fatalf("replay must ride the explicit credential: %+v", batch)
+	}
+
+	// 不存在的 id：明确报错且已重放数正确。
+	if _, err = queue.ReplayDeadLetters(ctx, []string{"evt-missing"}, 0, 0); err == nil {
+		t.Fatal("replaying a missing id must fail")
+	}
+}
+
+// v1 老库原地迁移到 v2：dead_letters 补凭据列，既有行凭据记 0。
+func TestDeadLetterV1ToV2Migration(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	// 手工建一个 v1 布局的库（无凭据列）并落一条死信。
+	queue, err := OpenQueue(filepath.Join(root, "state"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := queue.db.Exec(`CREATE TABLE dead_letters_v1_backup AS SELECT * FROM dead_letters`); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	if _, err := queue.db.Exec(`DROP TABLE dead_letters`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	if _, err := queue.db.Exec(`CREATE TABLE dead_letters(
+		id TEXT PRIMARY KEY, source_kind TEXT NOT NULL, source_id INTEGER NOT NULL,
+		event_type TEXT NOT NULL, payload BLOB NOT NULL, reason TEXT NOT NULL,
+		attempts INTEGER NOT NULL, first_received_at TEXT NOT NULL, dead_at TEXT NOT NULL)`); err != nil {
+		t.Fatalf("recreate v1: %v", err)
+	}
+	if _, err := queue.db.Exec(`INSERT INTO dead_letters VALUES('legacy-1','alertmanager',7,'alerts.batch','{}','rejected',2,'2026-09-20T00:00:00.000000000Z','2026-09-20T01:00:00.000000000Z')`); err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+	if _, err := queue.db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatalf("stamp v1: %v", err)
+	}
+	if _, err := queue.db.Exec(`DROP TABLE dead_letters_v1_backup`); err != nil {
+		t.Fatalf("drop backup: %v", err)
+	}
+	if err := queue.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	// 重新打开触发 v1 → v2 迁移：凭据列出现，既有行记 0。
+	reopened, err := OpenQueue(filepath.Join(root, "state"))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	letters, err := reopened.ListDeadLetters(ctx, DeadLetterFilter{})
+	if err != nil {
+		t.Fatalf("list after migration: %v", err)
+	}
+	if len(letters) != 1 || letters[0].ID != "legacy-1" || letters[0].CredentialID != 0 {
+		t.Fatalf("migrated letters=%+v", letters)
+	}
+	// 凭据为 0 的既有行重放必须要求显式凭据。
+	if _, err := reopened.ReplayDeadLetters(ctx, []string{"legacy-1"}, 0, 0); err == nil {
+		t.Fatal("replaying a credential-less legacy row must require an explicit credential")
+	}
+	replayed, err := reopened.ReplayDeadLetters(ctx, []string{"legacy-1"}, 11, 2)
+	if err != nil || replayed != 1 {
+		t.Fatalf("legacy replay=(%d,%v)", replayed, err)
+	}
+}

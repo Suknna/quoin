@@ -42,6 +42,7 @@ const (
 
 	opDelivery             = "alert.delivery"
 	opAcknowledgeIntake    = "alert_intake_issue.acknowledge"
+	opCredentialDenied     = "alert_intake_issue.credential_denied"
 	opFaultRuntime         = "platform_fault.observe_runtime_connection"
 	opFaultExecution       = "platform_fault.observe_execution_outcome"
 	reasonCredentialDenied = "credential or source is not currently accepted"
@@ -65,15 +66,16 @@ const (
 // alertOperations holds the canonical registered declarations of this
 // package's write operations.
 type alertOperations struct {
-	create    *execution.Operation
-	rotate    *execution.Operation
-	retire    *execution.Operation
-	enabled   *execution.Operation
-	reveal    *execution.Operation
-	delivery  *execution.Operation
-	ackIntake *execution.Operation
-	faultLive *execution.Operation
-	faultExec *execution.Operation
+	create     *execution.Operation
+	rotate     *execution.Operation
+	retire     *execution.Operation
+	enabled    *execution.Operation
+	reveal     *execution.Operation
+	delivery   *execution.Operation
+	ackIntake  *execution.Operation
+	credDenied *execution.Operation
+	faultLive  *execution.Operation
+	faultExec  *execution.Operation
 }
 
 // registerOperations declares this package's operations on the runner's
@@ -107,6 +109,7 @@ func registerOperations(runner *execution.Runner) (alertOperations, error) {
 		{opRevealCredential, objectCredential, authorizeSourceAdmin, &ops.reveal},
 		{opDelivery, objectDelivery, authorizeMachineEntry, &ops.delivery},
 		{opAcknowledgeIntake, objectIntakeIssue, authorizeSourceAdmin, &ops.ackIntake},
+		{opCredentialDenied, objectIntakeIssue, authorizeMachineEntry, &ops.credDenied},
 		{opFaultRuntime, objectPlatformFault, authorizeMachineEntry, &ops.faultLive},
 		{opFaultExecution, objectPlatformFault, authorizeMachineEntry, &ops.faultExec},
 	} {

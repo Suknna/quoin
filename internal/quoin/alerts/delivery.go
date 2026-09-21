@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
+	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
@@ -109,11 +111,81 @@ func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, c
 			// Deterministic rejection: recorded as a rejected audit fact in a
 			// clean transaction and surfaced as the wire-level REJECTED
 			// outcome — never as an infrastructure error.
+			if rejection.Code == codeCredentialDenied {
+				// ADR-0011：凭据吊销/来源停用的业务拒绝以既有 intake_issues
+				// 机制记录（ACK 之后发生在 Quoin 侧）。该写入独立于被拒绝的
+				// delivery 事务（那边没有 delivery 行），失败只记诊断——拒绝
+				// 审计事实已经提交，可观测性缺口不能反过来改变拒绝结果。
+				if issueErr := service.recordCredentialDeniedIssue(ctx, relayID, sourceID, credentialID, snapshotVersion, receivedAt); issueErr != nil {
+					sharedops.LogEvent("quoin", "error", "alert.intake_issue_credential_denied_failed", issueErr.Error())
+				}
+			}
 			return DeliveryResult{Rejected: true, Status: "rejected", Detail: rejection.Detail}, nil
 		}
 		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
 	}
 	return result, nil
+}
+
+// recordCredentialDeniedIssue 把一次凭据/来源拒绝记为 credential_denied
+// 接入问题（ADR-0011 入向 ACK 语义：业务拒绝以 intake_issues 记录）。问题
+// 是来源级的——拒绝发生在 delivery 行插入之前，没有 delivery/item 可闭合，
+// issue_key 绑定被拒凭据：同一凭据的重复拒绝沿开放签名聚合计数，轮换后的
+// 新凭据若也被拒会开新的问题。写入经独立的已审计操作（拒绝审计已先行提交）。
+func (service *Service) recordCredentialDeniedIssue(ctx context.Context, relayID string, sourceID, credentialID int64, snapshotVersion uint64, receivedAt time.Time) error {
+	ctx, err := service.machineScope(ctx)
+	if err != nil {
+		return err
+	}
+	issueKey, err := IssueKey("credential_denied", map[string]string{"kind": "credential_denied", "credentialId": strconv.FormatInt(credentialID, 10), "v": "1"})
+	if err != nil {
+		return err
+	}
+	committedAt := service.clockText()
+	_, err = execution.Execute(ctx, service.runner, service.ops.credDenied,
+		func(tx *execution.Tx) (int64, error) {
+			detailJSON, _ := json.Marshal(map[string]any{
+				"kind": "credential_denied", "sourceId": sourceID, "credentialId": credentialID,
+				"relayId": relayID, "snapshotVersion": snapshotVersion, "receivedAt": receivedAt.UTC().Format(time.RFC3339Nano),
+				"detail": reasonCredentialDenied,
+			})
+			var issueID int64
+			err := tx.QueryRowContext(ctx, `SELECT id FROM alert_intake_issues WHERE source_id=? AND kind='credential_denied' AND issue_key=? AND acknowledged_at IS NULL`,
+				sourceID, issueKey).Scan(&issueID)
+			if errors.Is(err, sql.ErrNoRows) {
+				result, insertErr := tx.ExecContext(ctx, `INSERT INTO alert_intake_issues(source_id, delivery_id, delivery_item_id, kind, issue_key, detail_json, first_seen_at, last_seen_at, occurrence_count, row_version, created_at) VALUES(?,NULL,NULL,?,?,?,?,?,1,1,?)`,
+					sourceID, "credential_denied", issueKey, string(detailJSON), committedAt, committedAt, committedAt)
+				if insertErr != nil {
+					return 0, insertErr
+				}
+				issueID, _ = result.LastInsertId()
+				if _, err := tx.ExecContext(ctx, `INSERT INTO alert_intake_issue_events(issue_id, delivery_id, delivery_item_id, detail_json, observed_at) VALUES(?,NULL,NULL,?,?)`,
+					issueID, string(detailJSON), committedAt); err != nil {
+					return 0, err
+				}
+				return issueID, nil
+			}
+			if err != nil {
+				return 0, err
+			}
+			eventResult, err := tx.ExecContext(ctx, `INSERT INTO alert_intake_issue_events(issue_id, delivery_id, delivery_item_id, detail_json, observed_at) VALUES(?,NULL,NULL,?,?)`,
+				issueID, string(detailJSON), committedAt)
+			if err != nil {
+				return 0, err
+			}
+			eventID, err := eventResult.LastInsertId()
+			if err != nil {
+				return 0, err
+			}
+			// 冻结触发器要求 last_event_id 前进到刚插入的事件且计数吻合。
+			if _, err := tx.ExecContext(ctx, `UPDATE alert_intake_issues SET last_seen_at=?, occurrence_count=occurrence_count+1, row_version=row_version+1, last_event_id=? WHERE id=?`,
+				committedAt, eventID, issueID); err != nil {
+				return 0, err
+			}
+			return issueID, nil
+		},
+		func(issueID int64) int64 { return issueID })
+	return err
 }
 
 // deliverOn is the delivery business stage on the runner's guarded

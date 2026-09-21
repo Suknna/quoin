@@ -502,7 +502,7 @@ CREATE TABLE alert_intake_issues (
   delivery_id       INTEGER REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 首次事件定位
   delivery_item_id  INTEGER REFERENCES alert_delivery_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 首次事件定位
   last_event_id     INTEGER REFERENCES alert_intake_issue_events(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 最近一次 repeat 事件；首次发生为 NULL
-  kind              TEXT NOT NULL CHECK (kind IN ('identity_conflict','fingerprint_mismatch','delivery_truncated','normalizer_missing')),
+  kind              TEXT NOT NULL CHECK (kind IN ('identity_conflict','fingerprint_mismatch','delivery_truncated','normalizer_missing','credential_denied')),
   issue_key         TEXT NOT NULL CHECK (length(issue_key) = 64 AND issue_key NOT GLOB '*[^0-9a-f]*'), -- DATA-ALERT-011 kind-specific versioned canonical JSON SHA-256 digest
   detail_json       TEXT NOT NULL CHECK (json_valid(detail_json)), -- 首次事件诊断详情
   first_seen_at     TEXT NOT NULL,
@@ -514,7 +514,7 @@ CREATE TABLE alert_intake_issues (
   created_at        TEXT NOT NULL,
   CHECK (first_seen_at = created_at),
   CHECK (kind <> 'delivery_truncated' OR delivery_id IS NOT NULL),
-  CHECK (kind IN ('delivery_truncated','normalizer_missing') OR delivery_item_id IS NOT NULL),
+  CHECK (kind IN ('delivery_truncated','normalizer_missing','credential_denied') OR delivery_item_id IS NOT NULL),
   CHECK ((acknowledged_at IS NULL AND acknowledged_by IS NULL) OR (acknowledged_at IS NOT NULL AND acknowledged_by IS NOT NULL))
 ) STRICT;
 CREATE UNIQUE INDEX ux_alert_intake_issue_open_signature
@@ -529,8 +529,9 @@ CREATE TABLE alert_intake_issue_events (
   delivery_id      INTEGER REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   delivery_item_id INTEGER REFERENCES alert_delivery_items(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   detail_json      TEXT NOT NULL CHECK (json_valid(detail_json)),
-  observed_at      TEXT NOT NULL,
-  CHECK (delivery_id IS NOT NULL OR delivery_item_id IS NOT NULL)
+  observed_at      TEXT NOT NULL
+  -- delivery_id/delivery_item_id 的双空校验由 trg_alert_intake_issue_events_source_closure
+  -- 按 issue.kind 分别强制（credential_denied 要求双空，其余 kind 要求匹配的真实行）。
 ) STRICT;
 CREATE INDEX idx_alert_intake_issue_events_issue ON alert_intake_issue_events (issue_id, observed_at, id);
 CREATE UNIQUE INDEX ux_alert_intake_issue_events_item ON alert_intake_issue_events (delivery_item_id) WHERE delivery_item_id IS NOT NULL;
@@ -541,7 +542,8 @@ CREATE UNIQUE INDEX ux_alert_intake_issue_events_delivery ON alert_intake_issue_
 -- AlertNormalizer 或归一化失败），闭合到该源任一已处理 Delivery，不指向具体条目。
 CREATE TRIGGER trg_alert_intake_issues_source_closure BEFORE INSERT ON alert_intake_issues
 WHEN NOT (
-  (NEW.kind = 'delivery_truncated' AND NEW.delivery_item_id IS NULL AND EXISTS (
+  (NEW.kind = 'credential_denied' AND NEW.delivery_id IS NULL AND NEW.delivery_item_id IS NULL)
+  OR (NEW.kind = 'delivery_truncated' AND NEW.delivery_item_id IS NULL AND EXISTS (
     SELECT 1 FROM alert_deliveries d
     WHERE d.id = NEW.delivery_id AND d.source_id = NEW.source_id
       AND d.integrity = 'truncated' AND d.status = 'processed'
@@ -562,7 +564,8 @@ CREATE TRIGGER trg_alert_intake_issue_events_source_closure BEFORE INSERT ON ale
 WHEN NOT EXISTS (
   SELECT 1 FROM alert_intake_issues issue
   WHERE issue.id = NEW.issue_id AND issue.acknowledged_at IS NULL AND (
-    (issue.kind = 'delivery_truncated' AND NEW.delivery_item_id IS NULL AND EXISTS (
+    (issue.kind = 'credential_denied' AND NEW.delivery_id IS NULL AND NEW.delivery_item_id IS NULL)
+    OR (issue.kind = 'delivery_truncated' AND NEW.delivery_item_id IS NULL AND EXISTS (
       SELECT 1 FROM alert_deliveries d
       WHERE d.id = NEW.delivery_id AND d.source_id = issue.source_id
         AND d.integrity = 'truncated' AND d.status = 'processed'

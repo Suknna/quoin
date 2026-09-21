@@ -13,6 +13,14 @@ import (
 )
 
 func main() {
+	// 子命令：dead-letters 是本地死信的管理面（直开 SQLite，不启动网关）。
+	if len(os.Args) > 1 && os.Args[1] == "dead-letters" {
+		if err := runDeadLetters(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "stele dead-letters:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	configPath := flag.String("config", "/etc/quoin/component.yaml", "strict generated component configuration")
 	flag.Parse()
 	ctx, cancel := sharedops.SignalContext()

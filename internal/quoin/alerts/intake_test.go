@@ -181,3 +181,81 @@ func TestAcknowledgeIntakeIssueFailClosed(t *testing.T) {
 		t.Fatalf("acknowledged issues after fail-closed acknowledgments = %d, want 0", got)
 	}
 }
+
+// 凭据吊销后的业务拒绝按 ADR-0011 落入 credential_denied 接入问题：拒绝
+// 不产生 delivery 行，但来源级问题必须可见、可聚合计数、可确认，确认后
+// 再次发生会重新出现。
+func TestCredentialDeniedRecordsIntakeIssue(t *testing.T) {
+	service, database, teardown := newTestService(t)
+	defer teardown()
+	db := database.SQL
+	ctx := context.Background()
+	sourceID, credentialID := seedSource(t, service, ctx, "denied-am")
+	// 吊销凭据（触发 Q217 的提交顺序裁决：其后的投递确定性拒绝）。
+	if _, _, err := service.RetireCredential(adminCommandContext(t, ctx), "denied-retire-1", "denied-am", credentialID, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	body := webhookBody("firing", map[string]string{"alertname": "CPU", "instance": "a"}, "2026-09-17T10:00:00Z", "")
+	result, err := service.Deliver(ctx, "relay-denied-1", sourceID, credentialID, 1, body, time.Now().UTC())
+	if err != nil || !result.Rejected {
+		t.Fatalf("revoked credential delivery = (%+v, %v), want a deterministic rejection", result, err)
+	}
+	// 拒绝不创建 delivery 行（Q217）。
+	if got := countRows(t, db, `SELECT COUNT(*) FROM alert_deliveries WHERE event_id='relay-denied-1'`); got != 0 {
+		t.Fatalf("rejected delivery rows = %d, want 0", got)
+	}
+	// 但接入问题必须落账：来源级、无 delivery/item 闭合、未确认、首次计数 1。
+	var issueID, count int64
+	var kind, detail string
+	if err := db.QueryRow(`SELECT id, kind, occurrence_count, detail_json FROM alert_intake_issues WHERE source_id=? AND acknowledged_at IS NULL`, sourceID).
+		Scan(&issueID, &kind, &count, &detail); err != nil {
+		t.Fatalf("credential_denied issue missing: %v", err)
+	}
+	if kind != "credential_denied" || count != 1 {
+		t.Fatalf("issue=(%s,%d), want (credential_denied,1)", kind, count)
+	}
+	var deliveryRef, itemRef any
+	if err := db.QueryRow(`SELECT delivery_id, delivery_item_id FROM alert_intake_issues WHERE id=?`, issueID).Scan(&deliveryRef, &itemRef); err != nil {
+		t.Fatal(err)
+	}
+	if deliveryRef != nil || itemRef != nil {
+		t.Fatalf("source-level issue must not link a delivery/item: %v/%v", deliveryRef, itemRef)
+	}
+	if got := countRows(t, db, `SELECT COUNT(*) FROM alert_intake_issue_events WHERE issue_id=?`, issueID); got != 1 {
+		t.Fatalf("issue events = %d, want 1", got)
+	}
+
+	// 同一被拒凭据的重复拒绝沿开放签名聚合计数。
+	result, err = service.Deliver(ctx, "relay-denied-2", sourceID, credentialID, 1, body, time.Now().UTC())
+	if err != nil || !result.Rejected {
+		t.Fatalf("second rejected delivery = (%+v, %v)", result, err)
+	}
+	if err := db.QueryRow(`SELECT occurrence_count FROM alert_intake_issues WHERE id=?`, issueID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("occurrence_count=%d, want 2 after the second rejection", count)
+	}
+
+	// 确认不删除历史；再次拒绝重新出现新问题。
+	var rowVersion int64
+	if err := db.QueryRow(`SELECT row_version FROM alert_intake_issues WHERE id=?`, issueID).Scan(&rowVersion); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := service.AcknowledgeIntakeIssue(adminCommandContext(t, ctx), issueID, 1, rowVersion, "2026-09-17T11:00:00Z")
+	if err != nil || !applied {
+		t.Fatalf("acknowledge = (%v, %v)", applied, err)
+	}
+	result, err = service.Deliver(ctx, "relay-denied-3", sourceID, credentialID, 1, body, time.Now().UTC())
+	if err != nil || !result.Rejected {
+		t.Fatalf("third rejected delivery = (%+v, %v)", result, err)
+	}
+	var openID int64
+	if err := db.QueryRow(`SELECT id FROM alert_intake_issues WHERE source_id=? AND kind='credential_denied' AND acknowledged_at IS NULL`, sourceID).Scan(&openID); err != nil {
+		t.Fatalf("a fresh open issue must reappear after acknowledgement: %v", err)
+	}
+	if openID == issueID {
+		t.Fatal("acknowledged issue must not reopen in place")
+	}
+}
