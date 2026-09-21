@@ -67,9 +67,13 @@ func (runner *Runner) executeTool(ctx context.Context, writer *FrameWriter, atte
 //     payload),携带 artifact 引用与确定性 evidence ids;
 //   - FAILED/CANCELLED:组装失败形态(result_json 优先用 Quoin 的 payload,
 //     缺失时本地合成 return_to_model 失败形状),worker 侧已有处理;
-//   - 等待超时(ExternalResultTimeout):Quoin 已封存但结果帧在首发与重连
-//     补发后仍未送达——合成确定性失败结果让 agent 循环继续,而不是无限
-//     阻塞 attempt;账实以 Quoin ledger 为准,本帧只是模型可见的收敛形状。
+//   - 等待超时(ExternalResultTimeout):结果帧在首发与重连补发后仍未
+//     送达——合成确定性失败结果让 agent 循环继续,而不是无限阻塞
+//     attempt;此时 Quoin 侧的真实状态未知(可能仍在执行、已封存但帧
+//     丢失、或 Quoin 不可达),账实以 Quoin ledger 为准,本帧只是模型
+//     可见的收敛形状,不得声称"已封存"。契约(runtime.proto)没有
+//     tool_call 级的取消帧——唯一的 CancelAttempt 是 attempt 级,会误杀
+//     整个 agent 循环,所以超时只放弃本地等待,不新增协议通道。
 //
 // CompleteToolCall 不由 Plinth 发送——Quoin 已是这类工具的权威封存方。
 // 等待期间 attempt 取消或 worker 退出时,ctx 结束会清理 waiter 并放弃
@@ -82,8 +86,8 @@ func (runner *Runner) awaitQuoinRoutedTool(ctx context.Context, writer *FrameWri
 		}
 		toolResult := &workerv1.ToolResult{
 			ToolCallId: toolCallID, Success: false,
-			ErrorCode:   "result_delivery_timeout",
-			ErrorDetail: "Quoin 已封存该调用,但结果帧在等待上限内未送达(首发与重连补发均未覆盖);真实封存结果以 Quoin 时间线为准",
+			ErrorCode: "result_delivery_timeout",
+			ErrorDetail: "结果帧在等待上限内未送达(首发与重连补发均未覆盖);该调用在 Quoin 侧的真实状态以其 ledger 为准(可能仍在执行、已封存但帧丢失、或 Quoin 不可达),本结果只是本地收敛形状",
 		}
 		toolResult.ResultJson, _ = json.Marshal(map[string]any{
 			"success": false, "errorCode": toolResult.ErrorCode, "errorDetail": toolResult.ErrorDetail,

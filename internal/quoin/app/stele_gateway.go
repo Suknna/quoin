@@ -89,6 +89,11 @@ func (gateway *steleGateway) Close() {
 // 登记当前流（替换旧流——新流到来时关闭旧流），回 hello_ack{accepted:true}。
 func (gateway *steleGateway) Connect(stream runtimev1.SteleRelay_ConnectServer) error {
 	ctx := stream.Context()
+	select {
+	case <-gateway.closing:
+		return status.Error(codes.Unavailable, "quoin is shutting down")
+	default:
+	}
 	if !requireComponentIdentity(ctx, "stele") {
 		return status.Error(codes.Unauthenticated, "stele client identity required")
 	}
@@ -131,7 +136,13 @@ func (gateway *steleGateway) Connect(stream runtimev1.SteleRelay_ConnectServer) 
 	gateway.messageID = 1 // hello_ack 占用序号 1
 	gateway.correlationID = 0
 	gateway.mu.Unlock()
-	defer gateway.detach()
+	defer func() {
+		gateway.mu.Lock()
+		defer gateway.mu.Unlock()
+		if gateway.streamDone == done {
+			gateway.detachLocked()
+		}
+	}()
 	sharedops.LogEvent("quoin", "info", "stele_gateway.connected",
 		fmt.Sprintf("boot=%s epoch=%d release=%s", hello.GetBootId(), hello.GetConnectionEpoch(), hello.GetReleaseVersion()))
 	if err := stream.Send(&runtimev1.SteleEnvelope{
@@ -153,6 +164,8 @@ func (gateway *steleGateway) Connect(stream runtimev1.SteleRelay_ConnectServer) 
 		}()
 		var err error
 		select {
+		case <-done:
+			return nil
 		case <-gateway.closing:
 			return status.Error(codes.Canceled, "quoin is shutting down")
 		case err = <-received:
@@ -292,8 +305,9 @@ func (gateway *steleGateway) Execute(ctx context.Context, connectionID, revision
 	}
 	// 等待窗口 = max(请求超时, 最小执行窗) + 余量；ctx 仍是最终上限。
 	waitFor := executeResultGrace
-	if req.Timeout > 0 && req.Timeout+executeResultGrace > waitFor {
-		waitFor = req.Timeout + executeResultGrace
+	normalizedTimeout := time.Duration(timeoutMillisOf(req.Timeout)) * time.Millisecond
+	if normalizedTimeout+executeResultGrace > waitFor {
+		waitFor = normalizedTimeout + executeResultGrace
 	}
 	timer := time.NewTimer(waitFor)
 	defer timer.Stop()

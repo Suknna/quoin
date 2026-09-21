@@ -683,7 +683,7 @@ func (service *RuntimeService) routedSpillFunc(loaded *routedToolContext) plugin
 // supervisor 转发 worker 继续 agent 循环）。帧走当前活动流（见
 // deliverExternalToolResult）；首发失败由重连对账补发收敛。
 func (service *RuntimeService) sendExternalToolResult(ctx context.Context, loaded *routedToolContext, seal toolCallSeal, receipt sealReceipt) {
-	service.deliverExternalToolResult(ctx, externalToolResultFrame(
+	service.deliverExternalToolResult(ctx, loaded.bootID, externalToolResultFrame(
 		loaded.attemptID, loaded.toolCallID, seal.outcome,
 		receipt.committedPayload, receipt.artifactRef, receipt.evidenceIDs,
 		seal.errorCode, seal.errorDetail,
@@ -709,13 +709,23 @@ func externalToolResultFrame(attemptID, toolCallID int64, outcome string, payloa
 // deliverExternalToolResult 在当前活动流上发出一帧结果。attempt 行内冻结的
 // boot/epoch 只服务持久围栏（封存、Artifact 上传、grant）；外发帧必须走
 // 当前流——同 boot 重连会推进 epoch，旧 epoch 的信封必然被 SendToFenced
-// 拒绝（dispatchCancelRouted 已确立同一分工）。流断开时由重连对账的
-// resendSealedExternalToolResults 从 ledger 补发，此处只记诊断。
-func (service *RuntimeService) deliverExternalToolResult(ctx context.Context, frame *runtimev1.ExternalToolResult) {
+// 拒绝（dispatchCancelRouted 已确立同一分工）。当前流的 boot 必须仍是
+// attempt 的派发 boot：Plinth 重启（新 boot）后旧 boot 的 worker 已随进程
+// 消失，新 boot 没有等待该 tool_call 的 waiter，把帧发给它既是协议谎言
+// 也是噪音——新 boot 的对账按 loss 收口该 attempt，补发永远轮不到它。
+// 流断开时由重连对账的 resendSealedExternalToolResults 从 ledger 补发，
+// 此处只记诊断。
+func (service *RuntimeService) deliverExternalToolResult(ctx context.Context, attemptBoot string, frame *runtimev1.ExternalToolResult) {
 	view, err := service.Slots.View(ctx, qruntime.SlotPlinth)
 	if err != nil || !view.Connected || view.ConnectionEpoch == nil {
 		sharedops.LogEvent("quoin", "info", "toolcall.external_result_deferred",
 			fmt.Sprintf("attempt=%d tool_call=%d: stream down, reconcile resend owns delivery", frame.GetAttemptId(), frame.GetToolCallId()))
+		return
+	}
+	if view.BootID != attemptBoot {
+		sharedops.LogEvent("quoin", "info", "toolcall.external_result_boot_replaced",
+			fmt.Sprintf("attempt=%d tool_call=%d bound_boot=%q current_boot=%q: loss convergence owns the attempt",
+				frame.GetAttemptId(), frame.GetToolCallId(), attemptBoot, view.BootID))
 		return
 	}
 	if err := service.sendEnvelope(qruntime.SlotPlinth, &runtimev1.ControlEnvelope{
@@ -731,9 +741,15 @@ func (service *RuntimeService) deliverExternalToolResult(ctx context.Context, fr
 // 工具结果。Plinth 的 waiter 挂在 Channel 上跨流存活，协议本就期待 Quoin 在
 // 重连对账确认 attempt 仍活跃后重发（首发帧可能丢在断流窗口）。幂等：已
 // 被 worker 消费的 tool_call 在 Plinth 侧没有 waiter，重复帧只审计丢弃；
-// Quoin 的封存围栏也拒绝任何二次写入。帧经当前活动流下发。
+// Quoin 的封存围栏也拒绝任何二次写入。帧经当前活动流下发，且当前流必须
+// 仍是 attempt 的派发 boot（调用侧的同 boot 过滤之外的自卫围栏）。
 func (service *RuntimeService) resendSealedExternalToolResults(ctx context.Context, attempts *attempt.Service, attemptID int64) {
 	if attempts == nil {
+		return
+	}
+	var attemptBoot sql.NullString
+	if err := attempts.Reader().QueryRowContext(ctx, `SELECT boot_id FROM execution_attempts WHERE id=?`, attemptID).Scan(&attemptBoot); err != nil || !attemptBoot.Valid {
+		sharedops.LogEvent("quoin", "error", "toolcall.resend_scan_failed", fmt.Sprintf("attempt=%d has no runtime binding: boot=%v err=%v", attemptID, attemptBoot, err))
 		return
 	}
 	rows, err := attempts.Reader().QueryContext(ctx, `
@@ -808,7 +824,7 @@ func (service *RuntimeService) resendSealedExternalToolResults(ctx context.Conte
 			_ = json.Unmarshal(payload.GetCanonicalJson(), &decoded)
 			errorCode = decoded.ErrorCode
 		}
-		service.deliverExternalToolResult(ctx, externalToolResultFrame(
+		service.deliverExternalToolResult(ctx, attemptBoot.String, externalToolResultFrame(
 			attemptID, call.id, call.status, payload, artifactRef, evidenceIDs,
 			errorCode, call.errorDetail.String,
 		))

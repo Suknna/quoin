@@ -263,6 +263,35 @@ func (service *RuntimeService) finalizeLoss(ctx context.Context, view attempt.Vi
 		return
 	}
 	if view.AttemptType == "investigation" {
+		// The recovery-loss pending machinery only owns RUNNING
+		// investigations (freezeRecoveryLossPending's in-transaction guard
+		// skips anything else silently); routing a non-Running row into it
+		// left the attempt active forever while every reconcile/sweep round
+		// re-hit the same no-op. An Assigned investigation was never
+		// accepted — no browser/model obligations exist and the attempt row
+		// IS the investigation's state authority (the aggregate has no
+		// separate state row) — so the generic interrupt converges it
+		// directly; a Cancelling one follows its committed fence to
+		// Cancelled exactly like the runtime-reported path.
+		if view.State == "Cancelling" {
+			service.finalizeCancellation(ctx, view.ID, view.AttemptType)
+			return
+		}
+		if view.State != "Running" {
+			attempts := service.attemptsService()
+			if attempts != nil {
+				if _, err := attempts.Interrupt(ctx, view.ID, reason); err != nil {
+					sharedops.LogEvent("quoin", "error", "reconcile.interrupt_failed", fmt.Sprintf("attempt=%d %v", view.ID, err))
+				}
+			}
+			if service.Investigations != nil {
+				// Close the attached stream with the interruption terminal
+				// view (HTTP-STREAM-006: detach/loss never leaves the
+				// observer hanging).
+				service.Investigations.NotifyTerminal(ctx, view.ID)
+			}
+			return
+		}
 		// Create recovery_loss as the durable closure authority, then drain it:
 		// with no browser obligations left, the pending terminal commits at once.
 		if err := service.freezeRecoveryLossPending(ctx, view.ID, reason); err != nil {

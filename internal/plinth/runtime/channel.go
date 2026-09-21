@@ -71,10 +71,13 @@ type Channel struct {
 	// externalMu guards the QUOIN_ROUTED tool-result waiters (ADR-0011):
 	// supervisor 按 tool_call_id 等待 Quoin 推送的 ExternalToolResult 帧。
 	// waiter 挂在 Channel(而非单条流)上,所以同 boot 重连后 Quoin 的
-	// 重发仍能送达;没有 waiter 的迟到结果只审计丢弃(Quoin 已自行封存,
+	// 重发仍能送达;没有 waiter 的迟到结果短暂寄存在 externalEarly 里等
+	// 注册侧取回(结果可能先于 waiter 注册到达,见 deliverExternalToolResult),
+	// 超过 externalEarlyTTL 仍无人认领才审计丢弃(Quoin 已自行封存,
 	// Plinth 不是裁决方)。
 	externalMu      sync.Mutex
 	externalWaiters map[int64]chan *runtimev1.ExternalToolResult
+	externalEarly   map[int64]*earlyExternalResult
 }
 
 // resultDeliveryInterval is the fixed retry cadence for outstanding terminal
@@ -718,16 +721,38 @@ func (channel *Channel) HasAnyPendingResult() bool {
 // 失败 ToolResult，而不是无限阻塞整个 attempt。
 var ErrExternalToolResultTimeout = errors.New("external tool result delivery timeout")
 
+// externalEarlyTTL 界定一帧无 waiter 的 ExternalToolResult 被寄存多久：
+// Quoin 在 BeginToolCallAck 发出后即异步执行并可能立刻推送结果，帧物理上
+// 可以先于 supervisor goroutine 从 Request 返回并注册 waiter 到达；没有
+// 这层寄存，早到帧被当作"无人等待"丢弃，worker 只能白等满
+// ExternalResultTimeout。寄存条目超过 TTL 仍无人认领（典型是重连补发里
+// worker 已消费过的重复帧）才按无人等待丢弃。变量形态仅为测试可注入。
+var externalEarlyTTL = 30 * time.Second
+
+// earlyExternalResult 是一个寄存的早到/迟到无主结果帧。
+type earlyExternalResult struct {
+	frame *runtimev1.ExternalToolResult
+	at    time.Time
+}
+
 // AwaitExternalToolResult 注册一个按 tool_call_id 等待 QUOIN_ROUTED 工具
 // 结果的 waiter 并阻塞到 Quoin 的 ExternalToolResult 帧到达、等待超过
 // ExternalResultTimeout、调用方上下文结束(attempt 取消/worker 退出)或进程
-// 关闭为止。超时与上下文结束时 waiter 被就地清理：Quoin 已封存，迟到帧
-// 只审计丢弃，账实以 Quoin ledger 为准。
+// 关闭为止。注册前先查寄存表：结果先于注册到达时（Quoin 在 ack 后立即
+// 封存推送，快于 supervisor 注册 waiter 的微秒级窗口）就地取回，消除
+// 早到即丢的竞态。超时与上下文结束时 waiter 被就地清理：Quoin 已封存，
+// 迟到帧只审计丢弃，账实以 Quoin ledger 为准。
 // waiter 生命周期跨流:同 boot 重连后 Quoin 经重连对账补发的结果仍能送达,
 // 重放语义由 Quoin 的幂等封存保证。
 func (channel *Channel) AwaitExternalToolResult(ctx context.Context, toolCallID int64) (*runtimev1.ExternalToolResult, error) {
 	waiter := make(chan *runtimev1.ExternalToolResult, 1)
 	channel.externalMu.Lock()
+	channel.pruneEarlyExternalResultsLocked()
+	if early, held := channel.externalEarly[toolCallID]; held {
+		delete(channel.externalEarly, toolCallID)
+		channel.externalMu.Unlock()
+		return early.frame, nil
+	}
 	if channel.externalWaiters == nil {
 		channel.externalWaiters = map[int64]chan *runtimev1.ExternalToolResult{}
 	}
@@ -758,24 +783,48 @@ func (channel *Channel) abandonExternalToolResult(toolCallID int64, waiter chan 
 }
 
 // deliverExternalToolResult 把一帧 ExternalToolResult 路由给按 tool_call_id
-// 注册的 waiter。没有 waiter(结果迟到于 attempt 取消/worker 退出,或重复
-// 下发)时只审计丢弃:Quoin 是这类工具的权威封存方,丢帧不影响封存事实。
+// 注册的 waiter。没有 waiter 时寄存该帧等待稍后注册的 waiter 取回（结果
+// 先于注册到达的竞态窗口）；寄存超过 externalEarlyTTL 仍无人认领（结果
+// 迟到于 attempt 取消/worker 退出,或重复下发）才审计丢弃:Quoin 是这类
+// 工具的权威封存方,丢帧不影响封存事实。
 func (channel *Channel) deliverExternalToolResult(result *runtimev1.ExternalToolResult) {
 	if result == nil {
 		return
 	}
 	channel.externalMu.Lock()
+	channel.pruneEarlyExternalResultsLocked()
 	waiter, live := channel.externalWaiters[result.GetToolCallId()]
 	if live {
 		delete(channel.externalWaiters, result.GetToolCallId())
-	}
-	channel.externalMu.Unlock()
-	if !live {
-		sharedops.LogEvent("plinth", "info", "runtime.external_result_unwaited", fmt.Sprintf("tool_call=%d attempt=%d outcome=%s", result.GetToolCallId(), result.GetAttemptId(), result.GetOutcome()))
+		channel.externalMu.Unlock()
+		select {
+		case waiter <- result:
+		default:
+		}
 		return
 	}
-	select {
-	case waiter <- result:
-	default:
+	if channel.externalEarly == nil {
+		channel.externalEarly = map[int64]*earlyExternalResult{}
+	}
+	channel.externalEarly[result.GetToolCallId()] = &earlyExternalResult{frame: result, at: time.Now()}
+	channel.externalMu.Unlock()
+	sharedops.LogEvent("plinth", "info", "runtime.external_result_held",
+		fmt.Sprintf("tool_call=%d attempt=%d outcome=%s (no waiter yet)", result.GetToolCallId(), result.GetAttemptId(), result.GetOutcome()))
+}
+
+// pruneEarlyExternalResultsLocked 清理寄存超时的无主结果帧（丢弃时保留
+// 原有的 unwaited 审计）。调用方必须持有 externalMu。
+func (channel *Channel) pruneEarlyExternalResultsLocked() {
+	if len(channel.externalEarly) == 0 {
+		return
+	}
+	now := time.Now()
+	for id, entry := range channel.externalEarly {
+		if now.Sub(entry.at) < externalEarlyTTL {
+			continue
+		}
+		delete(channel.externalEarly, id)
+		sharedops.LogEvent("plinth", "info", "runtime.external_result_unwaited",
+			fmt.Sprintf("tool_call=%d attempt=%d outcome=%s", entry.frame.GetToolCallId(), entry.frame.GetAttemptId(), entry.frame.GetOutcome()))
 	}
 }
