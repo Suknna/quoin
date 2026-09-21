@@ -119,20 +119,11 @@ func (supervisor *Supervisor) proposeProbeResult(sink *runtime.FrameSink, attemp
 	if outcome == "passed" {
 		wire = runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_SUCCEEDED
 	}
-	if err := sink.Send(&runtimev1.ControlEnvelope{
-		CorrelationId: uint64(attemptID),
-		Msg: &runtimev1.ControlEnvelope_ResultProposal{ResultProposal: &runtimev1.ResultProposal{
-			AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch,
-			Outcome: wire,
-			Payload: &runtimev1.ResultPayload{
-				SchemaKind:    probeResultSchemaKind,
-				CanonicalJson: canonical,
-				ContentDigest: digest[:],
-			},
-		}},
-	}); err != nil {
-		sharedops.LogEvent("plinth", "error", "probe.result_send", err.Error())
-	}
+	supervisor.Channel.RegisterResult(&runtimev1.ResultProposal{
+		AttemptId: attemptID, BootId: binding.BootID, ConnectionEpoch: binding.Epoch,
+		Outcome: wire,
+		Payload: &runtimev1.ResultPayload{SchemaKind: probeResultSchemaKind, CanonicalJson: canonical, ContentDigest: digest[:]},
+	})
 }
 
 func mustJSON(value any) json.RawMessage {

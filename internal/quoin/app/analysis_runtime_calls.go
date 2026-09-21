@@ -368,13 +368,20 @@ func (service *RuntimeService) dispatchCancelRouted(ctx context.Context, attempt
 		if service.Connections == nil {
 			return fmt.Errorf("connections service not wired")
 		}
-		// No runtime owns the probe: finalize the committed fence locally.
-		return service.Connections.RecordCancelAck(ctx, attemptID)
+		var connectionType string
+		if err := service.Connections.Reader().QueryRowContext(ctx, `SELECT c.type FROM execution_attempts a JOIN connections c ON c.id=a.scope_id WHERE a.id=?`, attemptID).Scan(&connectionType); err != nil {
+			return err
+		}
+		if connectionType != "model_provider" {
+			return service.Connections.RecordCancelAck(ctx, attemptID)
+		}
 	}
 	// T15: investigation attempts share the same plinth cancel frame as
 	// initial analysis; only the unbound local finalizer differs by scope.
 	finalizeUnbound := func() error { return fmt.Errorf("attempt %d type %s has no cancel dispatcher", attemptID, attemptType) }
 	switch attemptType {
+	case "connection_probe":
+		finalizeUnbound = func() error { return service.Connections.RecordCancelAck(ctx, attemptID) }
 	case "initial_analysis":
 		if service.Analyses == nil {
 			return fmt.Errorf("analysis service not wired")
