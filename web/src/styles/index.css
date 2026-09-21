@@ -15,6 +15,36 @@
   }
 }
 
+/* 消息流滚动条(对齐 Kimi 等现代对话应用):透明轨道、6px 圆角拇指,
+   静止时隐藏,悬停/聚焦时淡入;Firefox 用 scrollbar-color 同步。 */
+@utility scrollbar-overlay {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  &:hover,
+  &:focus-within {
+    scrollbar-color: color-mix(in oklab, var(--muted-foreground) 35%, transparent)
+      transparent;
+  }
+  &::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  &::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 999px;
+  }
+  &:hover::-webkit-scrollbar-thumb,
+  &:focus-within::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--muted-foreground) 25%, transparent);
+  }
+  &::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--muted-foreground) 45%, transparent);
+  }
+}
+
 /* The brand surface stays graphite independently of the workspace theme. */
 .auth-brand-panel {
   --background: oklch(0.215 0.008 260);
