@@ -8,6 +8,7 @@ import {
 	CheckCircle2,
 	ChevronDown,
 	CircleDot,
+	BookPlus,
 	Clock3,
 	FileText,
 	RefreshCw,
@@ -20,6 +21,9 @@ import type {
 import { useAlertEventStream } from "@/app/realtime/hooks";
 import { messageOf } from "@/app/shared";
 import { AiContent, EvidenceLinks } from "@/components/ai/AiContent";
+import { FeedbackPanel } from "@/features/feedback/ui";
+import { api as knowledgeApi } from "@/features/knowledge/api";
+import { organizeIntoKnowledge } from "@/features/knowledge/organize";
 import { EntityList, type EntityListItem } from "@/components/EntityList";
 import { FeatureUnderConstruction } from "@/components/FeatureUnderConstruction";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -468,6 +472,7 @@ function AlertList({
 				id={selectedId}
 				onClose={() => navigate(listRoute(view, viewKey))}
 				suspended={suspended}
+				navigate={navigate}
 				openEvidence={openEvidence}
 			/>
 		</section>
@@ -561,11 +566,13 @@ function AlertDetailSheet({
 	id,
 	onClose,
 	suspended,
+	navigate,
 	openEvidence,
 }: {
 	id: string | null;
 	onClose: () => void;
 	suspended: boolean;
+	navigate: (route: string) => void;
 	openEvidence: (id: string) => void;
 }) {
 	const stream = useAlertEventStream();
@@ -974,6 +981,7 @@ function AlertDetailSheet({
 											key={occurrence.id}
 											occurrenceId={occurrence.id}
 											suspended={suspended}
+											navigate={navigate}
 											openEvidence={openEvidence}
 										/>
 									)}
@@ -990,10 +998,12 @@ function AlertDetailSheet({
 function InitialAnalysis({
 	occurrenceId,
 	suspended,
+	navigate,
 	openEvidence,
 }: {
 	occurrenceId: string;
 	suspended: boolean;
+	navigate: (route: string) => void;
 	openEvidence: (id: string) => void;
 }) {
 	const [analysis, setAnalysis] = useState<InitialAnalysisDetail | null>(null);
@@ -1095,7 +1105,29 @@ function InitialAnalysis({
 		<section className="flex flex-col gap-6">
 			<div className="flex items-center justify-between gap-3">
 				<h2 className="text-sm font-medium">初步分析</h2>
-				<Badge>{stateLabel(analysis.state)}</Badge>
+				<div className="flex items-center gap-2">
+					{analysis.output && (
+						<Button
+							variant="ghost"
+							size="sm"
+							disabled={suspended}
+							onClick={() =>
+								void organizeIntoKnowledge(
+									() =>
+										knowledgeApi.createAnalysisCandidate(
+											occurrenceId,
+											analysis.id,
+										),
+									navigate,
+								)
+							}
+						>
+							<BookPlus data-icon="inline-start" />
+							整理为知识
+						</Button>
+					)}
+					<Badge>{stateLabel(analysis.state)}</Badge>
+				</div>
 			</div>
 			{analysis.output ? (
 				<>
@@ -1134,6 +1166,14 @@ function InitialAnalysis({
 							/>
 						)}
 					</section>
+					<Separator />
+					<FeedbackPanel
+						target={{
+							type: "initial_analysis_output",
+							id: analysis.output.id,
+						}}
+						suspended={suspended}
+					/>
 				</>
 			) : running ? (
 				<>

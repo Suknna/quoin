@@ -13,7 +13,7 @@ vi.mock('@/features/investigation/attachments/api', () => ({ attachmentCommandId
 vi.mock('@/features/investigation/tools/api', async (original) => ({ ...await original<typeof import('@/features/investigation/tools/api')>(), listToolCalls: vi.fn() }))
 vi.mock('@/features/investigation/stream', () => ({ streamInvestigationMessage: vi.fn() }))
 vi.mock('@/features/feedback/api', () => ({ appendFeedback: vi.fn(), fetchFeedback: vi.fn(), feedbackValueLabels: {} }))
-vi.mock('@/features/knowledge/api', () => ({ api: { createMessageCandidate: vi.fn() } }))
+vi.mock('@/features/knowledge/api', async (original) => ({ ...await original<typeof import('@/features/knowledge/api')>(), api: { createMessageCandidate: vi.fn() } }))
 const user = { id: 'u', username: 'operator', displayName: 'Operator', role: 'operator' as const, passwordChangeRequired: false, authRevision: 1, enabled: true, initialized: true, lastLoginAt: null, rowVersion: 1 }
 function View({ route, suspended = false, navigate = vi.fn() }: { route: string; suspended?: boolean; navigate?: (route: string) => void }) { const view = useInvestigationsModule({ user, route, suspended, navigate, openEvidence: vi.fn() }); return <>{view.list}{view.content}</> }
 const detail = { id: 'i1', displayTitle: 'CPU 排查', lastActivityAt: '2026-01-01T00:00:00Z', createdAt: '2026-01-01T00:00:00Z', createdBy: 'u', headMessageId: 'm1', activeAttemptId: 'a1', messageCount: 1, attemptCount: 1, sources: [] }
@@ -104,14 +104,17 @@ describe('investigations module', () => {
     await waitFor(() => expect(api.cancelAttempt).toHaveBeenCalledWith('i1', 'a2', 8))
     releaseStream()
   })
-  it('opens the knowledge base from an assistant reply', async () => {
+  it('organizes an assistant reply into a knowledge candidate', async () => {
     api.list.mockResolvedValue({ items: [] }); api.get.mockResolvedValue(detail)
     api.listMessages.mockResolvedValue({ items: [{ id: 'm1', seq: 1, role: 'assistant', status: 'active', content: '调查结论', attachments: [], evidenceIds: [], createdAt: '2026-01-01T00:00:00Z' }] })
     api.listAttempts.mockResolvedValue({ items: [] })
+    const { api: knowledgeApi } = await import('@/features/knowledge/api')
+    vi.mocked(knowledgeApi.createMessageCandidate).mockResolvedValue({ id: 'cand-9', sourceType: 'investigation_message', sourceId: 'm1', state: 'AwaitingConfirmation', rowVersion: 1, generation: 1, draftRevision: 1 })
     const navigate = vi.fn()
     render(<View route="/investigations/i1" navigate={navigate} />)
-    fireEvent.click(await screen.findByRole('button', { name: '查看知识库' }))
-    expect(navigate).toHaveBeenCalledWith('/knowledge')
+    fireEvent.click(await screen.findByRole('button', { name: '整理为知识' }))
+    await waitFor(() => expect(knowledgeApi.createMessageCandidate).toHaveBeenCalledWith('i1', 'm1'))
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith('/knowledge/candidates/cand-9'))
   })
   it('shows a failed list request instead of an empty healthy state', async () => {
     api.list.mockRejectedValue(new Error('调查服务不可用'))

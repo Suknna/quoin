@@ -1,5 +1,6 @@
 import {
 	AlertTriangle,
+	BookPlus,
 	CheckCircle2,
 	ChevronDown,
 	LoaderCircle,
@@ -43,13 +44,9 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { PropertyList } from "@/components/workbench/PropertyList";
-import {
-	appendFeedback,
-	type FeedbackTimeline,
-	type FeedbackValue,
-	feedbackValueLabels,
-	fetchFeedback,
-} from "@/features/feedback/api";
+import { FeedbackPanel } from "@/features/feedback/ui";
+import { api as knowledgeApi } from "@/features/knowledge/api";
+import { organizeIntoKnowledge } from "@/features/knowledge/organize";
 import {
 	cancelInspectionRun,
 	formatInspectionTime,
@@ -393,82 +390,6 @@ function ResultSummary({
 	);
 }
 
-function Feedback({
-	reportId,
-	suspended,
-}: {
-	reportId: string;
-	suspended: boolean;
-}) {
-	const [timeline, setTimeline] = useState<FeedbackTimeline>();
-	const [note, setNote] = useState("");
-	const [error, setError] = useState("");
-	const [submitting, setSubmitting] = useState(false);
-	useEffect(() => {
-		if (!suspended)
-			void fetchFeedback({ type: "inspection_report", id: reportId })
-				.then(setTimeline)
-				.catch((e) => setError(messageOf(e, "无法读取反馈。")));
-	}, [reportId, suspended]);
-	async function record(value: FeedbackValue) {
-		if (suspended || submitting) return;
-		setError("");
-		setSubmitting(true);
-		try {
-			await appendFeedback(
-				{ type: "inspection_report", id: reportId },
-				value,
-				note,
-			);
-			setNote("");
-			setTimeline(
-				await fetchFeedback({ type: "inspection_report", id: reportId }),
-			);
-			notify.success("已记录反馈");
-		} catch (e) {
-			notify.error(e, "无法记录反馈。");
-		} finally {
-			setSubmitting(false);
-		}
-	}
-	return (
-		<section className="space-y-3 border-t pt-4">
-			<h3 className="font-medium">实际反馈</h3>
-			<div className="flex flex-wrap gap-2">
-				{(Object.keys(feedbackValueLabels) as FeedbackValue[]).map((value) => (
-					<Button
-						key={value}
-						size="sm"
-						variant="outline"
-						disabled={suspended || submitting}
-						onClick={() => void record(value)}
-					>
-						{feedbackValueLabels[value]}
-					</Button>
-				))}
-				<Textarea
-					aria-label="反馈备注"
-					className="min-h-16"
-					value={note}
-					onChange={(e) => setNote(e.target.value)}
-					disabled={suspended}
-					placeholder="可选备注"
-				/>
-				{error && (
-					<Alert variant="destructive">
-						<AlertDescription>{error}</AlertDescription>
-					</Alert>
-				)}
-				{timeline?.items.length ? (
-					<p className="text-xs text-muted-foreground">
-						最近：{feedbackValueLabels[timeline.items[0].value]} ·{" "}
-						{formatInspectionTime(timeline.items[0].createdAt)}
-					</p>
-				) : null}
-			</div>
-		</section>
-	);
-}
 
 export function RunDetail({
 	runId,
@@ -762,9 +683,20 @@ export function RunDetail({
 						</div>
 						<Button
 							variant="outline"
-							onClick={() => props.navigate("/knowledge")}
+							disabled={props.suspended}
+							onClick={() =>
+								void organizeIntoKnowledge(
+									() =>
+										knowledgeApi.createReportCandidate(
+											runId,
+											report.version,
+										),
+									props.navigate,
+								)
+							}
 						>
-							在知识库中检索
+							<BookPlus data-icon="inline-start" />
+							整理为知识
 						</Button>
 					</div>
 					<ReportPresentation
@@ -781,7 +713,11 @@ export function RunDetail({
 							/>
 						</section>
 					)}
-					<Feedback reportId={report.id} suspended={props.suspended} />
+					<Separator />
+					<FeedbackPanel
+						target={{ type: "inspection_report", id: report.id }}
+						suspended={props.suspended}
+					/>
 				</section>
 			) : reportPending ? (
 				<div className="space-y-3 rounded-md border p-4">

@@ -88,6 +88,8 @@ import {
 	withdrawnRevision,
 } from "@/features/investigation/chatControls";
 import { streamInvestigationMessage } from "@/features/investigation/stream";
+import { api as knowledgeApi } from "@/features/knowledge/api";
+import { organizeIntoKnowledge } from "@/features/knowledge/organize";
 import {
 	listToolCalls,
 	type ToolCallItem,
@@ -897,13 +899,22 @@ function ChatMessage({
 								{feedbackValueLabels[value]}
 							</Button>
 						))}
-						{/* 知识库已上线：从这里进入检索与候选确认。 */}
 						<Button
 							size="xs"
 							variant="ghost"
-							onClick={() => navigate("/knowledge")}
+							disabled={disabled}
+							onClick={() =>
+								void organizeIntoKnowledge(
+									() =>
+										knowledgeApi.createMessageCandidate(
+											investigationId,
+											message.id,
+										),
+									navigate,
+								)
+							}
 						>
-							查看知识库
+							整理为知识
 						</Button>
 					</div>
 				)}
