@@ -48,6 +48,16 @@ func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.Fra
 
 	input := dispatch.GetInput()
 	grants := input.GetConnectionGrants()
+	// 取得凭据前失败也必须以 typed probe result 契约收口（Quoin 侧
+	// parseTypedChild 只认 connection_probe_model_provider_v1；通用 failure
+	// payload 会被拒绝并遗留 Running attempt）。detail 与日志都只携带稳定
+	// 非秘密错误码——RPC 错误原文/供应商响应细节可能含秘密，绝不外发；
+	// 配置派生列由 Quoin 从冻结 revision 权威补齐。
+	startedAt := time.Now().UTC()
+	typedFailure := func(errorCode string) {
+		sharedops.LogEvent("plinth", "info", "probe.pre_credential_failure", fmt.Sprintf("attempt=%d code=%s", attemptID, errorCode))
+		supervisor.proposeProbeResult(sink, attemptID, binding, startedAt, "failed", mustJSON(map[string]any{"kind": "model_provider", "error": errorCode}))
+	}
 	// 主 grant 是 model_probe_chat：六项动作经同一凭据信道获取（embedding
 	// 动作由 Quoin 侧 BeginModelCall 按 operation 切到 model_probe_embedding
 	// purpose）。metrics 探测 grant（prometheus_probe/thanos_probe）已由
@@ -60,7 +70,7 @@ func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.Fra
 		}
 	}
 	if grant == nil {
-		supervisor.proposeFailure(sink, attemptID, "connection_probe_v1", "派发缺少 model_probe_chat 凭据 grant（metrics 探测由 Quoin 本地执行，不经 Plinth）")
+		typedFailure("missing_model_probe_chat_grant")
 		return
 	}
 	grantCtx, grantCancel := context.WithTimeout(ctx, 15*time.Second)
@@ -72,18 +82,20 @@ func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.Fra
 	})
 	grantCancel()
 	if err != nil {
-		supervisor.proposeFailure(sink, attemptID, "connection_probe_v1", "获取凭据 grant 失败: "+err.Error())
+		// RPC 错误原文（可能含上游响应细节/秘密）不进 typed detail，也不进
+		// 日志，只以稳定码收口。
+		typedFailure("credential_grant_fetch_failed")
 		return
 	}
 	if grantPayload.GetConnectionType() != "model_provider" || grantPayload.GetModelProvider() == nil {
-		supervisor.proposeFailure(sink, attemptID, "connection_probe_v1", "grant 类型不是 model_provider: "+grantPayload.GetConnectionType())
+		typedFailure("credential_grant_type_mismatch")
 		return
 	}
 
-	startedAt := time.Now().UTC()
 	var config plinthconnections.ModelProviderConfig
 	if err := json.Unmarshal(grantPayload.GetRevisionConfigJson(), &config); err != nil {
-		supervisor.proposeProbeResult(sink, attemptID, binding, startedAt, "failed", mustJSON(map[string]any{"kind": "model_provider", "error": "revision 配置无法解析: " + err.Error()}))
+		sharedops.LogEvent("plinth", "info", "probe.revision_unparseable", fmt.Sprintf("attempt=%d code=revision_config_unparseable", attemptID))
+		supervisor.proposeProbeResult(sink, attemptID, binding, startedAt, "failed", mustJSON(map[string]any{"kind": "model_provider", "error": "revision_config_unparseable"}))
 		return
 	}
 	// 旧 revision 可能缺少预算元数据：在派发边界归一一次，让真实

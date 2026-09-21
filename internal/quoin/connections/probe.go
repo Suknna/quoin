@@ -187,6 +187,51 @@ type ModelProviderProbeChild struct {
 	DetailJSON                 string
 }
 
+// 冻结探测契约的固定探测边界：revision 省略可选预算元数据时，封存缺省取
+// 这组固定值（schema 要求预算列 >= 1，缺字段不能落 0）。缺省数值与
+// supervisor 执行边界（internal/plinth/modelprovider.NormalizeProbeConfig）
+// 的缺省一致，但封存侧不做执行前归一——显式配置值一律如实保留，由 schema
+// 触发器按冻结 config 逐字段严格比对。
+const (
+	frozenProbeContextBudgetTokens = 32768
+	frozenProbeMaxOutputTokens     = 4096
+)
+
+// FrozenModelProviderColumns 是 model_provider typed child 配置派生列的
+// Quoin 权威来源：chatModelId/embeddingModelId 与预算取 attempt 冻结的
+// revision config，帧载荷（ResultProposal detail）里的同名字段只是观测副本，
+// 一律不得信任（supervisor 取得凭据前失败时 detail 根本不携带这些字段）。
+// 显式配置值（含 maxOutputTokens >= contextBudgetTokens 等倒挂形态——写入
+// 路径不禁止）必须如实保留，触发器要求封存列与冻结值逐字节相等；只有缺
+// 字段才用冻结探测契约缺省。配置不可解析时返回错误由调用方 fail-closed
+// 拒绝，绝不静默吞掉解析错误或伪造模型身份。
+func FrozenModelProviderColumns(configJSON []byte) (ModelProviderProbeChild, error) {
+	var config struct {
+		ChatModelID         string `json:"chatModelId"`
+		EmbeddingModelID    string `json:"embeddingModelId"`
+		ContextBudgetTokens int    `json:"contextBudgetTokens"`
+		MaxOutputTokens     int    `json:"maxOutputTokens"`
+	}
+	if err := json.Unmarshal(configJSON, &config); err != nil {
+		return ModelProviderProbeChild{}, fmt.Errorf("frozen revision config unparseable: %w", err)
+	}
+	child := ModelProviderProbeChild{
+		ChatModelID:      config.ChatModelID,
+		EmbeddingModelID: &config.EmbeddingModelID,
+		// 写入路径只持久化 > 0 的显式值，因此 < 1 即字段缺失；缺省只在此
+		// 情况生效，满足 schema 的 >= 1 CHECK。
+		ContextBudgetTokens: config.ContextBudgetTokens,
+		MaxOutputTokens:     config.MaxOutputTokens,
+	}
+	if child.ContextBudgetTokens < 1 {
+		child.ContextBudgetTokens = frozenProbeContextBudgetTokens
+	}
+	if child.MaxOutputTokens < 1 {
+		child.MaxOutputTokens = frozenProbeMaxOutputTokens
+	}
+	return child, nil
+}
+
 // TypedChild selects the connection-type closed child row variant.
 type TypedChild struct {
 	Thanos        *ThanosProbeChild

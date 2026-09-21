@@ -231,6 +231,41 @@ func TestProbeModelProviderPassesAgainstLiveProvider(t *testing.T) {
 	}
 }
 
+// requireTypedFailureProposal 等待并校验一次资格探测失败提案：取得凭据前的
+// 失败也必须走封闭 typed probe result 契约（connection_probe_model_provider_v1
+// + detail.kind=model_provider），而不是通用 failure payload——Quoin 侧只认
+// typed 契约，通用 payload 会被拒绝并遗留 Running attempt。
+func requireTypedFailureProposal(t *testing.T, stream *probeStream) map[string]any {
+	t.Helper()
+	proposal := awaitProbeFrame(t, stream, func(envelope *runtimev1.ControlEnvelope) bool {
+		return envelope.GetResultProposal() != nil
+	}).GetResultProposal()
+	if proposal.GetOutcome() != runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED {
+		t.Fatalf("outcome=%v, want failed", proposal.GetOutcome())
+	}
+	if proposal.GetPayload().GetSchemaKind() != "connection_probe_model_provider_v1" {
+		t.Fatalf("schema kind=%q, want the typed probe result contract", proposal.GetPayload().GetSchemaKind())
+	}
+	var payload struct {
+		Outcome string          `json:"outcome"`
+		Detail  json.RawMessage `json:"detail"`
+	}
+	if err := json.Unmarshal(proposal.GetPayload().GetCanonicalJson(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Outcome != "failed" {
+		t.Fatalf("payload outcome=%q, want failed", payload.Outcome)
+	}
+	var detail map[string]any
+	if err := json.Unmarshal(payload.Detail, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail["kind"] != "model_provider" {
+		t.Fatalf("detail=%v, want typed kind model_provider", detail)
+	}
+	return detail
+}
+
 func TestProbeRejectsNonModelProviderGrant(t *testing.T) {
 	supervisor, channel, stream := newProbeSupervisor(t)
 	// metrics grant（prometheus_probe）已由 Quoin 本地执行，派发到这里的
@@ -238,14 +273,9 @@ func TestProbeRejectsNonModelProviderGrant(t *testing.T) {
 	client := &grantStubClient{response: &runtimev1.FetchCredentialGrantResponse{ConnectionType: "prometheus"}}
 	sink := runtime.NewFrameSinkForTest(channel)
 	supervisor.HandleDispatchAttempt(context.Background(), sink, client, probeDispatch("prometheus_probe"), runtime.DispatchBinding{BootID: "probe-boot", Epoch: 1}, func(id int64) bool { channel.FinishTask(id); return true })
-	proposal := awaitProbeFrame(t, stream, func(envelope *runtimev1.ControlEnvelope) bool {
-		return envelope.GetResultProposal() != nil
-	}).GetResultProposal()
-	if proposal.GetOutcome() != runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED {
-		t.Fatalf("outcome=%v, want failed", proposal.GetOutcome())
-	}
-	if !strings.Contains(string(proposal.GetPayload().GetCanonicalJson()), "model_probe_chat") {
-		t.Fatalf("failure detail must explain the missing model_probe_chat grant: %s", proposal.GetPayload().GetCanonicalJson())
+	detail := requireTypedFailureProposal(t, stream)
+	if !strings.Contains(fmt.Sprint(detail["error"]), "model_probe_chat") {
+		t.Fatalf("failure detail must explain the missing model_probe_chat grant: %v", detail)
 	}
 }
 
@@ -255,10 +285,56 @@ func TestProbeWithoutGrantProposesFailure(t *testing.T) {
 	dispatch.Input.ConnectionGrants = nil
 	sink := runtime.NewFrameSinkForTest(channel)
 	supervisor.HandleDispatchAttempt(context.Background(), sink, &grantStubClient{}, dispatch, runtime.DispatchBinding{BootID: "probe-boot", Epoch: 1}, func(id int64) bool { channel.FinishTask(id); return true })
-	proposal := awaitProbeFrame(t, stream, func(envelope *runtimev1.ControlEnvelope) bool {
-		return envelope.GetResultProposal() != nil
-	}).GetResultProposal()
-	if proposal.GetOutcome() != runtimev1.AttemptOutcome_ATTEMPT_OUTCOME_FAILED {
-		t.Fatalf("outcome=%v, want failed", proposal.GetOutcome())
+	detail := requireTypedFailureProposal(t, stream)
+	if detail["error"] != "missing_model_probe_chat_grant" {
+		t.Fatalf("missing-grant detail error=%v, want the stable code missing_model_probe_chat_grant", detail["error"])
+	}
+}
+
+// TestProbeGrantFetchFailureProposesTypedFailure 覆盖 FetchCredentialGrant RPC
+// 失败：typed detail 只携带稳定非秘密错误码，不落 RPC 错误原文（其中可能含
+// 上游响应细节）。
+func TestProbeGrantFetchFailureProposesTypedFailure(t *testing.T) {
+	supervisor, channel, stream := newProbeSupervisor(t)
+	client := &grantStubClient{err: errors.New("rpc error: code = PermissionDenied desc = grant denied secret-context")}
+	sink := runtime.NewFrameSinkForTest(channel)
+	supervisor.HandleDispatchAttempt(context.Background(), sink, client, probeDispatch("model_probe_chat"), runtime.DispatchBinding{BootID: "probe-boot", Epoch: 4}, func(id int64) bool { channel.FinishTask(id); return true })
+	detail := requireTypedFailureProposal(t, stream)
+	if detail["error"] != "credential_grant_fetch_failed" {
+		t.Fatalf("grant-fetch detail error=%v, want the stable code credential_grant_fetch_failed", detail["error"])
+	}
+	if encoded, _ := json.Marshal(detail); strings.Contains(string(encoded), "PermissionDenied") || strings.Contains(string(encoded), "secret-context") {
+		t.Fatalf("typed detail must not carry the RPC error text: %s", encoded)
+	}
+}
+
+// TestProbeGrantTypeMismatchProposesTypedFailure 覆盖 grant 类型不是
+// model_provider 的确定性失败收口。
+func TestProbeGrantTypeMismatchProposesTypedFailure(t *testing.T) {
+	supervisor, channel, stream := newProbeSupervisor(t)
+	client := &grantStubClient{response: &runtimev1.FetchCredentialGrantResponse{ConnectionType: "prometheus"}}
+	sink := runtime.NewFrameSinkForTest(channel)
+	supervisor.HandleDispatchAttempt(context.Background(), sink, client, probeDispatch("model_probe_chat"), runtime.DispatchBinding{BootID: "probe-boot", Epoch: 2}, func(id int64) bool { channel.FinishTask(id); return true })
+	detail := requireTypedFailureProposal(t, stream)
+	if detail["error"] != "credential_grant_type_mismatch" {
+		t.Fatalf("type-mismatch detail error=%v, want the stable code credential_grant_type_mismatch", detail["error"])
+	}
+}
+
+// TestProbeUnparseableRevisionProposesTypedFailure 覆盖 revision 配置无法解析：
+// 提案仍是 typed 契约，detail 只携带稳定错误码；配置派生列由 Quoin 从冻结
+// revision 权威补齐。
+func TestProbeUnparseableRevisionProposesTypedFailure(t *testing.T) {
+	supervisor, channel, stream := newProbeSupervisor(t)
+	client := &grantStubClient{response: &runtimev1.FetchCredentialGrantResponse{
+		ConnectionType:     "model_provider",
+		RevisionConfigJson: []byte(`{"baseUrl":`),
+		Secret:             &runtimev1.FetchCredentialGrantResponse_ModelProvider{ModelProvider: &runtimev1.ModelProviderCredentialSecret{ApiKey: "test-key"}},
+	}}
+	sink := runtime.NewFrameSinkForTest(channel)
+	supervisor.HandleDispatchAttempt(context.Background(), sink, client, probeDispatch("model_probe_chat"), runtime.DispatchBinding{BootID: "probe-boot", Epoch: 5}, func(id int64) bool { channel.FinishTask(id); return true })
+	detail := requireTypedFailureProposal(t, stream)
+	if detail["error"] != "revision_config_unparseable" {
+		t.Fatalf("unparseable-revision detail error=%v, want the stable code revision_config_unparseable", detail["error"])
 	}
 }

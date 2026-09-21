@@ -80,7 +80,72 @@ func (service *RuntimeService) commitProbeResultPayload(ctx context.Context, att
 	if err != nil {
 		return err
 	}
+	if child.ModelProvider != nil && isPreCredentialFailure(parsed.Outcome, parsed.Detail, child.ModelProvider) {
+		if err := service.supplementFrozenModelProviderColumns(ctx, attemptID, child.ModelProvider); err != nil {
+			return err
+		}
+	}
 	return service.Connections.CommitProbeResult(ctx, attemptID, bootID, epoch, typed, child)
+}
+
+// preCredentialFailureCodes 是 supervisor 取得凭据前失败的封闭错误码词表
+//（internal/plinth/supervisor/probe.go 的 typedFailure）。只有这一集合的结
+// 果允许用冻结 revision 权威补齐配置派生列——此时探测从未取得配置，detail
+// 天然不携带这些字段。
+var preCredentialFailureCodes = map[string]bool{
+	"missing_model_probe_chat_grant": true,
+	"credential_grant_fetch_failed":  true,
+	"credential_grant_type_mismatch": true,
+	"revision_config_unparseable":    true,
+}
+
+// isPreCredentialFailure 判定一次提案是否属于封闭的提前失败集：稳定错误码
+// + outcome=failed + 未观察到任何能力。普通成功与完整失败保留载荷字段，
+// 由 schema 触发器按冻结 config 严格裁决不匹配——绝不把错误模型的 passed
+// 结果洗成合法资格。
+func isPreCredentialFailure(outcome string, detail json.RawMessage, child *connections.ModelProviderProbeChild) bool {
+	if outcome != "failed" {
+		return false
+	}
+	if child.StreamingSupported || child.NativeToolCallingSupported || child.MultiToolCallSupported ||
+		child.CancellationObserved || child.UsageObserved || child.RequestIDObserved || child.EmbeddingSupported {
+		return false
+	}
+	var probe struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(detail, &probe); err != nil {
+		return false
+	}
+	return preCredentialFailureCodes[probe.Error]
+}
+
+// supplementFrozenModelProviderColumns 用 Quoin 权威数据补齐提前失败结果的
+// model_provider typed child 配置派生列：来源限定 attempt 的 model_probe_chat
+// grant（资格探测的唯一主 grant）冻结的 revision config。grant 行真正缺失时
+// fail-closed 拒绝，不捏造配置。
+func (service *RuntimeService) supplementFrozenModelProviderColumns(ctx context.Context, attemptID int64, child *connections.ModelProviderProbeChild) error {
+	var configJSON string
+	err := service.Connections.Reader().QueryRowContext(ctx, `
+		SELECT r.config_json FROM attempt_connection_grants g
+		JOIN connection_revisions r ON r.id = g.connection_revision_id
+		WHERE g.attempt_id=? AND g.purpose='model_probe_chat'`, attemptID).Scan(&configJSON)
+	if err != nil {
+		return fmt.Errorf("resolve frozen model_probe_chat grant revision: %w", err)
+	}
+	frozen, err := connections.FrozenModelProviderColumns([]byte(configJSON))
+	if err != nil {
+		return err
+	}
+	child.ChatModelID = frozen.ChatModelID
+	child.ContextBudgetTokens = frozen.ContextBudgetTokens
+	child.MaxOutputTokens = frozen.MaxOutputTokens
+	// embedding_model_id 仅在探测观察到 embedding 能力时落列（schema CHECK：
+	// embedding_supported=0 时必须为 NULL）；取值同样来自冻结配置。
+	if child.EmbeddingSupported {
+		child.EmbeddingModelID = frozen.EmbeddingModelID
+	}
+	return nil
 }
 
 // handleResultProposal adjudicates a connection_probe result proposal arriving
