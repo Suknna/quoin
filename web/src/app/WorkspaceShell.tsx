@@ -448,7 +448,13 @@ export function WorkspaceShell({
 					<SidebarContent>{moduleList}</SidebarContent>
 				</div>
 			</Sidebar>
-			<SidebarInset className="min-w-0">
+			<SidebarInset
+				className={cn(
+					"min-w-0",
+					// 模块自带滚动(对话页):整栏定高视口,页面不再滚动。
+					view.fullHeight && "h-dvh overflow-hidden",
+				)}
+			>
 				{!hideDesktopHeader && (
 					<header className="sticky top-0 z-10 hidden min-w-0 shrink-0 items-center gap-2 border-b bg-background p-4 md:flex">
 						{view.crumbs?.length ? (
@@ -481,6 +487,8 @@ export function WorkspaceShell({
 						"mx-auto min-w-0 w-full p-6",
 						// 折叠后第三栏吃满释放的宽度；展开时保留阅读宽度上限。
 						!paneCollapsed && (operations ? "max-w-6xl" : "max-w-3xl"),
+						// fullHeight:内容区定高、关闭页面滚动,模块内部(消息流)自滚,底部输入框固定。
+						view.fullHeight && "flex min-h-0 flex-1 flex-col overflow-hidden",
 					)}
 				>
 					{!canAccessOperationsRoute(route, user) ? (

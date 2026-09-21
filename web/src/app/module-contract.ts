@@ -17,6 +17,11 @@ export interface WorkspaceModuleView {
 	content: ReactNode;
 	actions?: ReactNode;
 	/**
+	 * 内容区占满视口剩余高度并关闭页面滚动,由模块内部自行滚动(对话页:
+	 * 消息流内部滚动,输入框始终钉在底部)。默认走窗口文档流滚动。
+	 */
+	fullHeight?: boolean;
+	/**
 	 * Drill-down trail for pages below a module root. The last entry is the
 	 * current page (rendered without a link); earlier entries navigate.
 	 */

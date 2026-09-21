@@ -183,6 +183,8 @@ export function useInvestigationsModule(
 		crumbs: id
 			? [{ label: "对话", to: "/investigations" }, { label: "调查详情" }]
 			: undefined,
+		// 消息流在内部滚动,输入框始终钉在视口底部。
+		fullHeight: true,
 		list,
 		content,
 	};
