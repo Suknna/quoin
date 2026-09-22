@@ -5,15 +5,43 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 import { useAlertsModule } from "./index";
 
-function View({ route, navigate = vi.fn(), openEvidence = vi.fn() }: { route: string; navigate?: (route: string) => void; openEvidence?: (id: string) => void }) {
+function View({ route, navigate = vi.fn(), openEvidence = vi.fn(), suspended = false }: { route: string; navigate?: (route: string) => void; openEvidence?: (id: string) => void; suspended?: boolean }) {
   const view = useAlertsModule({
     user: { id: "1", username: "admin", displayName: "Admin", role: "admin", passwordChangeRequired: false, authRevision: 1, enabled: true, initialized: true, lastLoginAt: null, rowVersion: 1 },
     route,
     navigate,
-    suspended: false,
+    suspended,
     openEvidence,
   });
   return <>{view.content}</>;
+}
+
+/** Shared fetch double for the initial-analysis cancel flow: every read follows
+ *  one authoritative server state so polling, cancel and refresh cannot disagree. */
+type AnalysisServerState = { state: "Queued" | "Running" | "Succeeded" | "Failed" | "Cancelled" };
+function analysisFetchDouble(
+  server: AnalysisServerState,
+  hooks: { cancelResponse?: () => Promise<{ ok: boolean; json: () => Promise<unknown> }>; onListRead?: () => void } = {},
+) {
+  const summary = () => ({ id: "analysis-1", state: server.state, rowVersion: server.state === "Running" ? 4 : 5, createdAt: "2026-01-01T00:00:00Z" });
+  const detail = () => ({
+    ...summary(),
+    attemptCount: 1,
+    ...(server.state === "Succeeded" ? { output: { id: "output", modelId: "demo", content: "finished first", evidenceIds: [], createdAt: "2026-01-01T00:00:00Z" } } : {}),
+  });
+  return vi.fn().mockImplementation((input: string) => {
+    if (input.includes("/api/v1/alerts?")) return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });
+    if (input.includes("/observations") || input.includes("/attempts")) return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });
+    if (input.includes("/cancel")) return hooks.cancelResponse?.() ?? Promise.resolve({ ok: true, json: async () => detail() });
+    if (input.endsWith("/analyses")) { hooks.onListRead?.(); return Promise.resolve({ ok: true, json: async () => ({ items: [summary()] }) }); }
+    if (input.includes("/analyses/")) return Promise.resolve({ ok: true, json: async () => detail() });
+    return Promise.resolve({ ok: true, json: async () => ({ id: "alert-1", state: "Firing", rowVersion: 1, firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z", labels: { alertname: "Example" } }) });
+  });
+}
+
+async function openAnalysisTab() {
+  fireEvent.mouseDown(screen.getByRole("tab", { name: "AI 分析" }));
+  fireEvent.click(screen.getByRole("tab", { name: "AI 分析" }));
 }
 
 describe("alerts module", () => {
@@ -349,5 +377,106 @@ describe("alerts module", () => {
     fireEvent.mouseDown(screen.getByRole("tab", { name: "AI 分析" })); fireEvent.click(screen.getByRole("tab", { name: "AI 分析" }));
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) => String(url).endsWith("/analyses") && (init as RequestInit | undefined)?.method === "POST")).toHaveLength(0));
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/cancel"))).toBe(false);
+  });
+
+  it("cancels a running analysis through the confirmation fence with its row version", async () => {
+    const server: AnalysisServerState = { state: "Running" };
+    const fetchMock = analysisFetchDouble(server, {
+      cancelResponse: () => { server.state = "Cancelled"; return Promise.resolve({ ok: true, json: async () => ({ id: "analysis-1", state: "Cancelled", rowVersion: 5, createdAt: "2026-01-01T00:00:00Z", attemptCount: 1 }) }); },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<View route="/alerts/list?id=alert-1" />);
+    await screen.findByRole("heading", { name: "Example" });
+    await openAnalysisTab();
+    await screen.findByText("分析正在执行，关闭详情不会取消任务。");
+    fireEvent.click(screen.getByRole("button", { name: "取消分析" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认" }));
+    expect(await screen.findByText("已取消")).toBeInTheDocument();
+    const call = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith("/analyses/analysis-1/cancel") && (init as RequestInit).method === "POST");
+    expect(call).toBeDefined();
+    expect(JSON.parse(String((call?.[1] as RequestInit).body))).toEqual({ clientCommandId: expect.any(String), expectedRowVersion: 4 });
+    expect(screen.queryByRole("button", { name: "取消分析" })).not.toBeInTheDocument();
+  });
+
+  it("shows the server's raced result when the analysis finished before the cancel landed", async () => {
+    const server: AnalysisServerState = { state: "Running" };
+    const fetchMock = analysisFetchDouble(server, {
+      cancelResponse: () => { server.state = "Succeeded"; return Promise.resolve({ ok: true, json: async () => ({ id: "analysis-1", state: "Succeeded", rowVersion: 5, createdAt: "2026-01-01T00:00:00Z", attemptCount: 1, output: { id: "output", modelId: "demo", content: "race finished", evidenceIds: [], createdAt: "2026-01-01T00:00:00Z" } }) }); },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<View route="/alerts/list?id=alert-1" />);
+    await screen.findByRole("heading", { name: "Example" });
+    await openAnalysisTab();
+    await screen.findByText("分析正在执行，关闭详情不会取消任务。");
+    fireEvent.click(screen.getByRole("button", { name: "取消分析" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认" }));
+    expect(await screen.findByText("race finished")).toBeInTheDocument();
+    expect(screen.getByText("已完成")).toBeInTheDocument();
+    expect(screen.queryByText("已取消")).not.toBeInTheDocument();
+  });
+
+  it("offers no cancel control once the analysis reached a terminal state", async () => {
+    for (const state of ["Succeeded", "Failed"] as const) {
+      const fetchMock = analysisFetchDouble({ state });      vi.stubGlobal("fetch", fetchMock);
+      const view = render(<View route="/alerts/list?id=alert-1" />);
+      await screen.findByRole("heading", { name: "Example" });
+      await openAnalysisTab();
+      await waitFor(() => expect(screen.getByText(state === "Succeeded" ? "已完成" : "失败")).toBeInTheDocument());
+      expect(screen.queryByRole("button", { name: "取消分析" })).not.toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  it("blocks a duplicate cancel while the command is in flight", async () => {
+    let releaseCancel: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { releaseCancel = resolve; });
+    const fetchMock = analysisFetchDouble({ state: "Running" }, {
+      cancelResponse: () => gate.then(() => ({ ok: true, json: async () => ({ id: "analysis-1", state: "Cancelled", rowVersion: 5, createdAt: "2026-01-01T00:00:00Z", attemptCount: 1 }) })),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<View route="/alerts/list?id=alert-1" />);
+    await screen.findByRole("heading", { name: "Example" });
+    await openAnalysisTab();
+    await screen.findByText("分析正在执行，关闭详情不会取消任务。");
+    fireEvent.click(screen.getByRole("button", { name: "取消分析" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认" }));
+    const busy = await screen.findByRole("button", { name: "正在取消…" });
+    expect(busy).toBeDisabled();
+    fireEvent.click(busy);
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/cancel"))).toHaveLength(1));
+    releaseCancel?.();
+    expect(await screen.findByText("已取消")).toBeInTheDocument();
+  });
+
+  it("offers no cancel path while the module is suspended", async () => {
+    const fetchMock = analysisFetchDouble({ state: "Running" });    vi.stubGlobal("fetch", fetchMock);
+    const view = render(<View route="/alerts/list?id=alert-1" />);
+    await screen.findByRole("heading", { name: "Example" });
+    await openAnalysisTab();
+    await screen.findByText("分析正在执行，关闭详情不会取消任务。");
+    view.rerender(<View route="/alerts/list?id=alert-1" suspended />);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "取消分析" })).not.toBeInTheDocument());
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/cancel"))).toBe(false);
+  });
+
+  it("re-reads the authoritative state after a cancel conflict instead of reporting cancellation", async () => {
+    const server: AnalysisServerState = { state: "Running" };
+    let listReads = 0;
+    const fetchMock = analysisFetchDouble(server, {
+      // The server moved on after the initial read: the cancel conflicts, and
+      // every subsequent projection reports the finished analysis with its output.
+      cancelResponse: () => { server.state = "Succeeded"; return Promise.resolve({ ok: false, json: async () => ({ detail: "初步分析状态已变化，请刷新后重试。" }) }); },
+      onListRead: () => { listReads += 1; },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<View route="/alerts/list?id=alert-1" />);
+    await screen.findByRole("heading", { name: "Example" });
+    await openAnalysisTab();
+    await screen.findByText("分析正在执行，关闭详情不会取消任务。");
+    fireEvent.click(screen.getByRole("button", { name: "取消分析" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认" }));
+    expect(await screen.findByText("finished first")).toBeInTheDocument();
+    expect(screen.queryByText("已取消")).not.toBeInTheDocument();
+    await waitFor(() => expect(listReads).toBeGreaterThan(1));
   });
 });

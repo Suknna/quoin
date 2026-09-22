@@ -80,6 +80,7 @@ import { useLiveAlerts } from "@/features/alerts/useLiveAlerts";
 import {
 	type AttemptSummary,
 	analysisCommandId,
+	cancelAnalysis,
 	createAnalysis,
 	fetchAnalyses,
 	fetchAnalysis,
@@ -90,6 +91,7 @@ import {
 	retryAnalysis,
 	stateLabel,
 } from "@/features/analysis/api";
+import { ConfirmAction } from "@/features/settings/platform/controls";
 import { listBusinessViewOptions } from "@/features/systems/api";
 import { usePolling } from "@/hooks/use-polling";
 import { formatDateTime } from "@/lib/format";
@@ -1010,6 +1012,8 @@ function InitialAnalysis({
 	const [attempts, setAttempts] = useState<AttemptSummary[]>([]);
 	const [error, setError] = useState("");
 	const [attemptsOpen, setAttemptsOpen] = useState(false);
+	const [cancelling, setCancelling] = useState(false);
+	const [cancelError, setCancelError] = useState("");
 	const started = useRef(false);
 	const load = useCallback(
 		async (retry = false) => {
@@ -1056,10 +1060,35 @@ function InitialAnalysis({
 	useEffect(() => {
 		if (!started.current) {
 			started.current = true;
-			// eslint-disable-next-line react-hooks/set-state-in-effect -- The first mount of the analysis tab is the deliberate user transition that may create an analysis.
 			void load();
 		}
 	}, [load]);
+	// 取消走后端乐观 rowVersion 围栏（HTTP-COMMAND-005）：服务端返回权威投影，
+	// 竞态下可能已经是终态（如已完成），如实照显示；冲突（409）说明服务端状态
+	// 已前进，重读权威投影，绝不把未发生的取消当成结果上报。
+	const cancel = useCallback(
+		async () => {
+			if (!analysis || cancelling || suspended) return;
+			setCancelling(true);
+			setCancelError("");
+			try {
+				const detail = await cancelAnalysis(
+					occurrenceId,
+					analysis.id,
+					analysis.rowVersion,
+					analysisCommandId(),
+				);
+				setAnalysis(detail);
+				setAttempts((await fetchAttempts(occurrenceId, detail.id)).items);
+			} catch (reason) {
+				setCancelError(messageOf(reason, "暂时无法取消初步分析。"));
+				await load();
+			} finally {
+				setCancelling(false);
+			}
+		},
+		[analysis, cancelling, load, occurrenceId, suspended],
+	);
 	// Running work is server-owned, so the open tab polls its real projection until terminal or unmounted.
 	usePolling(
 		() => void load(),
@@ -1181,6 +1210,20 @@ function InitialAnalysis({
 						<Bot className="size-4" aria-hidden="true" />
 						<span>分析正在执行，关闭详情不会取消任务。</span>
 					</div>
+					<ConfirmAction
+						title="取消本次分析？"
+						description="停止正在执行的初步分析，不再产生结论。"
+						destructive
+						disabled={cancelling || suspended}
+						onConfirm={() => void cancel()}
+					>
+						{cancelling ? "正在取消…" : "取消分析"}
+					</ConfirmAction>
+					{cancelError && (
+						<p role="alert" className="text-sm text-destructive">
+							{cancelError}
+						</p>
+					)}
 					<div className="flex flex-col gap-3">
 						<Skeleton className="h-4 w-full" />
 						<Skeleton className="h-4 w-5/6" />
