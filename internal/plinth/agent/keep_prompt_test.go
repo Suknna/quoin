@@ -142,7 +142,7 @@ func TestInvestigationPromptAdaptsKeepInstructions(t *testing.T) {
 		"不要虚构未提供的数据",
 		"绝不能据此断定“没有告警规则”或“从未发生告警”",
 		"以平台提供的近期告警记录为准",
-		"数值必须与工具返回逐字一致",
+		"数值与标识符必须与工具返回逐字一致",
 	})
 }
 

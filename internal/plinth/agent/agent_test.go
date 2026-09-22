@@ -180,7 +180,7 @@ func TestInvestigationPromptUsesPlatformHistoryAsAlertOccurrenceAuthority(t *tes
 		"以平台提供的近期告警记录为准",
 		"时间区间查询",
 		"不能单独证明某条告警曾经触发",
-		"数值必须与工具返回逐字一致",
+		"数值与标识符必须与工具返回逐字一致",
 	} {
 		if !strings.Contains(InvestigationSystemPrompt, required) {
 			t.Fatalf("investigation prompt missing %q: %s", required, InvestigationSystemPrompt)
