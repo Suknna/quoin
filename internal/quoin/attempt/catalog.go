@@ -78,13 +78,22 @@ type FrozenTool struct {
 // changes the tool surface. 知识接入代（initial-analysis-v3 /
 // investigation-v4 / inspection-analysis-v4）首次为巡检分析冻结目录并沿用
 // 全部平台工具。
+//
+// 巡检报告分析例外（首发验收纠正）：它是"重新分析现有证据"的冻结 Evidence
+// 报告代理——提示词只声明 artifact/knowledge 工具（ADR-0012 另让
+// alerts_recent 进入全部世代作告警上下文），不接受任何插件工具，thanos_query
+// 等实时指标工具不进巡检目录，重新分析绝不混入执行时刻的实时数据。
+// 此前 inspection-analysis-v4 意外接受了 quoin_routed 模式，把插件工具
+// thanos_query 扫进目录：模型一提议就撞上未接线的授权解析，整个模型调用
+// 终局 invalid_response（实机 fix4 Run2）。平台工具不受本表影响，仍进基础
+// 目录。
 var generationAccepts = map[string]map[string]bool{
 	"initial-analysis-v1":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 	"initial-analysis-v2":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 	"initial-analysis-v3":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 	"investigation-v3":       {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 	"investigation-v4":       {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
-	"inspection-analysis-v4": {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"inspection-analysis-v4": {},
 }
 
 // platformToolNames are the compiled tools no plugin owns (workspace and

@@ -223,13 +223,31 @@ func TestKnowledgeToolsFollowAgentGenerations(t *testing.T) {
 
 // 巡检分析世代首次拥有可冻结目录：inspection-analysis-v4 的目录可冻结、携带
 // 既有平台工具（artifact_read/grep 是读取巡检证据的必经工具）与知识检索工具，
-// 且拥有自己的 schema 版本标签。
+// 且拥有自己的 schema 版本标签。首发验收纠正：巡检分析是"重新分析现有证据"
+// 的冻结 Evidence 报告代理，目录收窄为恰好九个平台工具——不接受任何插件
+// 工具，thanos_query 等实时指标工具绝不进巡检目录（此前 quoin_routed 模式
+// 被意外接受，thanos_query 混入目录，模型一提议就终局 invalid_response，
+// 实机 fix4 Run2）。
 func TestInspectionGenerationCatalogFreezes(t *testing.T) {
 	_, catalogs := buildTestCatalogs(t, nil)
 	names := catalogToolNames(t, catalogs, InspectionAgentVersion)
 	for _, required := range []string{"artifact_read", "artifact_grep", "knowledge_search", "knowledge_get", "alerts_recent"} {
 		if !names[required] {
 			t.Fatalf("inspection generation catalog lost %s: %v", required, names)
+		}
+	}
+	// 完整目录恰好是九个平台工具：任何插件工具（含 thanos_query）都不在。
+	platformOnly := map[string]bool{
+		"bash": true, "read": true, "write": true, "grep": true,
+		"artifact_read": true, "artifact_grep": true,
+		"alerts_recent": true, "knowledge_search": true, "knowledge_get": true,
+	}
+	if len(names) != len(platformOnly) {
+		t.Fatalf("inspection generation catalog has %d tools, want exactly the 9 platform tools: %v", len(names), names)
+	}
+	for name := range names {
+		if !platformOnly[name] {
+			t.Fatalf("inspection generation catalog exposes non-platform tool %q (real-time metric tools must not reach inspection analysis): %v", name, names)
 		}
 	}
 	catalog, err := catalogs.CatalogFor(InspectionAgentVersion)

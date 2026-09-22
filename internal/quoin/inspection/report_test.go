@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/artifact"
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	_ "github.com/Suknna/quoin/internal/quoin/bootstrap"
 )
 
@@ -326,5 +327,137 @@ func TestImmutableReportClosure(t *testing.T) {
 	}
 	if reports != 1 {
 		t.Fatalf("exactly one immutable report must exist, got %d", reports)
+	}
+}
+
+// TestInspectionAnalysisModelCallsStayOnFrozenEvidence 复现实机 fix4 Run2 的
+// 失败形态并钉死纠正后的行为：巡检分析目录只含平台工具，模型按目录可用的
+// 提案（alerts_recent/artifact_read）必须正常授权，不再出现 "needs a grant
+// resolver" 导致的 invalid_response；目录外的实时指标工具（thanos_query，
+// 模拟目录漂移/历史冻结目录）必须整体确定性拒绝且不留任何 tool call 行——
+// 巡检重新分析绝不获得实时指标授权，也不混入执行时刻的实时数据。
+func TestInspectionAnalysisModelCallsStayOnFrozenEvidence(t *testing.T) {
+	h := newTestHarness(t)
+	h.seedModelProvider(t)
+	store, err := artifact.NewStore(h.db, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.service.SetArtifactWriter(store.MaterializeEvidenceTransaction)
+	ctx := commandContext(t)
+
+	if err := h.service.EnsureDefaultPlan(ctx, 1, "fixture-metrics"); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := h.service.CreatePlanRun(ctx, h.principal, "catalog-run-0001", "basic-fixture-metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := h.service.Attempts()
+	collectAttemptID := h.promqlAttemptID(t, detail.RunID)
+	if _, err = attempts.DispatchInputFor(ctx, collectAttemptID); err != nil {
+		t.Fatalf("collection dispatch rebuild: %v", err)
+	}
+	h.dispatchPromQL(t, collectAttemptID)
+	if err = h.service.CommitPluginProposal(context.Background(), collectAttemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, collectAttemptID, detail.RunID, "success")); err != nil {
+		t.Fatal(err)
+	}
+	analysisID := h.analysisAttemptID(t, detail.RunID)
+	if _, err = attempts.DispatchInputFor(ctx, analysisID); err != nil {
+		t.Fatalf("analysis dispatch rebuild: %v", err)
+	}
+	if err = h.attempts.BindToSlot(ctx, analysisID, "plinth", "plinth-boot", 1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err = h.attempts.Accept(ctx, analysisID, "plinth-boot", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	// 冻结目录必须只含平台工具：thanos_query 不在（根因纠正的直接断言）。
+	var catalogTools string
+	if err := h.db.QueryRow(`SELECT tool_catalog_json FROM attempt_input_snapshots WHERE attempt_id=?`, analysisID).Scan(&catalogTools); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(catalogTools, "thanos_query") {
+		t.Fatal("inspection analysis frozen catalog exposes thanos_query (real-time metric tool)")
+	}
+
+	seedRunningCall := func(seq int) int64 {
+		t.Helper()
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		digest := strings.Repeat("7", 64)
+		call, callErr := h.db.Exec(`
+			INSERT INTO model_calls(attempt_id, call_seq, retry_seq, operation, model_id, connection_grant_id, prompt_renderer_version, agent_version, prompt_digest, tool_schema_version, tool_schema_digest, input_snapshot_digest, rendered_request_digest, context_budget_tokens, max_output_tokens, estimated_input_tokens, status, started_at)
+			VALUES(?,?, 0, 'chat', 'fixture-chat-1', (SELECT id FROM attempt_connection_grants WHERE attempt_id=? AND purpose='chat_model'), 'v1', 'inspection-analysis-v4', ?, 'inspection-analysis-tools-v1', ?, ?, ?, 4096, 1024, 0, 'running', ?)`,
+			analysisID, seq, analysisID, digest, digest, digest, digest, now)
+		if callErr != nil {
+			t.Fatal(callErr)
+		}
+		callID, _ := call.LastInsertId()
+		for itemSeq, kind := range []string{"system_contract", "tool_schema"} {
+			if _, err = h.db.Exec(`INSERT INTO model_call_input_items(model_call_id, item_seq, item_role, source_digest, synthetic_kind) VALUES(?,?, 'system', ?, ?)`, callID, itemSeq+1, digest, kind); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return callID
+	}
+	complete := func(callID int64, proposals []attempt.ProposedTool) ([]attempt.ToolAuthorization, error) {
+		t.Helper()
+		_, responseDigest, responseErr := attempt.CanonicalChatResponseJSON("", proposals)
+		if responseErr != nil {
+			t.Fatal(responseErr)
+		}
+		return attempts.CompleteModelCall(ctx, attempt.CompleteCall{
+			AttemptID: analysisID, CallID: callID, Outcome: "succeeded",
+			FinishReason: "tool_calls", ResponseDigest: responseDigest, ResponseComplete: true,
+			ProposedTools: proposals,
+		})
+	}
+	proposal := func(index int, providerID, name, arguments string) attempt.ProposedTool {
+		t.Helper()
+		sum := sha256.Sum256([]byte(arguments))
+		return attempt.ProposedTool{
+			ProviderIndex: uint32(index), ProviderToolCallID: providerID, ToolName: name,
+			ArgumentsJSON: []byte(arguments), ArgumentsDigest: hex.EncodeToString(sum[:]),
+		}
+	}
+
+	// 目录内提案（告警上下文 + 读取冻结证据）正常授权——不再 invalid_response。
+	authorized, authorizedErr := complete(seedRunningCall(1), []attempt.ProposedTool{
+		proposal(0, "call-alerts-0", "alerts_recent", `{"hours":24,"limit":10}`),
+		proposal(1, "call-artifact-0", "artifact_read", `{"artifactId":"1","offset":1,"limit":10}`),
+	})
+	if authorizedErr != nil {
+		t.Fatalf("in-catalog proposals must authorize (实机 bug: whole-call rejection): %v", authorizedErr)
+	}
+	if len(authorized) != 2 {
+		t.Fatalf("authorizations=%+v", authorized)
+	}
+
+	// 前序 tool call 到终态（生产由 quoin_routed 编排封存；域测试按既有
+	// seedKnowledgeToolCall 惯例直接落终态事实），序列约束才放行下一调用。
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, providerID := range []string{"call-alerts-0", "call-artifact-0"} {
+		if _, err = h.db.Exec(`UPDATE tool_calls SET status='running', started_at=?, row_version=row_version+1 WHERE attempt_id=? AND provider_tool_call_id=? AND status='pending'`, now, analysisID, providerID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = h.db.Exec(`UPDATE tool_calls SET status='succeeded', result_json='{"success":true,"output":"fixture"}', ended_at=?, row_version=row_version+1 WHERE attempt_id=? AND provider_tool_call_id=? AND status='running'`, now, analysisID, providerID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 目录外实时指标工具：整体确定性拒绝且零 tool call 行落库。
+	_, rogueErr := complete(seedRunningCall(2), []attempt.ProposedTool{
+		proposal(0, "call-thanos-0", "thanos_query", `{"query":"redis_up or mysql_up"}`),
+	})
+	if rogueErr == nil {
+		t.Fatal("out-of-catalog real-time metric tool must fail closed")
+	}
+	if !strings.Contains(rogueErr.Error(), "frozen catalog") {
+		t.Fatalf("rejection must be the frozen-catalog denial, got: %v", rogueErr)
+	}
+	var rogueCalls int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM tool_calls WHERE attempt_id=? AND provider_tool_call_id='call-thanos-0'`, analysisID).Scan(&rogueCalls); err != nil || rogueCalls != 0 {
+		t.Fatalf("rogue proposal must leave no tool call rows, got %d (err=%v)", rogueCalls, err)
 	}
 }
