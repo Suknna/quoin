@@ -9,7 +9,13 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 )
 
-type planRequest struct {
+// PlanRequest 是创建与更新共享的计划请求 DTO。导出是契约要求：huma 与
+// encoding/json 只把【导出】的匿名内嵌字段摊平进父 schema——此前 PUT 体
+// 匿名内嵌未导出的 planRequest，其全部字段从请求 schema 消失，任何真实
+// 更新载荷都被 422 "unexpected property" 拒绝（实机 fix8 编辑页原样保存即
+// 此故障；docs/specs 契约本就声明 PUT 体 = PluginInspectionPlanInput +
+// expectedRowVersion）。
+type PlanRequest struct {
 	ClientCommandID string         `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
 	PlanKey         string         `json:"planKey" minLength:"1" maxLength:"63" pattern:"^[a-z][a-z0-9-]{0,62}$"`
 	DisplayName     string         `json:"displayName" minLength:"1" maxLength:"200"`
@@ -32,7 +38,7 @@ type planRequest struct {
 	Timezone string  `json:"timezone" minLength:"1"`
 }
 
-func (input planRequest) domain() inspection.PlanInput {
+func (input PlanRequest) domain() inspection.PlanInput {
 	return inspection.PlanInput{
 		PlanKey: input.PlanKey, DisplayName: input.DisplayName, Enabled: input.Enabled, ConnectionName: input.ConnectionName,
 		PluginID: input.PluginID, TemplateID: input.TemplateID, TemplateVersion: input.TemplateVersion, Params: input.Params,
@@ -104,7 +110,7 @@ func (handler *Handler) registerPlans(api huma.API) {
 	})
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/inspections/plans", OperationID: "createPluginInspectionPlan", DefaultStatus: http.StatusCreated}, func(ctx context.Context, input *struct {
 		Session string `cookie:"__Host-quoin-session"`
-		Body    planRequest
+		Body    PlanRequest
 	}) (*createPlanOutput, error) {
 		principal, err := handler.reader(ctx, input.Session)
 		if err != nil {
@@ -120,7 +126,7 @@ func (handler *Handler) registerPlans(api huma.API) {
 		Session string `cookie:"__Host-quoin-session"`
 		PlanKey string `path:"planKey"`
 		Body    struct {
-			planRequest
+			PlanRequest
 			ExpectedRowVersion int64 `json:"expectedRowVersion" minimum:"1"`
 		}
 	}) (*planOutput, error) {

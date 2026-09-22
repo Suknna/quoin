@@ -129,14 +129,17 @@ func (h *Handler) getView(ctx context.Context, input *struct {
 // Huma 的 schema 生成会跳过未导出的匿名嵌入类型，导致字段从请求 schema
 // 中消失并被封闭校验整体拒绝（真实 PUT 422 根因）。
 type ViewBody struct {
-	ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
-	DisplayName     string `json:"displayName" minLength:"1" maxLength:"200"`
-	Description     string `json:"description" maxLength:"2000"`
-	Scope           struct {
-		ConnectionName  string            `json:"connectionName,omitempty"`
-		LabelConditions map[string]string `json:"labelConditions"`
-		AlertSourceKeys []string          `json:"alertSourceKeys,omitempty"`
-	} `json:"scope"`
+	ClientCommandID string                 `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+	DisplayName     string                 `json:"displayName" minLength:"1" maxLength:"200"`
+	Description     string                 `json:"description" maxLength:"2000"`
+	Scope           BusinessViewScopeInput `json:"scope"`
+}
+
+// A named wire type prevents Huma from reusing another route's anonymous Scope schema.
+type BusinessViewScopeInput struct {
+	ConnectionName  string            `json:"connectionName,omitempty"`
+	LabelConditions map[string]string `json:"labelConditions"`
+	AlertSourceKeys []string          `json:"alertSourceKeys,omitempty"`
 }
 
 func (body ViewBody) input() ViewInput {

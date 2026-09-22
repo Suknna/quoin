@@ -79,10 +79,10 @@ func (application *apiServer) getEnrichmentRule(ctx context.Context, input *stru
 	}{CacheControl: "no-store", Body: rule}, nil
 }
 
-// enrichmentRuleBody 是创建/更新共享的可变字段 wire 形状。规则 key 只由路径
-// 携带（POST 时在请求体内），请求体不重复；类型必须导出（Huma schema 生成
-// 会跳过未导出的匿名嵌入类型）。
-type enrichmentRuleBody struct {
+// EnrichmentRuleBody 是创建/更新共享的可变字段 wire 形状。规则 key 只由路径
+// 携带（POST 时在请求体内），请求体不重复。类型名必须导出：Huma schema 生
+// 成会跳过未导出的匿名嵌入类型。
+type EnrichmentRuleBody struct {
 	ClientCommandID string            `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
 	DisplayName     string            `json:"displayName" minLength:"1" maxLength:"200"`
 	Description     string            `json:"description" maxLength:"2000"`
@@ -93,7 +93,7 @@ type enrichmentRuleBody struct {
 	Priority        int               `json:"priority" minimum:"0" maximum:"1000000"`
 }
 
-func (body enrichmentRuleBody) input() businessview.EnrichmentRuleInput {
+func (body EnrichmentRuleBody) input() businessview.EnrichmentRuleInput {
 	return businessview.EnrichmentRuleInput{
 		DisplayName:     body.DisplayName,
 		Description:     body.Description,
@@ -108,7 +108,7 @@ func (body enrichmentRuleBody) input() businessview.EnrichmentRuleInput {
 func (application *apiServer) createEnrichmentRule(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Body    struct {
-		enrichmentRuleBody
+		EnrichmentRuleBody
 		RuleKey string `json:"ruleKey" minLength:"1" maxLength:"63" pattern:"^[a-z][a-z0-9-]{0,62}$"`
 	}
 }) (*struct {
@@ -138,7 +138,7 @@ func (application *apiServer) updateEnrichmentRule(ctx context.Context, input *s
 	Session string `cookie:"__Host-quoin-session"`
 	RuleKey string `path:"ruleKey"`
 	Body    struct {
-		enrichmentRuleBody
+		EnrichmentRuleBody
 		ExpectedRowVersion int64 `json:"expectedRowVersion" minimum:"1"`
 	}
 }) (*struct {
