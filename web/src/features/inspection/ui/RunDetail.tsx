@@ -45,8 +45,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import { PropertyList } from "@/components/workbench/PropertyList";
 import { FeedbackPanel } from "@/features/feedback/ui";
-import { api as knowledgeApi } from "@/features/knowledge/api";
-import { organizeIntoKnowledge } from "@/features/knowledge/organize";
 import {
 	cancelInspectionRun,
 	formatInspectionTime,
@@ -63,6 +61,8 @@ import {
 	rerunInspection,
 	statusBadgeClass,
 } from "@/features/inspection/api";
+import { api as knowledgeApi } from "@/features/knowledge/api";
+import { organizeIntoKnowledge } from "@/features/knowledge/organize";
 
 const terminal = new Set([
 	"Completed",
@@ -218,7 +218,11 @@ function GenerationDetails({
 	);
 }
 
-/** 检查结论行：只由真实 Run 状态与检查项统计推导，不猜测健康度。 */
+/**
+ * 检查结论行：只由真实 Run 状态与检查项统计推导，不猜测健康度。
+ * check.status "ok" 是 collector 结果（采证成功并封存 Evidence），不含阈值判定；
+ * 健康结论只存在于模型生成的报告正文，这里不得替它代言。
+ */
 function conclusionOf(detail: InspectionRunDetail): string {
 	const checks = detail.checks;
 	const ok = checks.filter((check) => check.status === "ok").length;
@@ -239,8 +243,8 @@ function conclusionOf(detail: InspectionRunDetail): string {
 		default:
 			if (!checks.length) return "采证完成，等待报告";
 			return gapCount
-				? `${ok} 项通过 · ${gapCount} 项有缺口`
-				: `${ok} 项检查全部通过`;
+				? `${ok} 项采证成功 · ${gapCount} 项有缺口`
+				: `${ok} 项检查采证完成，无健康判定`;
 	}
 }
 
@@ -335,7 +339,7 @@ function ResultSummary({
 			{gapChecks.length > 0 && (
 				<Alert variant="destructive">
 					<AlertTitle>
-						{gapChecks.length} 项检查未通过，报告可能不完整
+						{gapChecks.length} 项检查采证未成功，报告可能不完整
 					</AlertTitle>
 					<AlertDescription>
 						<ul className="list-disc space-y-0.5 pl-4">
@@ -389,7 +393,6 @@ function ResultSummary({
 		</section>
 	);
 }
-
 
 export function RunDetail({
 	runId,
@@ -646,8 +649,10 @@ export function RunDetail({
 				{runActive || detail.analysisActive ? (
 					<Button
 						variant="outline"
-						disabled={busy || props.suspended || !runActive}
-						title={runActive ? undefined : "Run 已到终态，取消不再可用"}
+						disabled={busy || props.suspended}
+						title={
+							runActive ? undefined : "取消正在执行的分析，保留已完成的采证结果"
+						}
 						onClick={() => void action("cancel")}
 					>
 						取消
@@ -687,10 +692,7 @@ export function RunDetail({
 							onClick={() =>
 								void organizeIntoKnowledge(
 									() =>
-										knowledgeApi.createReportCandidate(
-											runId,
-											report.version,
-										),
+										knowledgeApi.createReportCandidate(runId, report.version),
 									props.navigate,
 								)
 							}

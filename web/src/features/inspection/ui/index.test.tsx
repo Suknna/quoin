@@ -141,10 +141,35 @@ const labConnection = {
 	rowVersion: 1,
 	config: {},
 };
+const thanosConnection = {
+	name: "mall-shop-thanos",
+	type: "thanos" as const,
+	enabled: true,
+	revalidationRequired: false,
+	rowVersion: 1,
+	config: {},
+};
+/** 模型提供方接入：只提供推理端点，绝不能出现在巡检采证来源候选里。 */
+const modelProviderConnection = {
+	name: "deepseek-ollama-acceptance",
+	type: "model_provider" as const,
+	enabled: true,
+	revalidationRequired: false,
+	rowVersion: 1,
+	config: {},
+};
 const prometheusPlugin = {
 	id: "prometheus",
 	displayName: "Prometheus",
 	description: "指标采集插件",
+	enabled: true,
+	version: "1",
+	capabilities: ["inspection_templates"],
+};
+const thanosPlugin = {
+	id: "thanos",
+	displayName: "Thanos",
+	description: "Thanos 全局查询插件",
 	enabled: true,
 	version: "1",
 	capabilities: ["inspection_templates"],
@@ -249,7 +274,14 @@ describe("inspection run result summary", () => {
 		render(<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />);
 		const summary = await screen.findByLabelText("巡检结果摘要");
 		expect(within(summary).getByText("已完成")).toBeInTheDocument();
-		expect(within(summary).getByText("1 项检查全部通过")).toBeInTheDocument();
+		expect(
+			within(summary).getByText("1 项检查采证完成，无健康判定"),
+		).toBeInTheDocument();
+		// 回归：check.status "ok" 只是 collector 采证成功（默认 promql_instant
+		// expr up 无阈值），摘要不得把它呈现为健康判定式“通过”。
+		expect(within(summary).queryByText(/全部通过/)).toBeNull();
+		expect(within(summary).queryByText(/项通过/)).toBeNull();
+		expect(within(summary).queryByText(/未通过/)).toBeNull();
 		expect(
 			within(summary).getByRole("button", { name: "#e-1" }),
 		).toBeInTheDocument();
@@ -281,10 +313,10 @@ describe("inspection run result summary", () => {
 		render(<RunDetail runId="6" props={props} onOpenRun={vi.fn()} />);
 		const summary = await screen.findByLabelText("巡检结果摘要");
 		expect(
-			within(summary).getByText("1 项通过 · 1 项有缺口"),
+			within(summary).getByText("1 项采证成功 · 1 项有缺口"),
 		).toBeInTheDocument();
 		expect(
-			within(summary).getByText(/1 项检查未通过，报告可能不完整/),
+			within(summary).getByText(/1 项检查采证未成功，报告可能不完整/),
 		).toBeInTheDocument();
 		expect(within(summary).getAllByText(/无数据/).length).toBeGreaterThan(0);
 	});
@@ -694,7 +726,7 @@ describe("inspection report feedback", () => {
 		).toBeInTheDocument();
 	});
 
-	it("disables cancellation once the run is terminal even while its analysis is active", async () => {
+	it("allows cancellation while collection or report analysis is active", async () => {
 		api.getInspectionRun.mockResolvedValue({
 			id: "run-9",
 			planKey: "prom-up",
@@ -710,8 +742,8 @@ describe("inspection report feedback", () => {
 		const { unmount } = render(
 			<RunDetail runId="run-9" props={props} onOpenRun={vi.fn()} />,
 		);
-		// Terminal run: cancel stays visible (the analysis still shows here) but can no longer be fired.
-		expect(await screen.findByRole("button", { name: "取消" })).toBeDisabled();
+		// Completed collection is immutable, but its active report analysis is cancellable.
+		expect(await screen.findByRole("button", { name: "取消" })).toBeEnabled();
 		unmount();
 		api.getInspectionRun.mockResolvedValue({
 			id: "run-9",
@@ -957,6 +989,49 @@ describe("plan workspace", () => {
 });
 
 describe("plan editor", () => {
+	it("offers only connections whose type has an inspection-capable plugin; model providers are not evidence sources", async () => {
+		resources.listConnections.mockResolvedValue([
+			labConnection,
+			thanosConnection,
+			modelProviderConnection,
+		]);
+		resources.listIntegrationPlugins.mockResolvedValue([
+			prometheusPlugin,
+			thanosPlugin,
+		]);
+		render(<InspectionView route="/inspections/plans/new" />);
+		fireEvent.click(await screen.findByRole("combobox", { name: "接入连接" }));
+		// 回归：接入候选以 inspection_templates 插件能力为依据——
+		// prometheus/thanos 保留，model_provider（如 deepseek-ollama-acceptance）排除。
+		expect(
+			await screen.findByRole("option", {
+				name: /lab-prometheus（prometheus）/,
+			}),
+		).toBeInTheDocument();
+		expect(
+			screen.getByRole("option", { name: /mall-shop-thanos（thanos）/ }),
+		).toBeInTheDocument();
+		expect(screen.queryByRole("option", { name: /model_provider/ })).toBeNull();
+		expect(screen.queryByText(/deepseek-ollama-acceptance/)).toBeNull();
+	});
+
+	it("shows placeholders matching the frozen template vocabulary: promql_instant takes expression", async () => {
+		render(<InspectionView route="/inspections/plans/new" />);
+		expect(await screen.findByLabelText("模板 ID")).toHaveAttribute(
+			"placeholder",
+			"如 promql_instant",
+		);
+		expect(screen.getByLabelText("采集参数（YAML）")).toHaveAttribute(
+			"placeholder",
+			"expression: up",
+		);
+		// 回归：旧示例 promql-check 模板不存在；query 不是任何巡检模板的参数键
+		// （后端 validateInstantParams/pluginTemplateQuery 只接受 expression，
+		// 填 query 会以“表达式空”被拒）。
+		expect(screen.queryByPlaceholderText("如 promql-check")).toBeNull();
+		expect(screen.queryByPlaceholderText("query: up == 0")).toBeNull();
+	});
+
 	it("creates a plan with YAML params, integration scope, and analysis semantics", async () => {
 		const navigate = vi.fn();
 		api.createInspectionPlan.mockResolvedValue(integrationPlan);

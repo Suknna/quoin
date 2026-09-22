@@ -487,15 +487,21 @@ export function PlanEditor({
 				/>
 			</div>
 		);
-	const connectionOptions: ResourceOption[] =
-		connections.items?.map((connection) => ({
-			value: connection.name,
-			label: `${connection.name}（${connection.type}）${
-				connection.enabled ? "" : " · 已停用"
-			}`,
-			disabled: !connection.enabled,
-		})) ?? [];
 	const inspectionPlugins = plugins.items ?? [];
+	// 采证来源候选只认“接入类型有插件提供巡检模板能力”的连接——以现有插件能力
+	// 目录为依据，不新增字段；model_provider 等模型接入只提供推理端点，不是采证来源。
+	const connectionOptions: ResourceOption[] =
+		connections.items
+			?.filter((connection) =>
+				inspectionPlugins.some((plugin) => plugin.id === connection.type),
+			)
+			.map((connection) => ({
+				value: connection.name,
+				label: `${connection.name}（${connection.type}）${
+					connection.enabled ? "" : " · 已停用"
+				}`,
+				disabled: !connection.enabled,
+			})) ?? [];
 	const pluginOptions: ResourceOption[] = inspectionPlugins.map((plugin) => ({
 		value: plugin.id,
 		label: `${plugin.displayName}（${plugin.id}）`,
@@ -608,21 +614,21 @@ export function PlanEditor({
 							/>
 						</div>
 						<div className="grid gap-4 md:grid-cols-2">
-							<Field>
-								<FieldLabel htmlFor="plan-template">模板 ID</FieldLabel>
-								<Input
-									id="plan-template"
-									value={form.templateId}
-									disabled={busy || suspended}
-									onChange={(event) =>
-										update({ templateId: event.target.value })
-									}
-									placeholder="如 promql-check"
-								/>
-								<FieldDescription>
-									所选插件提供的巡检模板标识，随插件文档给出。
-								</FieldDescription>
-							</Field>
+								<Field>
+									<FieldLabel htmlFor="plan-template">模板 ID</FieldLabel>
+									<Input
+										id="plan-template"
+										value={form.templateId}
+										disabled={busy || suspended}
+										onChange={(event) =>
+											update({ templateId: event.target.value })
+										}
+										placeholder="如 promql_instant"
+									/>
+									<FieldDescription>
+										所选插件提供的巡检模板标识，随插件文档给出。
+									</FieldDescription>
+								</Field>
 							<Field>
 								<FieldLabel htmlFor="plan-template-version">
 									模板版本（可选）
@@ -647,7 +653,7 @@ export function PlanEditor({
 								value={form.paramsText}
 								disabled={busy || suspended}
 								onChange={(event) => update({ paramsText: event.target.value })}
-								placeholder={"query: up == 0"}
+								placeholder={"expression: up"}
 							/>
 							<FieldDescription>
 								按模板要求的键值对填写，一行一个；服务端会按模板 schema
