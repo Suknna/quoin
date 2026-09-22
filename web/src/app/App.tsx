@@ -27,20 +27,34 @@ import {
 	navigateWorkspace,
 	readWorkspaceRoute,
 } from "./router";
-import { type RouteHostComponents, RouteHosts } from "./routes/RouteHosts";
+import { importRouteHost } from "./route-import";
+import {
+	type RouteHostComponents,
+	RouteHosts,
+} from "./routes/RouteHosts";
 import { ServiceUnavailable } from "./ServiceUnavailable";
 import { messageOf } from "./shared";
 import "@/styles/index.css";
 
-/** Each host is a separate dynamic import so a feature module is fetched only for its route. */
+/** Each host is a separate dynamic import so a feature module is fetched only for its route.
+ * importRouteHost keeps a mid-session deployment update from turning the first
+ * post-update route entry into a silent whole-app unmount. */
 const routeHostComponents = {
-	alerts: lazy(() => import("./routes/AlertsRoute")),
-	investigations: lazy(() => import("./routes/InvestigationsRoute")),
-	inspections: lazy(() => import("./routes/InspectionsRoute")),
-	systems: lazy(() => import("./routes/SystemsRoute")),
-	knowledge: lazy(() => import("./routes/KnowledgeRoute")),
-	integrations: lazy(() => import("./routes/IntegrationsRoute")),
-	settings: lazy(() => import("./routes/SettingsRoute")),
+	alerts: lazy(() => importRouteHost(() => import("./routes/AlertsRoute"))),
+	investigations: lazy(() =>
+		importRouteHost(() => import("./routes/InvestigationsRoute")),
+	),
+	inspections: lazy(() =>
+		importRouteHost(() => import("./routes/InspectionsRoute")),
+	),
+	systems: lazy(() => importRouteHost(() => import("./routes/SystemsRoute"))),
+	knowledge: lazy(() =>
+		importRouteHost(() => import("./routes/KnowledgeRoute")),
+	),
+	integrations: lazy(() =>
+		importRouteHost(() => import("./routes/IntegrationsRoute")),
+	),
+	settings: lazy(() => importRouteHost(() => import("./routes/SettingsRoute"))),
 } satisfies RouteHostComponents;
 
 type AuthScreenStage = "loading" | "auth" | "workbench";

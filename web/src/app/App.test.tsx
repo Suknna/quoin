@@ -39,6 +39,18 @@ vi.mock("@/api/workbench", async (importOriginal) => {
 	};
 });
 
+// 验收回归：fix7 部署后旧标签页首次进入 /knowledge/* 时懒加载 chunk 失效。
+// 动态 import 以与真实 MIME 失败相同的方式拒绝；恢复原语被替身接管以便断言。
+vi.mock("./routes/KnowledgeRoute", async () => {
+	throw new TypeError("Failed to fetch dynamically imported module");
+});
+vi.mock("./route-reload", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("./route-reload")>();
+	return { ...actual, reloadAfterStaleRoute: vi.fn() };
+});
+import { reloadAfterStaleRoute } from "./route-reload";
+
 import { authUser, modelProviderDetail, otherUser } from "@/api/fixtures";
 import type { UserSummary } from "@/api/generated/types";
 import { WorkbenchApiError, workbenchApi } from "@/api/workbench";
@@ -540,5 +552,22 @@ describe("authentication workflow", () => {
 			vi.useRealTimers();
 			delete (document as { visibilityState?: string }).visibilityState;
 		}
+	});
+
+	it("schedules a guarded full-page reload when a stale knowledge route chunk fails to load", async () => {
+		// 实机 fix7 复现路径：会话打开期间部署更新，随后首次进入
+		// /knowledge/candidates/:id。修复前该失败没有任何错误边界接管，
+		// 整棵工作台树被静默卸载成空白页（DOM 快照为空、截图纯白）。
+		const reactError = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+		vi.spyOn(workbenchApi, "currentUser").mockResolvedValue(authUser);
+		vi.spyOn(workbenchApi, "maintenance").mockResolvedValue(null);
+		window.history.replaceState(null, "", "/knowledge/candidates/5");
+		render(<App />);
+		await waitFor(() =>
+			expect(reloadAfterStaleRoute).toHaveBeenCalledTimes(1),
+		);
+		reactError.mockRestore();
 	});
 });

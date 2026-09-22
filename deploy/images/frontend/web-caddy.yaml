@@ -12,6 +12,24 @@ caddyfile: |
       respond 404
     }
 
+    # Hashed build assets are immutable but never SPA fallbacks: a missing
+    # file is a stale deployment reference from an open pre-update tab, not a
+    # client route. It must 404 uncached — the SPA document would both poison
+    # the immutable cache and fail module loading as a 200 HTML response.
+    handle /assets/* {
+      root * /srv
+      header {
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        Referrer-Policy "no-referrer"
+        X-Content-Type-Options "nosniff"
+      }
+      @found file {path}
+      header @found Cache-Control "public, max-age=31536000, immutable"
+      @missing not file {path}
+      header @missing Cache-Control "no-store"
+      file_server
+    }
+
     handle {
       root * /srv
       header {
@@ -20,12 +38,8 @@ caddyfile: |
         X-Content-Type-Options "nosniff"
       }
 
-      # SPA fallbacks are documents, not immutable resources. Applying this
-      # before try_files covers both /index.html and deep-route HTML.
-      @documents not path /assets/*
-      header @documents Cache-Control "no-cache"
-      @assets path /assets/*
-      header @assets Cache-Control "public, max-age=31536000, immutable"
+      # SPA fallbacks are documents and must always revalidate.
+      header Cache-Control "no-cache"
 
       # A pathname without a static file is a client route and must survive a
       # direct navigation or refresh.
