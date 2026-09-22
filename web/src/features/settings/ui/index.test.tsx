@@ -5,6 +5,7 @@ import {
 	render,
 	screen,
 	waitFor,
+	within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { UserSummary } from "@/api/generated/types";
@@ -186,7 +187,7 @@ describe("settings module", () => {
 		expect(screen.getByLabelText("再次输入新密码")).toHaveValue("");
 	});
 
-	it("paginates sessions and asks for confirmation before revoking the current session", async () => {
+	it("paginates sessions; the current session is logout-only, others confirm then revoke", async () => {
 		const session = (id: string, clientLabel: string, current: boolean) => ({
 			id,
 			clientLabel,
@@ -226,12 +227,17 @@ describe("settings module", () => {
 		fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
 		expect(await screen.findByText("Firefox")).toBeInTheDocument();
 		expect(fetchMock.mock.calls[1][0]).toContain("cursor=next");
-		fireEvent.click(screen.getAllByRole("button", { name: "撤销" })[0]);
+		// HTTP-AUTH-004：当前请求所用会话只能经外壳「退出登录」撤销，后端
+		// 对 revokeOwnSession 撤销当前会话确定性拒绝，当前行不提供撤销按钮。
+		const currentRow = screen.getByText("Chrome").closest("tr") as HTMLTableRowElement;
+		expect(
+			within(currentRow).queryByRole("button", { name: "撤销" }),
+		).not.toBeInTheDocument();
+		expect(within(currentRow).getByText(/退出登录/)).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "撤销" }));
 		expect(await screen.findByText("撤销此会话？")).toBeInTheDocument();
 		expect(
-			screen.getByText(
-				"这是当前设备。确认后将清除本设备认证并重新加载登录页面。",
-			),
+			screen.getByText("该设备将需要重新登录；其他设备保持不变。"),
 		).toBeInTheDocument();
 	});
 });

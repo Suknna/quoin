@@ -188,6 +188,8 @@ function Sessions({ suspended }: { suspended: boolean }) {
 	const [sessions, setSessions] = useState<Session[]>([]);
 	const [cursor, setCursor] = useState<string>();
 	const [error, setError] = useState("");
+	/** 撤销失败保持在确认框内的持久反馈；仅靠 toast 极易被错过。 */
+	const [revokeError, setRevokeError] = useState("");
 	const [pending, setPending] = useState<Session>();
 	const [busy, setBusy] = useState(false);
 	const [sessionsLoading, setSessionsLoading] = useState(true);
@@ -214,7 +216,7 @@ function Sessions({ suspended }: { suspended: boolean }) {
 	async function revoke() {
 		if (!pending) return;
 		setBusy(true);
-		setError("");
+		setRevokeError("");
 		try {
 			await securityRequest<void>(
 				`/api/v1/auth/sessions/${encodeURIComponent(pending.id)}/revoke`,
@@ -223,15 +225,12 @@ function Sessions({ suspended }: { suspended: boolean }) {
 					body: JSON.stringify({ clientCommandId: newClientCommandId() }),
 				},
 			);
-			if (pending.current) {
-				window.location.reload();
-				return;
-			}
 			notify.success("已撤销会话");
 			setPending(undefined);
 			await load();
 		} catch (reason) {
-			notify.error(reason, "暂时无法完成操作，请重试。");
+			// 失败时确认框保持打开并把原因钉在框内，可重试或取消。
+			setRevokeError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setBusy(false);
 		}
@@ -281,14 +280,27 @@ function Sessions({ suspended }: { suspended: boolean }) {
 							{formatTime(session.idleExpiresAt)}
 						</TableCell>
 						<TableCell>
-							<Button
-								variant="outline"
-								size="sm"
-								disabled={suspended}
-								onClick={() => setPending(session)}
-							>
-								撤销
-							</Button>
+							{/* HTTP-AUTH-004：revokeOwnSession 只能撤销其他会话；当前
+							 * 请求所用会话必须走外壳的退出登录，后端对前者确定性
+							 * 拒绝（active_conflict），因此当前行不提供必然失败的按钮。
+							 */}
+							{session.current ? (
+								<span className="text-xs text-muted-foreground">
+									本设备请用右上角「退出登录」
+								</span>
+							) : (
+								<Button
+									variant="outline"
+									size="sm"
+									disabled={suspended}
+									onClick={() => {
+										setRevokeError("");
+										setPending(session);
+									}}
+								>
+									撤销
+								</Button>
+							)}
 						</TableCell>
 					</TableRow>
 				))}
@@ -308,11 +320,14 @@ function Sessions({ suspended }: { suspended: boolean }) {
 					<AlertDialogHeader>
 						<AlertDialogTitle>撤销此会话？</AlertDialogTitle>
 						<AlertDialogDescription>
-							{pending?.current
-								? "这是当前设备。确认后将清除本设备认证并重新加载登录页面。"
-								: "该设备将需要重新登录；其他设备保持不变。"}
+							该设备将需要重新登录；其他设备保持不变。
 						</AlertDialogDescription>
 					</AlertDialogHeader>
+					{revokeError && (
+						<Alert variant="destructive">
+							<AlertDescription>{revokeError}</AlertDescription>
+						</Alert>
+					)}
 					<AlertDialogFooter>
 						<AlertDialogCancel disabled={busy}>取消</AlertDialogCancel>
 						<AlertDialogAction
@@ -322,7 +337,7 @@ function Sessions({ suspended }: { suspended: boolean }) {
 								void revoke();
 							}}
 						>
-							确认撤销
+							{busy ? "撤销中…" : "确认撤销"}
 						</AlertDialogAction>
 					</AlertDialogFooter>
 				</AlertDialogContent>

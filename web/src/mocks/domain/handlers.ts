@@ -387,6 +387,18 @@ export const domainHandlers = [
 	http.post("*/api/v1/auth/sessions/:id/revoke", ({ params }) => {
 		const denied = required();
 		if (denied) return denied;
+		// HTTP-AUTH-004：当前请求所用会话只能经 logout 撤销；真实后端对
+		// session.revoke_own 确定性拒绝，mock 必须同形，避免界面在演示
+		// 模式下误以为自撤销可行。
+		const target = getMockState().sessions.find(
+			(item) => item.id === params.id,
+		);
+		if (target?.current)
+			return problem(
+				422,
+				"请求字段不满足要求，请检查后重试。",
+				"validation_failed",
+			);
 		getMockState().sessions = getMockState().sessions.filter(
 			(item) => item.id !== params.id,
 		);
