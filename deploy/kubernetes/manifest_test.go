@@ -118,7 +118,7 @@ func TestManifestDeliversBrowserFreeStackBehindOneTLSGateway(t *testing.T) {
 			t.Fatalf("gateway config missing %q", required)
 		}
 	}
-	if deployments["frontend"] == nil || !strings.Contains(mustMarshal(t, deployments["frontend"]), "quoin/frontend:v0.1.0-dev") {
+	if deployments["frontend"] == nil || !strings.Contains(mustMarshal(t, deployments["frontend"]), "quoin/frontend:v0.1.0") {
 		t.Fatal("frontend must be an independently deployed image")
 	}
 	for _, secret := range []string{"gateway-tls", "quoin-secrets"} {

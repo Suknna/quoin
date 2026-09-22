@@ -199,7 +199,7 @@ spec:
       securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: frontend
-          image: quoin/frontend:v0.1.0-dev
+          image: quoin/frontend:v0.1.0
           ports: [{name: http, containerPort: 8080}]
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
           readinessProbe: {tcpSocket: {port: http}, periodSeconds: 10}
@@ -224,7 +224,7 @@ spec:
       securityContext: {runAsNonRoot: true, runAsUser: 65532, fsGroup: 65532, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: quoin
-          image: quoin/quoin:v0.1.0-dev
+          image: quoin/quoin:v0.1.0
           args: [serve, --config, /etc/quoin/component.yaml]
           ports: [{name: public, containerPort: 8080}, {name: runtime, containerPort: 8443}, {name: ops, containerPort: 9090}]
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
@@ -263,7 +263,7 @@ spec:
       securityContext: {runAsNonRoot: true, runAsUser: 65532, fsGroup: 65532, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: plinth
-          image: quoin/plinth:v0.1.0-dev
+          image: quoin/plinth:v0.1.0
           args: [--config, /etc/quoin/component.yaml]
           ports: [{name: ops, containerPort: 9090}]
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
@@ -304,7 +304,7 @@ spec:
       securityContext: {runAsNonRoot: true, runAsUser: 65532, fsGroup: 65532, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: stele
-          image: quoin/stele:v0.1.0-dev
+          image: quoin/stele:v0.1.0
           args: [--config, /etc/quoin/component.yaml]
           ports: [{name: webhook, containerPort: 8080}, {name: ops, containerPort: 9090}]
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}

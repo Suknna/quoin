@@ -20,7 +20,7 @@ COPY . .
 ARG TARGETOS=linux
 ARG TARGETARCH
 # Release identity is independently versioned build provenance.
-ARG RELEASE_VERSION=v0.1.0-dev
+ARG RELEASE_VERSION=v0.1.0
 ENV CGO_ENABLED=0
 RUN --mount=type=cache,target=/root/.cache/go-build \
     GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -buildid= -X github.com/Suknna/quoin/internal/buildinfo.Release=${RELEASE_VERSION}" -o /out/quoin ./cmd/quoin

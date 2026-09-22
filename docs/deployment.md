@@ -56,7 +56,7 @@ kubectl -n quoin apply -f deploy/kubernetes/ops-services.yaml
 
 上述 `quoin-secrets` 内容由部署方用仓库脚本生成（见 Kubernetes 启动指南）：`scripts/generate-deployment-secrets.sh <secrets-dir>` 产出 root-key、runtime-ca、runtime-tls 与两张组件客户端证书，再由运维以 kubectl 从文件创建 Secret。
 
-先将 `quoin-config` 的 `publicOrigin` 改为精确公开 HTTPS Origin，并以发布的 digest 替换四个默认应用镜像。默认 gateway Service 是 `ClusterIP`；按集群网络条件由运维改为 `LoadBalancer` 或 `NodePort`。PVC 的 StorageClass、容量、备份策略和回收策略也由运维平台决定。
+先将 `quoin-config` 的 `publicOrigin` 改为精确公开 HTTPS Origin，并以发布的 tag 或 digest 替换四个默认应用镜像。默认 gateway Service 是 `ClusterIP`；按集群网络条件由运维改为 `LoadBalancer` 或 `NodePort`。PVC 的 StorageClass、容量、备份策略和回收策略也由运维平台决定。
 
 首次 Admin 初始化不需要部署编排创建任何用户：首次启动 Quoin 在空库上自动播种唯一待初始化的内置管理员，初始密码由进程随机生成并写入数据目录 `initial-admin-password` 文件（0600，与 SQLite 同卷；启动日志只报路径与 24 小时期限）。运维用 `kubectl exec`/`docker compose exec` 读取该文件后，以 `admin` + 初始密码登录——单步登录签发受限会话，强制设置正式密码后自动进入工作台；初始密码随之永久失效（24 小时未改密则作废，见下文恢复）。不存在公开默认密码。
 
@@ -80,6 +80,8 @@ docker compose -f deploy/compose.yaml up -d
 
 ## 镜像构建
 
+日常安装优先从 [GitHub Releases](https://github.com/Suknna/quoin/releases) 取得与主机架构一致的离线镜像包：校验同名 `.sha256` 文件后执行 `docker load -i <包名>`。每个发布包包含 frontend、quoin、plinth、stele 和固定的 Caddy 镜像；不包含任何数据、Secret 或 TLS 证书。完整的版本规则和发布步骤见[发布指南](releasing.md)。
+
 ```bash
 # 默认且唯一的主线组件集（frontend, quoin, plinth, stele）
 deploy/images/build.sh
@@ -87,7 +89,7 @@ deploy/images/build.sh
 make image COMPONENT=quoin VERSION=v1.0.2
 ```
 
-默认构建四个应用镜像：frontend、quoin、plinth、stele。`QUOIN_IMAGE_NAMESPACE`、`QUOIN_IMAGE_TAG`、`QUOIN_IMAGE_VERSIONS` 与 `QUOIN_IMAGE_GOPROXY` 可按发布流程覆盖。`otp-test` 是仅用于一次性 e2e-real 拓扑的验证码接收 fixture 镜像（`deploy/images/otp-test/Dockerfile`，打包 `test/support/otpdelivery`），不属于任何生产组件集，只通过 `QUOIN_IMAGE_COMPONENTS=...,otp-test` 显式构建。
+默认构建四个应用镜像：frontend、quoin、plinth、stele。`QUOIN_IMAGE_NAMESPACE`、`QUOIN_IMAGE_TAG`、`QUOIN_IMAGE_VERSIONS` 与 `QUOIN_IMAGE_GOPROXY` 可按发布流程覆盖。`otp-test` 是仅用于一次性 e2e-real 拓扑的验证码接收 fixture 镜像（`deploy/images/otp-test/Dockerfile`，打包 `test/support/otpdelivery`），不属于任何生产组件集。
 
 ## 单组件热修升级
 

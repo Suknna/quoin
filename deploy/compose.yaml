@@ -176,7 +176,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: ${QUOIN_FRONTEND_IMAGE:-quoin/frontend:v0.1.0-dev}
+    image: ${QUOIN_FRONTEND_IMAGE:-quoin/frontend:v0.1.0}
     expose: ["8080"]
     read_only: true
     cap_drop: [ALL]
@@ -185,7 +185,7 @@ services:
     restart: unless-stopped
 
   quoin:
-    image: ${QUOIN_IMAGE:-quoin/quoin:v0.1.0-dev}
+    image: ${QUOIN_IMAGE:-quoin/quoin:v0.1.0}
     command: ["serve", "--config", "/etc/quoin/component.yaml"]
     user: "65532:65532"
     expose: ["8080", "8443", "9090"]
@@ -202,7 +202,7 @@ services:
     restart: unless-stopped
 
   plinth:
-    image: ${QUOIN_PLINTH_IMAGE:-quoin/plinth:v0.1.0-dev}
+    image: ${QUOIN_PLINTH_IMAGE:-quoin/plinth:v0.1.0}
     command: ["--config", "/etc/quoin/component.yaml"]
     user: "65532:65532"
     expose: ["9090"]
@@ -223,7 +223,7 @@ services:
     restart: unless-stopped
 
   stele:
-    image: ${QUOIN_STELE_IMAGE:-quoin/stele:v0.1.0-dev}
+    image: ${QUOIN_STELE_IMAGE:-quoin/stele:v0.1.0}
     command: ["--config", "/etc/quoin/component.yaml"]
     user: "65532:65532"
     expose: ["8080", "9090"]

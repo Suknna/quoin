@@ -10,7 +10,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 
 image_namespace="${QUOIN_IMAGE_NAMESPACE:-quoin}"
-default_tag="${QUOIN_IMAGE_TAG:-v0.1.0-dev}"
+default_tag="${QUOIN_IMAGE_TAG:-v0.1.0}"
 components="${QUOIN_IMAGE_COMPONENTS:-frontend,quoin,plinth,stele}"
 versions="${QUOIN_IMAGE_VERSIONS:-}"
 

@@ -112,7 +112,7 @@ mall-shop 的 mall-tiny（JVM）、MySQL、Redis 以 lab Prometheus 已抓取的
 
 ## 用户与账号
 
-管理 → **用户**：唯一内置管理员，初始化后以正式密码 + 二级验证登录。忘记密码或因素全部不可用时走离线恢复（`quoin admin recover --mode password|factors`，需停机与 attached TTY），见 [docs/deployment.md](deployment.md)；登录页没有自助恢复入口。
+管理 → **用户**：唯一内置管理员；初始化后可使用正式本地密码，日常登录推荐使用 OIDC（其二次验证由 IdP 管理）。忘记密码或无法使用 IdP 时走离线恢复（`quoin admin recover`，需停机与 attached TTY），见 [部署参考](deployment.md)；登录页没有自助恢复入口。
 
 ## 备份与保留
 

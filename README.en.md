@@ -14,7 +14,7 @@ The detailed operating guides are currently available in Chinese.
 - **AI SRE:** query connected Prometheus/Thanos metrics through conversation, use alerts and query results to assist troubleshooting, and retain the evidence used in the analysis.
 - **Metric observation:** validate and enable metric sources, then inspect scrape targets and their observation state.
 - **Inspections and reports:** run instant or range queries, organize inspections by source or business view, and customize check descriptions and report instructions. Collect fresh evidence or reanalyze existing evidence independently.
-- **Authentication and auditing:** administrator and operator roles, secondary verification, execution auditing, and backup management.
+- **Authentication and auditing:** administrator and operator roles, OIDC and local emergency login, execution auditing, and backup management.
 
 AI analysis requires a configured and enabled model provider. Quoin uses your existing monitoring data; it does not replace Prometheus or install business workloads and exporters.
 
@@ -56,15 +56,15 @@ The default deployment includes five services:
 
 **Kubernetes is the recommended deployment option.** The repository provides plain Kubernetes YAML manifests; Helm is not required.
 
-1. **Prepare your environment:** a Kubernetes cluster, persistent storage, an HTTPS hostname and certificate, and an SMTP or HTTPS delivery channel for login verification codes.
-2. **Build the images:** run `make images` from the repository root. Push the four application images to a registry accessible to the cluster, or load them onto the appropriate nodes.
+1. **Prepare your environment:** a Kubernetes cluster, persistent storage, and an HTTPS hostname and certificate.
+2. **Obtain images:** download the architecture-matched offline image package from [Releases](https://github.com/Suknna/quoin/releases), verify it, then run `docker load -i`; published GHCR images are an alternative.
 3. **Configure and deploy:** follow the [Kubernetes deployment guide](docs/getting-started-kubernetes.md) to prepare secrets, set the public address, image references, and storage configuration, and apply the manifests.
-4. **Initialize the administrator:** open the web interface and use `admin/admin` to enter initialization. Set a permanent password and verify a contact method. The default password stops working after initialization.
-5. **Connect monitoring:** register Plinth and follow the [user guide](docs/user-guide.md) to connect Prometheus/Thanos and Alertmanager. Configure a model provider before using AI analysis.
+4. **Initialize the administrator:** read the random initial password generated in the Quoin data volume, sign in as `admin`, and set a permanent password. The password expires after 24 hours if initialization is not completed.
+5. **Connect monitoring:** Plinth connects automatically with its deployment certificate. Follow the [user guide](docs/user-guide.md) to connect Prometheus/Thanos and Alertmanager. Configure a model provider before using AI analysis.
 
 If Kubernetes is not available in your environment, deploy with Docker Compose instead. See the [Docker Compose installation guide](docs/getting-started.md).
 
-> Restrict access before initialization so that others cannot use the public default credentials. Never commit keys, connection credentials, or verification codes to Git.
+> Restrict access before initialization. Never commit keys, connection credentials, or TLS certificates to Git.
 
 ## Build and development
 
@@ -78,7 +78,7 @@ make web-typecheck web-lint web-test web-build
 make images
 ```
 
-`make images` builds `frontend`, `quoin`, `plinth`, and `stele` without starting services. Default image names are `quoin/<component>:v0.1.0-dev`. See the [image build reference](docs/deployment.md#镜像构建) for tags and build options.
+`make images` builds `frontend`, `quoin`, `plinth`, and `stele` without starting services. Default image names are `quoin/<component>:v0.1.0`. See the [image build reference](docs/deployment.md#镜像构建) and [release guide](docs/releasing.md) for tags and offline packages.
 
 ## Documentation
 
@@ -91,9 +91,10 @@ make images
 | [Integration and inspection reference](docs/integration-inspection-guide.md) | Source observation, business views, and inspection semantics |
 | [Frontend development](docs/web-development.md) | Frontend development and testing |
 | [Plugin development](docs/plugin-development.md) | Built-in plugin contracts |
+| [Release guide](docs/releasing.md) | Versioning, automated releases, and offline images |
 
 ## Project status
 
-Quoin is under active development. Before production use, evaluate the chosen version and verify access control, certificate trust, verification delivery, and backup and recovery procedures. Assess AI-generated analysis against its underlying evidence.
+Quoin is under active development. Before production use, evaluate the chosen version and verify access control, certificate trust, and backup and recovery procedures. Assess AI-generated analysis against its underlying evidence.
 
 Report bugs and request features through [GitHub Issues](https://github.com/Suknna/quoin/issues). Include the version, reproduction steps, and redacted logs.

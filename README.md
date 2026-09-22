@@ -12,7 +12,7 @@ Quoin 连接现有的 Alertmanager、Prometheus 和 Thanos，将告警、指标�
 - **AI SRE**：通过对话查询已接入的 Prometheus/Thanos 指标，结合告警和查询结果辅助排障，并保留分析使用的证据。
 - **指标观测**：验证并启用指标来源，查看采集目标及其观测状态。
 - **巡检与报告**：执行即时或时间范围查询，按来源或业务视图组织巡检，自定义检查说明与报告要求。支持重新采证，也支持基于已有证据重新分析。
-- **认证与审计**：提供管理员与普通用户角色、二级验证、执行审计及备份管理。
+- **认证与审计**：提供管理员与普通用户角色、OIDC 登录、本地应急登录、执行审计及备份管理。
 
 AI 分析需要配置并启用模型提供方。Quoin 复用现有监控数据，不替代 Prometheus，也不负责安装业务服务或 exporter。
 
@@ -57,15 +57,15 @@ Alertmanager ──→ Stele ──→ Quoin ←──→ Plinth
 
 **推荐使用 Kubernetes 部署。** 仓库提供普通 Kubernetes YAML 清单，无需 Helm。
 
-1. **准备环境**：Kubernetes 集群、持久化存储、HTTPS 域名与证书，以及用于登录验证码的 SMTP 或 HTTPS 投递渠道。
-2. **构建镜像**：在仓库根目录执行 `make images`，将四个应用镜像推送到集群可访问的镜像仓库，或加载到相应节点。
+1. **准备环境**：Kubernetes 集群、持久化存储、HTTPS 域名与证书。
+2. **取得镜像**：从 [Releases](https://github.com/Suknna/quoin/releases) 下载与节点架构对应的离线镜像包，校验后用 `docker load -i` 导入；也可使用发布的 GHCR 镜像。
 3. **配置并部署**：按照 [Kubernetes 部署指南](docs/getting-started-kubernetes.md)准备 Secret，设置公开访问地址、镜像引用和存储配置，再应用清单。
-4. **初始化管理员**：打开 Web 页面，用 `admin/admin` 进入初始化，设置正式密码并验证联系方式。完成后默认密码失效。
-5. **接入监控**：注册 Plinth，按[使用手册](docs/user-guide.md)接入 Prometheus/Thanos 和 Alertmanager，开始查询与巡检；使用 AI 分析前配置模型提供方。
+4. **初始化管理员**：从 Quoin 数据卷读取首次启动生成的随机密码，以 `admin` 登录并设置正式密码。该密码 24 小时内未完成初始化即失效。
+5. **接入监控**：Plinth 会使用部署证书自动连接；按[使用手册](docs/user-guide.md)接入 Prometheus/Thanos 和 Alertmanager，开始查询与巡检；使用 AI 分析前配置模型提供方。
 
 如果环境不具备 Kubernetes，可采用 Docker Compose 部署，详见 [Docker Compose 安装指南](docs/getting-started.md)。
 
-> 首次初始化前，请限制部署入口的访问范围，防止公开默认凭据被他人使用。密钥、连接凭据和验证码不要提交到 Git。
+> 首次初始化前，请限制部署入口的访问范围。密钥、连接凭据和 TLS 证书不要提交到 Git。
 
 ## 构建与开发
 
@@ -79,7 +79,7 @@ make web-typecheck web-lint web-test web-build
 make images
 ```
 
-`make images` 构建 `frontend`、`quoin`、`plinth`、`stele`，不启动服务。默认镜像名为 `quoin/<component>:v0.1.0-dev`；镜像标签与构建参数见[镜像构建说明](docs/deployment.md#镜像构建)。
+`make images` 构建 `frontend`、`quoin`、`plinth`、`stele`，不启动服务。默认镜像名为 `quoin/<component>:v0.1.0`；镜像标签与构建参数见[镜像构建说明](docs/deployment.md#镜像构建)。发布、离线镜像和版本规则见[发布指南](docs/releasing.md)。
 
 ## 文档
 
@@ -92,9 +92,10 @@ make images
 | [接入与巡检参考](docs/integration-inspection-guide.md) | 来源观测、业务视图与巡检语义 |
 | [前端开发](docs/web-development.md) | 前端开发与测试 |
 | [插件开发](docs/plugin-development.md) | 内建插件开发契约 |
+| [发布指南](docs/releasing.md) | 版本规则、自动发布与离线镜像 |
 
 ## 项目状态
 
-Quoin 正在持续开发。生产使用前，请评估所用版本，并验证访问控制、证书信任、验证码投递与备份恢复流程。AI 生成的分析应结合原始证据判断。
+Quoin 正在持续开发。生产使用前，请评估所用版本，并验证访问控制、证书信任与备份恢复流程。AI 生成的分析应结合原始证据判断。
 
 问题和功能建议请提交至 [GitHub Issues](https://github.com/Suknna/quoin/issues)。报告问题时附上版本、复现步骤和脱敏日志。

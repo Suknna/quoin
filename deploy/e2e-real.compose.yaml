@@ -19,10 +19,10 @@ services:
         condition: service_started
 
   frontend:
-    image: ${QUOIN_FRONTEND_IMAGE:-quoin/frontend:v0.1.0-dev}
+    image: ${QUOIN_FRONTEND_IMAGE:-quoin/frontend:v0.1.0}
 
   quoin:
-    image: ${QUOIN_IMAGE:-quoin/quoin:v0.1.0-dev}
+    image: ${QUOIN_IMAGE:-quoin/quoin:v0.1.0}
     command: ["serve", "--config", "/etc/quoin/component.yaml"]
     volumes:
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/config/quoin.yaml:/etc/quoin/component.yaml:ro
@@ -34,7 +34,7 @@ services:
   # #102 uses the unmodified production Plinth adapter. The e2e driver
   # provisions its component credential files before the first boot.
   plinth:
-    image: ${QUOIN_PLINTH_IMAGE:-quoin/plinth:v0.1.0-dev}
+    image: ${QUOIN_PLINTH_IMAGE:-quoin/plinth:v0.1.0}
     command: ["--config", "/etc/quoin/component.yaml"]
     volumes:
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/config/plinth.yaml:/etc/quoin/component.yaml:ro
@@ -47,7 +47,7 @@ services:
       quoin:
         condition: service_started
   stele:
-    image: ${QUOIN_STELE_IMAGE:-quoin/stele:v0.1.0-dev}
+    image: ${QUOIN_STELE_IMAGE:-quoin/stele:v0.1.0}
     command: ["--config", "/etc/quoin/component.yaml"]
     volumes:
       - ${QUOIN_E2E_RUNTIME:?set by scripts/e2e-real/up.sh}/config/stele.yaml:/etc/quoin/component.yaml:ro
