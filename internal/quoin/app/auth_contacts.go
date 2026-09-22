@@ -45,11 +45,11 @@ func (application *apiServer) setUserContacts(ctx context.Context, input *struct
 	Body    struct {
 		ClientCommandID    string              `json:"clientCommandId" minLength:"8" maxLength:"128"`
 		ExpectedRowVersion int64               `json:"expectedRowVersion" minimum:"1"`
-		Contacts           []auth.ContactInput `json:"contacts" minItems:"1" maxItems:"2"`
+		Contacts           []auth.ContactInput `json:"contacts,omitempty" maxItems:"2"`
 	}
 },
 ) (*struct{ Body auth.User }, error) {
-	session, err := application.authenticateAdmin(ctx, input.Session, "配置用户验证渠道")
+	session, err := application.authenticateAdmin(ctx, input.Session, "配置用户联系方式")
 	if err != nil {
 		return nil, err
 	}

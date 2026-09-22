@@ -31,8 +31,8 @@ func TestAdminUserAuthorizationMatrix(t *testing.T) {
 	admin := scenario.sessionHeaders(adminSession)
 
 	// Operator: cannot access audit or user-management APIs. Contacts are
-	// mandatory at create — without an assigned target the user could never
-	// receive the second factor.
+	// display-only since ADR-0010: creation works with or without them, so
+	// the authorization matrix is exercised through the contactless shape.
 	scenario.createOperator(t, adminSession, "authz-create-01", "op1", "Operator One", "Operator one passphrase 2026!", "op1@example.test")
 	operator := scenario.sessionHeaders(scenario.initializeOperatorSession(t, "op1", "Operator one passphrase 2026!", "Operator working passphrase 2028!"))
 
@@ -134,7 +134,8 @@ func TestAdminUserCommandReplayOverHTTP(t *testing.T) {
 	scenario := newAdminSurface(t)
 	server := scenario.server
 	admin := scenario.sessionHeaders(scenario.login(t, "admin", scenario.adminPassword))
-	// Contacts are mandatory at create (second-factor delivery target).
+	// Contacts ride along as display-only data (ADR-0010); the replay
+	// semantics below are independent of their presence.
 	command := `{"clientCommandId":"replay-create-01","username":"op9","displayName":"Nine","role":"operator","password":"Operator nine passphrase 2026!","contacts":[{"channel":"email","target":"op9@example.test"}]}`
 	first := mustPost(t, server, admin, `/api/v1/admin/users`, command, http.StatusCreated)
 	var created struct {
@@ -180,4 +181,74 @@ func TestAdminUserCommandReplayOverHTTP(t *testing.T) {
 
 func itoa(value int64) string {
 	return strconv.FormatInt(value, 10)
+}
+
+// TestCreateUserContactsOptionalOverHTTP pins the ADR-0010 acceptance drift:
+// contacts are display-only and optional (0..2), creation succeeds with and
+// without them, and the structured email/sms targets stay validated.
+func TestCreateUserContactsOptionalOverHTTP(t *testing.T) {
+	scenario := newAdminSurface(t)
+	server := scenario.server
+	admin := scenario.sessionHeaders(scenario.login(t, "admin", scenario.adminPassword))
+
+	// Omitted entirely (the shape the real #96/#102 e2e drivers send): 201.
+	created := mustPost(t, server, admin, `/api/v1/admin/users`,
+		`{"clientCommandId":"contacts-optional-01","username":"opnoc","displayName":"No Contacts","role":"operator","password":"Operator noc passphrase 2026!"}`,
+		http.StatusCreated)
+	if !strings.Contains(created.body, `"username":"opnoc"`) {
+		t.Fatalf("contactless creation must return the created user, got %s", created.body)
+	}
+
+	// Explicit empty array carries the same meaning: 201.
+	mustPost(t, server, admin, `/api/v1/admin/users`,
+		`{"clientCommandId":"contacts-optional-02","username":"opempty","displayName":"Empty Set","role":"operator","password":"Operator empty passphrase 2026!","contacts":[]}`,
+		http.StatusCreated)
+
+	// With contacts (the OIDC-era informational address): still 201.
+	mustPost(t, server, admin, `/api/v1/admin/users`,
+		`{"clientCommandId":"contacts-optional-03","username":"opwith","displayName":"With Contacts","role":"operator","password":"Operator with passphrase 2026!","contacts":[{"channel":"email","target":"opwith@example.test"},{"channel":"sms","target":"+8613800000000"}]}`,
+		http.StatusCreated)
+
+	// Already-configured display contacts are preserved, never dropped by
+	// the optional-contacts change: the owner sees them masked.
+	opwithFormal := scenario.initializeOperatorSession(t, "opwith", "Operator with passphrase 2026!", "Operator with formal passphrase 2027!")
+	own := mustRequest(t, server, scenario.sessionHeaders(opwithFormal), `/api/v1/auth/contacts`, http.StatusOK)
+	if !strings.Contains(own, "o***@example.test") || !strings.Contains(own, `"channel":"sms"`) {
+		t.Fatalf("configured contacts must survive creation and display masked, got %s", own)
+	}
+	if strings.Contains(own, "opwith@example.test") || strings.Contains(own, "+8613800000000") {
+		t.Fatalf("raw targets must never leave the server, got %s", own)
+	}
+
+	// Duplicate channels stay a deterministic 422 (one contact per channel).
+	duplicate := mustPost(t, server, admin, `/api/v1/admin/users`,
+		`{"clientCommandId":"contacts-optional-04","username":"opdupchan","displayName":"Dup Channel","role":"operator","password":"Operator dupchan passphrase 2026!","contacts":[{"channel":"email","target":"a@example.test"},{"channel":"email","target":"b@example.test"}]}`,
+		http.StatusUnprocessableEntity)
+	if !strings.Contains(duplicate.body, "validation_failed") {
+		t.Fatalf("duplicate channel must fail validation with the frozen code, got %s", duplicate.body)
+	}
+
+	// Structured targets keep their server-side validation: a malformed
+	// email or phone number is a 422, never a silent store.
+	badEmail := mustPost(t, server, admin, `/api/v1/admin/users`,
+		`{"clientCommandId":"contacts-optional-05","username":"opbadmail","displayName":"Bad Mail","role":"operator","password":"Operator badmail passphrase 2026!","contacts":[{"channel":"email","target":"not-an-email"}]}`,
+		http.StatusUnprocessableEntity)
+	if !strings.Contains(badEmail.body, "validation_failed") {
+		t.Fatalf("malformed email must fail validation, got %s", badEmail.body)
+	}
+	badPhone := mustPost(t, server, admin, `/api/v1/admin/users`,
+		`{"clientCommandId":"contacts-optional-06","username":"opbadphone","displayName":"Bad Phone","role":"operator","password":"Operator badphone passphrase 2026!","contacts":[{"channel":"sms","target":"123"}]}`,
+		http.StatusUnprocessableEntity)
+	if !strings.Contains(badPhone.body, "validation_failed") {
+		t.Fatalf("malformed phone must fail validation, got %s", badPhone.body)
+	}
+
+	// The contactless operator follows the ADR-0010 lifecycle: the temporary
+	// password logs into a restricted session and the forced change unlocks
+	// the workbench — no code reception anywhere.
+	formal := scenario.initializeOperatorSession(t, "opnoc", "Operator noc passphrase 2026!", "Operator noc formal passphrase 2027!")
+	users := mustRequest(t, server, scenario.sessionHeaders(formal), `/api/v1/auth/sessions`, http.StatusOK)
+	if strings.Contains(users, "password_change_required") {
+		t.Fatalf("the contactless operator must reach a full session after the forced change, got %s", users)
+	}
 }

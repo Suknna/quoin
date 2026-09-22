@@ -3,11 +3,11 @@
 // problem+json message field.
 //
 // Unique-admin model (docs/authentication-design.md §1): creation always
-// produces an operator (the request omits `role`; the server forces it), the
-// admin assigns receive targets (email/sms), and admins can never be disabled
-// here. These are local DTOs: the generated contract does not yet carry
-// `initialized` or the contacts command, so the wire shapes live here until
-// main regenerates the shared types.
+// produces an operator (the request omits `role`; the server forces it), and
+// contacts are display-only and optional since the OTP retirement
+// (ADR-0010) — 0..2 informational targets the admin may attach. These are
+// local DTOs: the generated contract does not yet carry `initialized`, so
+// the wire shapes live here until main regenerates the shared types.
 
 export interface AdminContactInput {
   channel: 'email' | 'sms'
@@ -117,8 +117,8 @@ export async function updateUser(
   return (await response.json()) as AdminUser
 }
 
-/** Replaces the full target set (1..2, one per channel); a replaced target
- * loses its verification and invalidates challenges bound to the old one. */
+/** Replaces the full display-contact set (0..2, one per channel); an empty
+ * array retires every channel. Targets keep server-side validation. */
 export async function configureContacts(
   id: string,
   expectedRowVersion: number,

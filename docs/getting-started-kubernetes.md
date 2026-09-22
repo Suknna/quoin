@@ -10,7 +10,7 @@
 - 可供应 `ReadWriteOnce` 卷的 StorageClass。仓库默认申请 `quoin-data` 10Gi、`quoin-backups` 10Gi、`plinth-state` 10Gi；部署前按实际清单和容量调整。
 - 构建机有 Docker、Bash、OpenSSL，可访问基础镜像和构建依赖。集群节点可以拉取构建后的镜像。
 - 一个浏览器和 Alertmanager 都能访问的 HTTPS 地址，以及对应证书。
-- **可用的 TLS SMTP 或 HTTPS webhook 验证码投递渠道**。首次初始化和后续登录都需要真实收码，不能只配置一个无法收信的邮箱。
+- 管理员初始化不需要任何验证码投递渠道：登录是单步密码，平台内二级验证已随 ADR-0010 整体退役，不依赖 SMTP 或短信服务。
 
 本文选择独立 namespace **`quoin`**，示例通过 gateway NodePort **30443** 访问，Origin 为 **`https://quoin.example.com:30443`**。将示例域名换成自己的域名，并在浏览器端和告警发送方所在网络配置 DNS 指向可达的节点地址。证书 SAN 必须覆盖域名，证书不包含端口。
 
@@ -220,15 +220,13 @@ curl --fail --cacert private-ca/ca.crt \
 
 其他机器替换节点 IP。正式 CA 使用系统信任或对应 CA 文件。不推荐 `-k` 跳过验证。curl 的 `--resolve` 不会替浏览器或 Alertmanager 配置 DNS。
 
-## 5. 管理员初始化与验证码
+## 5. 管理员初始化
 
 1. 读取随机初始密码：`kubectl exec deploy/quoin -- cat /var/lib/quoin/data/initial-admin-password`；用 `admin` + 该密码登录，进入受限会话的强制改密页。
-2. 设置正式密码，配置 TLS SMTP 或 HTTPS webhook 并测试投递。
-3. 私网接收方配置最小 `allowPrivateCIDRs`，私有 CA 填入 `rootCaPem`。地址必须从 **Quoin Pod 内**可达，Pod 内的 `localhost` 不是节点。
-4. 登记管理员联系方式，输入实际收到的验证码并完成初始化。
-5. 使用正式密码和二级验证重新登录。
+2. 设置正式密码。初始化到此完成：不配置投递、不登记收码联系方式（ADR-0010 后联系方式仅作可选展示，可在「设置 → 个人资料」由管理员维护）。
+3. 完成后自动进入工作台；之后以正式密码单步登录。初始密码 24 小时内未完成改密即作废，届时用 `quoin admin recover` 重新生成（见[部署参考](deployment.md)）。
 
-没有投递渠道时应先准备渠道，不能绕过初始化。测试夹具只适合隔离演练，不是生产邮件/短信服务；Compose 指南中的 Docker 网络地址也不能直接照搬为 Kubernetes 地址。
+平台内不存在验证码或二级验证步骤；日常登录建议配置 OIDC（统一身份），本地密码通道保留为 IdP 故障时的应急维护入口。
 
 ## 6. Plinth 自动连接
 
@@ -263,7 +261,6 @@ kubectl -n quoin logs deployment/plinth --tail=100
 | Gateway 502 | quoin/stele/frontend 是否 Ready，内部 Service 是否有 endpoints |
 | Plinth 未 Ready | 核对客户端证书挂载、Runtime CA、Service 名 quoin 与 DNS；不扩大副本数 |
 | 证书或登录 Origin 错误 | 域名、端口、SAN、publicOrigin、stelePublicURL 是否一致 |
-| 收不到验证码 | Pod 出站网络、TLS、私网 CIDR 和投递渠道真实可用性 |
 | 配置修改未生效 | 多处配置/Secret 使用 subPath 挂载；应用更新后需受控重启相应 Deployment |
 
 部署配置以本地 `quoin.yaml` 副本为准；修改后重新 apply，并按变更对象执行 `kubectl rollout restart deployment/<名称>`。不要在运行中的实例重新生成根密钥。备份恢复和离线维护见[部署参考](deployment.md)。

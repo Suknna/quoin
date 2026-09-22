@@ -129,7 +129,7 @@ mall-shop 的 mall-tiny（JVM）、MySQL、Redis 以 lab Prometheus 已抓取的
 
 | 问题 | 处理 |
 | --- | --- |
-| 收不到验证码 / 登录二级验证失败 | 管理/初始化投递配置核对 TLS 模式、CA、私网 CIDR；投递失败不会降级为密码单因素登录 |
+| 忘记密码 / 被锁出 | 操作员联系管理员重置临时密码；管理员走离线 `quoin admin recover`（见部署参考）。平台无验证码或二级验证步骤（ADR-0010） |
 | 巡检 Run 有报告但没有"重新采证" | Run 未到终态时只能取消；终态后可重新采证（新 Run）或重新分析 |
 | 定时巡检没有模型报告 | 定时触发的报告需显式启用（涉及模型费用）；确认模型提供方已启用 |
 | 告警没有到达 | 核对 lab Alertmanager receiver URL（`publicOrigin` + `/stele/webhook/alertmanager`）与 bearer；轮换后旧 bearer 失效 |

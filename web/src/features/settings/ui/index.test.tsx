@@ -117,7 +117,7 @@ describe("settings module", () => {
 			screen.queryByRole("button", { name: "更换" }),
 		).not.toBeInTheDocument();
 		expect(
-			screen.getByText(/收码渠道由管理员在用户管理页维护/),
+			screen.getByText(/联系方式仅作展示，不用于验证或登录；由管理员在用户管理页维护/),
 		).toBeInTheDocument();
 		// The unified navigation highlights the active page.
 		expect(screen.getByRole("button", { name: "个人资料" })).toHaveAttribute(
@@ -142,7 +142,7 @@ describe("settings module", () => {
 		expect(
 			screen.queryByRole("button", { name: "更换" }),
 		).not.toBeInTheDocument();
-		expect(screen.getByText(/收码渠道由管理员在用户管理页维护/)).toBeInTheDocument();
+		expect(screen.getByText(/联系方式仅作展示，不用于验证或登录；由管理员在用户管理页维护/)).toBeInTheDocument();
 	});
 
 	it("validates confirmation, changes the password, refreshes authoritative user state, and clears secrets", async () => {

@@ -162,12 +162,14 @@ func (application *apiServer) listUsers(ctx context.Context, input *struct {
 func (application *apiServer) createUser(ctx context.Context, input *struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Body    struct {
-		ClientCommandID string              `json:"clientCommandId" minLength:"8" maxLength:"128"`
-		Username        string              `json:"username" maxLength:"200"`
-		DisplayName     string              `json:"displayName" maxLength:"200"`
-		Role            string              `json:"role,omitempty" enum:"operator"`
-		Password        string              `json:"password" minLength:"15" maxLength:"128"`
-		Contacts        []auth.ContactInput `json:"contacts" minItems:"1" maxItems:"2"`
+		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128"`
+		Username        string `json:"username" maxLength:"200"`
+		DisplayName     string `json:"displayName" maxLength:"200"`
+		Role            string `json:"role,omitempty" enum:"operator"`
+		Password        string `json:"password" minLength:"15" maxLength:"128"`
+		// Contacts are optional display-only targets (ADR-0010): 0..2, one
+		// per channel; the service still validates each structured target.
+		Contacts []auth.ContactInput `json:"contacts,omitempty" maxItems:"2"`
 	}
 }) (*struct {
 	Status int `header:"-"`

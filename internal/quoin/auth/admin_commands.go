@@ -25,9 +25,10 @@ type CreateUserInput struct {
 	DisplayName     string
 	Role            string
 	Password        string
-	// Contacts are the admin-assigned receive targets (at least one, at most
-	// one per channel). Operators cannot change them during initialization
-	// or login.
+	// Contacts are display-only since the OTP retirement (ADR-0010): the
+	// administrator may attach zero to two informational targets (at most
+	// one per channel). They never gate the operator lifecycle — only the
+	// temporary password and its forced change do.
 	Contacts []ContactInput
 }
 
@@ -159,10 +160,12 @@ func (service *Service) CreateUser(ctx context.Context, session Session, input C
 }
 
 // normalizeContactSet validates and deduplicates the admin-supplied contact
-// set (one or two entries, distinct channels, bounded targets).
+// set (zero to two display-only entries, distinct channels, bounded targets).
+// An empty set is the explicit "no display contacts" state; it retires every
+// existing channel under SetUserContacts' full-set semantics.
 func normalizeContactSet(contacts []ContactInput) ([]ContactInput, *execution.Rejection) {
-	if len(contacts) == 0 || len(contacts) > 2 {
-		return nil, conflictRejection(ConflictDetail{Code: "validation_failed", Detail: "必须为操作员指定一到两个收码联系方式"})
+	if len(contacts) > 2 {
+		return nil, conflictRejection(ConflictDetail{Code: "validation_failed", Detail: "联系方式最多配置两个（每渠道一个）"})
 	}
 	normalized := make([]ContactInput, 0, len(contacts))
 	seenChannels := map[string]bool{}

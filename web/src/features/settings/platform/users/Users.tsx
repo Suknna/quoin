@@ -3,6 +3,7 @@ import { notify } from "@/app/shared";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
 	Dialog,
 	DialogContent,
@@ -35,7 +36,7 @@ interface ContactDraft {
 
 const emptyContactDraft: ContactDraft = { email: "", sms: "" };
 
-/** Keeps the wire shape at 1..2 structured targets; a blank input drops its channel. */
+/** Keeps the wire shape at 0..2 structured targets; a blank input drops its channel. */
 function collectContacts(draft: ContactDraft): AdminContactInput[] {
 	const contacts: AdminContactInput[] = [];
 	if (draft.email.trim())
@@ -45,9 +46,9 @@ function collectContacts(draft: ContactDraft): AdminContactInput[] {
 	return contacts;
 }
 
-/** 唯一管理员模型（docs/authentication-design.md §1）：这里创建的账户一律是操作员，
- * 收码目标由管理员指定且操作员不能自行更换；管理员自身渠道只能经认证流程变更，
- * 因此管理员的行不提供停用或渠道编辑入口。 */
+/** 唯一管理员模型（docs/authentication-design.md §1）：这里创建的账户一律是操作员。
+ * 联系方式自 ADR-0010 起（OTP 退役）仅作展示、可不配置：新操作员只凭临时密码登录
+ * 并完成强制改密；管理员自身的渠道同样仅展示，可在「个人资料」查看。 */
 export function Users({ suspended }: { suspended: boolean }) {
 	const [items, setItems] = useState<AdminUser[]>([]);
 	const [loading, setLoading] = useState(true);
@@ -58,6 +59,7 @@ export function Users({ suspended }: { suspended: boolean }) {
 	const [busy, setBusy] = useState(false);
 	const [resetting, setResetting] = useState<AdminUser>();
 	const [configuring, setConfiguring] = useState<AdminUser>();
+	const [replaceContacts, setReplaceContacts] = useState(false);
 	const empty: {
 		username: string;
 		displayName: string;
@@ -123,7 +125,7 @@ export function Users({ suspended }: { suspended: boolean }) {
 		}
 	}
 	async function saveContacts() {
-		if (!configuring || busy) return;
+		if (!configuring || busy || !replaceContacts) return;
 		setBusy(true);
 		try {
 			await configureContacts(
@@ -131,12 +133,12 @@ export function Users({ suspended }: { suspended: boolean }) {
 				configuring.rowVersion,
 				configuredContacts,
 			);
-			notify.success("已保存验证渠道");
+			notify.success("已保存联系方式");
 			setConfiguring(undefined);
 			setContactDraft(emptyContactDraft);
 			await load();
 		} catch (reason) {
-			notify.error(reason, "暂时无法配置验证渠道。");
+			notify.error(reason, "暂时无法配置联系方式。");
 		} finally {
 			setBusy(false);
 		}
@@ -207,7 +209,9 @@ export function Users({ suspended }: { suspended: boolean }) {
 								{roleLabels[user.role]}
 							</Badge>
 						</TableCell>
-						<TableCell>{user.authSource === "oidc" ? "统一身份" : "本地"}</TableCell>
+						<TableCell>
+							{user.authSource === "oidc" ? "统一身份" : "本地"}
+						</TableCell>
 						<TableCell
 							className={user.enabled ? undefined : "text-muted-foreground"}
 						>
@@ -245,20 +249,20 @@ export function Users({ suspended }: { suspended: boolean }) {
 										{user.enabled ? "停用" : "启用"}
 									</ConfirmAction>
 								)}
-								{user.role === "operator" &&
-									user.authSource !== "oidc" && (
-										<Button
-											size="sm"
-											variant="outline"
-											disabled={suspended}
-											onClick={() => {
-												setConfiguring(user);
-												setContactDraft(emptyContactDraft);
-											}}
-										>
-											配置渠道
-										</Button>
-									)}
+								{user.role === "operator" && user.authSource !== "oidc" && (
+									<Button
+										size="sm"
+										variant="outline"
+										disabled={suspended}
+										onClick={() => {
+											setConfiguring(user);
+											setReplaceContacts(false);
+											setContactDraft(emptyContactDraft);
+										}}
+									>
+										配置渠道
+									</Button>
+								)}
 								{user.role === "admin" && (
 									<small className="inline-block max-w-60 whitespace-normal align-middle text-muted-foreground">
 										管理员联系方式仅作展示，可在「设置 → 个人资料」查看。
@@ -328,8 +332,7 @@ export function Users({ suspended }: { suspended: boolean }) {
 								busy ||
 								!draft.username ||
 								!draft.displayName ||
-								draft.password.length < 15 ||
-								createContacts.length === 0
+								draft.password.length < 15
 							}
 						>
 							{busy ? "创建中…" : "创建操作员"}
@@ -348,10 +351,10 @@ export function Users({ suspended }: { suspended: boolean }) {
 			>
 				<DialogContent>
 					<DialogHeader>
-						<DialogTitle>配置验证渠道</DialogTitle>
+						<DialogTitle>配置联系方式</DialogTitle>
 						<DialogDescription>
 							{configuring?.displayName}
-							：替换目标会清除该渠道的已验证状态并使绑定旧目标的验证码失效；留空表示移除该渠道，至少保留一个。
+							：此处是全量替换表单，不回显现有联系方式；空白不代表尚未配置。请填写所有需要保留的渠道，留空的渠道会被移除，全部留空将清除全部联系方式。联系方式仅作展示，不用于验证或登录。
 						</DialogDescription>
 					</DialogHeader>
 					<form
@@ -363,7 +366,7 @@ export function Users({ suspended }: { suspended: boolean }) {
 					>
 						<Field>
 							<FieldLabel htmlFor="contact-email-target">
-								邮箱收码目标
+								邮箱联系方式
 							</FieldLabel>
 							<Input
 								id="contact-email-target"
@@ -378,7 +381,7 @@ export function Users({ suspended }: { suspended: boolean }) {
 							/>
 						</Field>
 						<Field>
-							<FieldLabel htmlFor="contact-sms-target">短信收码目标</FieldLabel>
+							<FieldLabel htmlFor="contact-sms-target">短信联系方式</FieldLabel>
 							<Input
 								id="contact-sms-target"
 								type="tel"
@@ -391,9 +394,21 @@ export function Users({ suspended }: { suspended: boolean }) {
 								}
 							/>
 						</Field>
+						<Field orientation="horizontal">
+							<Checkbox
+								id="confirm-contact-replacement"
+								checked={replaceContacts}
+								onCheckedChange={(checked) =>
+									setReplaceContacts(checked === true)
+								}
+							/>
+							<FieldLabel htmlFor="confirm-contact-replacement">
+								我确认以本表单替换全部现有联系方式
+							</FieldLabel>
+						</Field>
 						<Button
 							type="submit"
-							disabled={suspended || busy || configuredContacts.length === 0}
+							disabled={suspended || busy || !replaceContacts}
 						>
 							{busy ? "保存中…" : "保存渠道"}
 						</Button>
@@ -496,7 +511,7 @@ function UserFields({
 				<FieldDescription>至少 15 个字符。</FieldDescription>
 			</Field>
 			<Field>
-				<FieldLabel htmlFor="create-email-target">邮箱收码目标</FieldLabel>
+				<FieldLabel htmlFor="create-email-target">邮箱联系方式</FieldLabel>
 				<Input
 					id="create-email-target"
 					type="email"
@@ -507,11 +522,11 @@ function UserFields({
 					}
 				/>
 				<FieldDescription>
-					邮箱与短信至少配置一种；操作员初始化时须验证其中之一，之后不能自行更换。
+					可选，仅作展示，不用于验证或登录；如填写须为合法邮箱。
 				</FieldDescription>
 			</Field>
 			<Field>
-				<FieldLabel htmlFor="create-sms-target">短信收码目标</FieldLabel>
+				<FieldLabel htmlFor="create-sms-target">短信联系方式</FieldLabel>
 				<Input
 					id="create-sms-target"
 					type="tel"

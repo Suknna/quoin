@@ -150,15 +150,21 @@ func TestAdminCreateUserReplayAndConflicts(t *testing.T) {
 	if _, _, err := fixture.service.CreateUser(ctx, fixture.admin, weak); !errors.Is(err, auth.ErrPasswordPolicy) {
 		t.Fatalf("weak password must fail policy, got %v", err)
 	}
-	// Missing contacts never create accounts.
+	// Contacts are display-only and optional since the OTP retirement
+	// (ADR-0010): a contactless operator is created uninitialized, and only
+	// the temporary password drives the forced change.
 	contactless := auth.CreateUserInput{
 		ClientCommandID: "cmd-0005", Digest: auth.DigestCommand("user.create", map[string]any{
 			"username": "op3", "displayName": "Three", "role": "operator",
 		}),
 		Username: "op3", DisplayName: "Three", Role: "operator", Password: "Operator three passphrase 2026!",
 	}
-	if _, _, err := fixture.service.CreateUser(ctx, fixture.admin, contactless); !errors.Is(err, auth.ErrValidation) {
-		t.Fatalf("operator creation without contacts must be rejected, got %v", err)
+	created, _, err := fixture.service.CreateUser(ctx, fixture.admin, contactless)
+	if err != nil {
+		t.Fatalf("operator creation without contacts must succeed, got %v", err)
+	}
+	if created.User == nil || created.User.Initialized || !created.User.PasswordChangeRequired {
+		t.Fatalf("contactless operator must start uninitialized with the forced password change: %+v", created.User)
 	}
 }
 

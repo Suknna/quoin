@@ -87,10 +87,10 @@ function ContactSection({ user }: { user: UserSummary }) {
 						<ContactRow key={contact.id} contact={contact} />
 					))}
 					{contacts?.length === 0 && (
-						<p className="text-sm text-muted-foreground">尚未配置收码渠道。</p>
+						<p className="text-sm text-muted-foreground">尚未配置联系方式。</p>
 					)}
 					<p className="text-sm text-muted-foreground">
-						收码渠道由管理员在用户管理页维护；如需变更请联系
+						联系方式仅作展示，不用于验证或登录；由管理员在用户管理页维护，如需变更请联系
 						{user.role === "admin" ? "其他管理员或在用户管理页操作" : "管理员"}。
 					</p>
 				</div>

@@ -11,7 +11,7 @@
 - Linux、Docker Engine、`docker compose`、OpenSSL、Bash；可以使用 sudo 设置非 root 容器的挂载权限。
 - 能访问镜像仓库及 Go/npm 依赖源。Dockerfile 内构建前端，不要求宿主安装 Node；源码测试另需 Go、Node、pnpm。
 - 一个你控制的主机名，例如 `quoin.lab.example.com`，在浏览器机器及 Alertmanager 所在网络均能解析到这台宿主。可使用内部 DNS；不要把示例域名当成真实公网服务。
-- **真实可用的验证码渠道**：TLS SMTP 或 HTTPS webhook。没有投递通道不能完成管理员初始化；仅本地演练可使用[附录中的 OTP fixture](#附录仅演练的验证码接收器)，仍须完成真实收码验证。
+- 管理员初始化不需要任何验证码投递渠道：登录是单步密码，平台内二级验证已随 ADR-0010 整体退役，不依赖 SMTP 或短信服务。
 - 首次初始化前限制入口到可信管理网络：初始管理员密码是首启随机生成并写入数据卷的 0600 文件（24 小时未改密作废），掌握部署层即掌握该文件。端口发布不是防火墙；不要向公网开放未初始化实例。
 
 本机 443 已被 k3s 使用，本文使用 **8443**。选定 Origin 为 `https://quoin.lab.example.com:8443`，证书、配置和浏览器地址必须一致。实际操作时将域名换成你的名字，并准备好 DNS；本机演练也可将其映射到 `192.168.1.200`，但仅改宿主 `/etc/hosts` 不会自动影响 Pod DNS。
@@ -145,10 +145,8 @@ curl --fail --cacert private-ca/ca.crt \
 
 1. 浏览器打开你配置的精确 Origin。
 2. 从数据卷读取随机初始密码（`docker compose exec quoin cat /var/lib/quoin/data/initial-admin-password`；K8s 用 `kubectl exec` 同理），用 `admin` + 该密码登录。首次登录进入受限会话。
-3. 设置正式密码；配置并**测试**验证码投递；登记并真实验证管理员联系方式。
+3. 设置正式密码。初始化到此完成：不配置投递、不登记收码联系方式（ADR-0010 后联系方式仅作可选展示，可在「设置 → 个人资料」由管理员维护）。
 4. 完成后初始密码永久失效（文件由下次启动清理），自动进入工作台；之后以正式密码单步登录。
-
-SMTP 必须使用 STARTTLS 或 implicit TLS；webhook 必须 HTTPS。私网接收方要显式允许其最小 CIDR，并提供其 CA，不能全局关闭 TLS 校验。初始化不能省略投递测试或收码验证；如果没有真实邮件服务，使用下方演练 fixture。
 
 ## 7. Plinth 自动连接
 
@@ -169,63 +167,12 @@ Plinth 无注册步骤：组件身份是部署时生成的客户端证书（CN=p
 | `permission denied` | secrets/quoin 为 65532、gateway 目录及证书为 1000；卷根目录可写 |
 | bootstrap 拒绝 | 核对同一数据卷与完整原秘密，不能重建数据库解决 |
 | 证书错误 | SAN、实际域名与 CA 信任是否一致；不要默认跳过验证 |
-| 登录卡在初始化 | 投递必须 TLS、私网 CIDR 允许且真实收码 |
+| 登录卡在初始化 | 受限会话只需设置正式密码；初始密码超 24 小时未改密则作废，走 `quoin admin recover` |
 | Plinth 未 Ready | 核对客户端证书挂载与 Runtime CA；Plinth 每 2 秒自动重连 |
 | 指标验证失败 | 从容器到上游的路由、DNS、端口及认证；查看实际 probe 结果 |
 
 暂时停止而不删除数据：`docker compose stop`；恢复：`docker compose up -d`。**不要 `down -v`**。离线管理员恢复、根密钥重新绑定、备份与恢复见[部署参考](deployment.md)，均不得绕过其停机/独占 SQLite 前提。
 
-## 附录：仅演练的验证码接收器
+## 附录：已移除的验证码接收器
 
-复用仓库已有 `otp-test`，不另写短信或邮件服务。它只在 Docker 内网提供 HTTPS/implicit-TLS SMTP，记录明文验证码到私有 JSONL，不属于生产组件。仍由你人工填写真实收到的码，没有免验证入口。
-
-在仓库根构建：
-
-```bash
-QUOIN_IMAGE_COMPONENTS=otp-test QUOIN_IMAGE_TAG=v0.1.0-dev bash deploy/images/build.sh
-```
-
-在新部署目录创建一次（已有 `fixture-otp` 时先检查，不重复生成覆盖）：
-
-```bash
-cd "$HOME/quoin-mall-user"
-umask 077
-mkdir -p fixture-otp/tls fixture-otp/records
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
-  -keyout fixture-otp/tls/tls.key -out fixture-otp/tls/tls.crt -days 30 \
-  -subj '/CN=otp-fixture' -addext 'subjectAltName=DNS:otp-fixture' \
-  -addext 'basicConstraints=critical,CA:TRUE'
-# 保留一份公开信任证书供界面填写，私钥只给 fixture 容器读取。
-cp fixture-otp/tls/tls.crt fixture-otp/trust.pem
-sudo chown -R 65532:65532 fixture-otp/tls fixture-otp/records
-sudo chmod 700 fixture-otp/tls fixture-otp/records
-sudo chmod 600 fixture-otp/tls/tls.key fixture-otp/tls/tls.crt
-umask 022
-
-docker run -d --name quoin-mall-user-otp --restart unless-stopped \
-  --user 65532:65532 --network quoin-mall-user_default --network-alias otp-fixture \
-  -v "$PWD/fixture-otp/tls:/tls:ro" \
-  -v "$PWD/fixture-otp/records:/run/otp" \
-  quoin/otp-test:v0.1.0-dev \
-  --tls-cert=/tls/tls.crt --tls-key=/tls/tls.key \
-  --https-listen=0.0.0.0:8445 --smtp-listen=0.0.0.0:8587 \
-  --record=/run/otp/deliveries.jsonl
-
-docker network inspect quoin-mall-user_default \
-  --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
-```
-
-没有 `-p`，不把验证码接收器公开到宿主。初始化投递配置选择 HTTPS webhook：
-
-- URL：**`https://otp-fixture:8445/otp`**（现有 fixture 接受 POST 路径，约定用 `/otp`）。
-- CA：`fixture-otp/trust.pem` 的完整 PEM 内容。
-- 允许私网 CIDR：上面 inspect 返回的**本项目实际 Docker 子网**，不要填 `0.0.0.0/0`。
-- 选择邮箱联系方式，例如你用于演练的邮箱地址；这里不会给真实外部邮箱发信，验证码写到 fixture。
-
-点击投递测试或发送验证码后，在本地终端读取最新记录：
-
-```bash
-docker exec quoin-mall-user-otp sh -c 'tail -n 1 /run/otp/deliveries.jsonl'
-```
-
-查看 JSON 的 `code` 并在界面提交。别把含验证码的终端输出发到工单或 Git。**后续每次登录仍依赖它**：在配置并验证新的正式投递通道前，不要停止 fixture。演练结束且不再依赖时可 `docker stop quoin-mall-user-otp`，保留秘密与数据直到确认可安全清理。
+平台内 OTP 二级验证已随 ADR-0010 整体退役：登录为单步密码（本地应急通道）或 OIDC，管理员初始化只设置正式密码，不再配置投递、不再登记收码联系方式。旧版手册在此引导部署 `otp-test` 验证码接收 fixture——该镜像仍保留在仓库中仅供一次性 e2e-real 拓扑使用（见[部署参考](deployment.md)），生产部署不需要也不应运行它。

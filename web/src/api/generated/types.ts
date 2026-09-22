@@ -247,8 +247,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * 当前用户的收码联系方式（掩码投影）
-         * @description 任何已完成初始化的登录用户可读自己的收码渠道列表；明文目标永不出服务器，更换仍走 contact-change（管理员自助）或管理员代改（操作员）。
+         * 当前用户的展示联系方式（掩码投影）
+         * @description 任何已完成初始化的登录用户可读自己的联系方式列表；明文目标永不出服务器。ADR-0010 后联系方式仅作展示，变更一律由管理员在用户管理页执行。
          */
         get: operations["listOwnContacts"];
         put?: never;
@@ -397,10 +397,10 @@ export interface paths {
         };
         get?: never;
         /**
-         * 整体替换某用户的收码渠道（Admin）
-         * @description 只接受 Operator：管理员的收码渠道必须经其自身的验证流程更换（422）。
-         *     目标变化即清除验证、递增渠道版本并立即撤销该用户全部 Session 与未决
-         *     认证流程；当没有任何已验证渠道剩余时用户回到未初始化并需重走初始化。
+         * 整体替换某用户的展示联系方式（Admin）
+         * @description ADR-0010 后联系方式仅作展示：整体替换期望渠道集合（0..2，每渠道至多
+         *     一个），变更不清除初始化、不撤销 Session、不触发任何验证；缺省的
+         *     渠道被停用（enabled=0）而非删除，历史数据保留。
          */
         put: operations["setUserContacts"];
         post?: never;
@@ -2344,8 +2344,8 @@ export interface components {
             role?: "operator";
             /** @description 15–128 Unicode 字符；NFC 后执行嵌入 blocklist 与上下文比较。 */
             password: string;
-            /** @description 创建时必须登记一到两个收码渠道；未配置可验证渠道的用户无法完成初始化。 */
-            contacts: components["schemas"]["ContactInput"][];
+            /** @description 可选的展示联系方式（0..2，每渠道至多一个）；ADR-0010 后不参与任何验证，新操作员只凭临时密码进入强制改密。 */
+            contacts?: components["schemas"]["ContactInput"][];
         };
         /**
          * @description 至少提供一个变更字段（anyOf 强制）；expectedRowVersion 取当前
@@ -2375,7 +2375,7 @@ export interface components {
             id: components["schemas"]["LocatorId"];
             /** @enum {string} */
             channel: "email" | "sms";
-            /** @description 服务端掩码后的收码目标（如 a***@example.com / ****1234）；明文永不出服务器。 */
+            /** @description 服务端掩码后的展示目标（如 a***@example.com / ****1234）；明文永不出服务器。 */
             maskedTarget: string;
             verified: boolean;
         };
@@ -2384,16 +2384,17 @@ export interface components {
             completed: boolean;
             user?: components["schemas"]["UserSummary"];
         };
-        /** @description 一条管理员指派的收码目标（auth.ContactInput）。 */
+        /** @description 一条管理员指派的展示联系方式（auth.ContactInput）；ADR-0010 后不参与任何验证。 */
         ContactInput: {
             /** @enum {string} */
             channel: "email" | "sms";
             /** @description email 需恰好一个 @ 且 3–320 字符；sms 为可选 + 前缀的 5–20 位数字。 */
             target: string;
         };
-        /** @description 供给完整的期望渠道集合（每渠道至多一个，重复渠道为 422）。 */
+        /** @description 供给完整的期望渠道集合（0..2，每渠道至多一个，重复渠道为 422）；ADR-0010 后仅作展示。 */
         SetUserContactsRequest: components["schemas"]["CommandBase"] & components["schemas"]["ExpectedRowVersion"] & {
-            contacts: components["schemas"]["ContactInput"][];
+            /** @description 期望的完整展示联系方式集合（0..2，每渠道至多一个）；省略或空数组停用全部渠道。 */
+            contacts?: components["schemas"]["ContactInput"][];
         };
         ErrorModel: {
             /** @description 稳定机器错误码（HTTP-ERROR-002）。 */
