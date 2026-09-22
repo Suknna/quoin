@@ -2989,6 +2989,11 @@ export interface components {
             /** @description 仅 knowledge_version 修订 Candidate 在确认前后携带，指向将追加版本的 Reusable Knowledge。 */
             targetKnowledgeId?: components["schemas"]["LocatorId"];
             confirmedKnowledgeId?: components["schemas"]["LocatorId"];
+            /**
+             * @description 导入批次候选的批次围栏投影：终态批次（取消/完成）的候选不能再编辑或确认（与写路径同一围栏）；非批次候选不携带。
+             * @enum {string}
+             */
+            batchState?: "Processing" | "AwaitingConfirmation" | "Failed" | "Completed" | "Cancelled";
         };
         CandidateDetail: components["schemas"]["CandidateSummary"] & {
             /** @description 模型原始建议的不可变结构化投影；用户只编辑 draft 字段。 */

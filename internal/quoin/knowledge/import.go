@@ -447,7 +447,7 @@ func scanBatchDetailOn(ctx context.Context, q audit.Reader, batchID int64) (Impo
 	if err != nil {
 		return ImportBatchDetail{}, err
 	}
-	rows, err := q.QueryContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c WHERE c.import_batch_id=? ORDER BY c.id`, batchID)
+	rows, err := q.QueryContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c`+candidateSourceJoin+` WHERE c.import_batch_id=? ORDER BY c.id`, batchID)
 	if err != nil {
 		return ImportBatchDetail{}, err
 	}

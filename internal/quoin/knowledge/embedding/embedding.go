@@ -66,7 +66,8 @@ var ErrBusy = errors.New("embedding generation already has an active attempt")
 // Service owns the embedding projection lifecycle. 写路径（扫掠、查询创建、
 // 结果应用与密封）全部经共享执行器 Execute 以自动审计运行：扫掠是显式的
 // 系统/调度根操作（无关联上下文时建立自己的操作窗口，绝不伪装用户）；结果
-// 应用恢复持久化 Attempt 的关联；查询创建属于发起搜索的用户会话。读路径走
+// 应用恢复持久化 Attempt 的关联；查询创建按发起方归属（HTTP 搜索的用户
+// 会话，或运行时后台续跑的系统主体——见 CreateQueryAttempt）。读路径走
 // 窄化的 audit.Reader（多读一致性经只读快照）。服务不持有原始数据库句柄。
 type Service struct {
 	reader audit.Reader
@@ -123,7 +124,6 @@ func NewServiceWithReader(reader audit.Reader, writer *sql.DB, runner *execution
 		return op
 	}
 	system := func(ctx context.Context, _ *execution.Tx) error { return authorizeSystem(ctx) }
-	user := func(ctx context.Context, tx *execution.Tx) error { return auth.VerifyExecutionSession(ctx, tx, "") }
 	both := func(ctx context.Context, tx *execution.Tx) error {
 		meta, err := execution.Require(ctx)
 		if err != nil {
@@ -138,7 +138,11 @@ func NewServiceWithReader(reader audit.Reader, writer *sql.DB, runner *execution
 	service.sweep = register(opSweep, "embedding_generation", both)
 	service.resultTake = register(opResultTake, "embedding_generation", system)
 	service.resultSeal = register(opResultSeal, "embedding_generation", system)
-	service.queryCreate = register(opQueryCreate, "embedding_generation", user)
+	// 查询创建允许用户会话（HTTP 搜索）与系统主体（运行时后台续跑，如
+	// quoin_routed 工具 knowledge_search 的编排上下文）两种发起方：后台
+	// 续跑没有可复核的用户会话，按系统主体归属（CreateQueryAttempt 为裸
+	// context 补挂系统窗口；sweep 对系统创建的查询 Attempt 照常收敛孤儿）。
+	service.queryCreate = register(opQueryCreate, "embedding_generation", both)
 	return service, nil
 }
 

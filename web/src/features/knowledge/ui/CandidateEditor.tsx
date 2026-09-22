@@ -26,6 +26,7 @@ import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import {
 	api,
 	type CandidateDetail,
+	batchStateLabels,
 	CommandConflictError,
 	candidateSourceLabels,
 	candidateStateLabels,
@@ -89,7 +90,13 @@ export function CandidateEditor({
 			/>
 		);
 	const current = candidate;
-	const editable = current.state === "AwaitingConfirmation";
+	// 批次围栏与写路径同一事实：终态批次（取消/完成）的候选即使仍处于
+	// 待确认状态也已冻结，不能再编辑或确认——只读查看并明确说明原因。
+	const frozenByBatch =
+		current.state === "AwaitingConfirmation" &&
+		current.batchState !== undefined &&
+		current.batchState !== "AwaitingConfirmation";
+	const editable = current.state === "AwaitingConfirmation" && !frozenByBatch;
 
 	/** 适用范围是可选 JSON 对象;非空且非法时阻止保存,不静默丢弃用户输入。 */
 	function parseScope(): Record<string, unknown> | undefined | null {
@@ -178,6 +185,13 @@ export function CandidateEditor({
 			{error && (
 				<Alert variant="destructive">
 					<AlertDescription>{error}</AlertDescription>
+				</Alert>
+			)}
+			{frozenByBatch && current.batchState && (
+				<Alert>
+					<AlertDescription>
+						{`所属导入批次${batchStateLabels[current.batchState]},此候选已冻结,仅可查看,不能再编辑或确认。`}
+					</AlertDescription>
 				</Alert>
 			)}
 			<Field>

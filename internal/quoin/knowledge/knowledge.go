@@ -161,6 +161,9 @@ type CandidateSummary struct {
 	DraftScope           json.RawMessage `json:"draftScope,omitempty"`
 	TargetKnowledgeID    string          `json:"targetKnowledgeId,omitempty"`
 	ConfirmedKnowledgeID string          `json:"confirmedKnowledgeId,omitempty"`
+	// BatchState 是导入批次候选的批次围栏投影：终态批次（取消/完成）的
+	// 候选不能再编辑或确认——与写路径的 SQL 谓词同一事实。非批次候选为空。
+	BatchState string `json:"batchState,omitempty"`
 }
 
 // CandidateDetail adds the immutable original model suggestion.

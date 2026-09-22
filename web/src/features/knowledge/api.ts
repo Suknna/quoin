@@ -21,6 +21,13 @@ export type CandidateSourceType =
 	| "source_material"
 	| "knowledge_version";
 
+export type ImportBatchState =
+	| "Processing"
+	| "AwaitingConfirmation"
+	| "Failed"
+	| "Completed"
+	| "Cancelled";
+
 export interface CandidateSummary {
 	id: string;
 	sourceType: CandidateSourceType;
@@ -34,6 +41,8 @@ export interface CandidateSummary {
 	draftScope?: Record<string, unknown>;
 	targetKnowledgeId?: string;
 	confirmedKnowledgeId?: string;
+	/** 导入批次候选的批次围栏投影：终态批次（取消/完成）的候选已冻结，不能再编辑或确认。 */
+	batchState?: ImportBatchState;
 }
 
 export interface CandidateSuggestionSource {
@@ -127,12 +136,7 @@ export interface KnowledgeVersionDetail {
 
 export interface ImportBatchSummary {
 	id: string;
-	state:
-		| "Processing"
-		| "AwaitingConfirmation"
-		| "Failed"
-		| "Completed"
-		| "Cancelled";
+	state: ImportBatchState;
 	rowVersion: number;
 	generation: number;
 	createdAt: string;

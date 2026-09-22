@@ -6170,6 +6170,10 @@ components:
           description: 仅 knowledge_version 修订 Candidate 在确认前后携带，指向将追加版本的 Reusable Knowledge。
         confirmedKnowledgeId:
           $ref: '#/components/schemas/LocatorId'
+        batchState:
+          type: string
+          enum: [Processing, AwaitingConfirmation, Failed, Completed, Cancelled]
+          description: 导入批次候选的批次围栏投影：终态批次（取消/完成）的候选不能再编辑或确认（与写路径同一围栏）；非批次候选不携带。
     CandidateDetail:
       allOf:
         - $ref: '#/components/schemas/CandidateSummary'

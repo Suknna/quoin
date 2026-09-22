@@ -166,7 +166,7 @@ func (service *Service) editConflict(ctx context.Context, q queryer, candidateID
 
 // GetCandidateSummary reads one candidate outside a transaction.
 func (service *Service) GetCandidateSummary(ctx context.Context, candidateID int64) (CandidateSummary, error) {
-	row := service.reader.QueryRowContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c WHERE c.id=?`, candidateID)
+	row := service.reader.QueryRowContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c`+candidateSourceJoin+` WHERE c.id=?`, candidateID)
 	summary, err := readCandidateRow(row.Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CandidateSummary{}, ErrNotFound

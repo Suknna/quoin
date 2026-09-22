@@ -53,11 +53,17 @@ type ListResult[T any] struct {
 const candidateColumns = `
 	c.id, c.source_type, c.source_id, c.state, c.row_version, c.generation,
 	c.draft_revision, COALESCE(c.draft_title,''), COALESCE(c.draft_body,''), c.draft_scope_json,
-	COALESCE(c.target_knowledge_id,0), COALESCE(c.confirmed_knowledge_id,0)`
+	COALESCE(c.target_knowledge_id,0), COALESCE(c.confirmed_knowledge_id,0), b.state`
+
+// candidateSourceJoin 是候选投影的批次 fence 投影：导入批次候选携带其批次
+// 当前状态，终态批次（取消/完成）的候选不可编辑或确认——写路径的同一围栏
+// （EditDraft/Confirm/Exclude 的 SQL 谓词）在读模型上保持可见，UI 才能诚实
+// 呈现“已冻结”。非批次候选（诊断来源/知识修订）LEFT JOIN 得 NULL。
+const candidateSourceJoin = ` LEFT JOIN knowledge_import_batches b ON b.id=c.import_batch_id`
 
 // scanCandidateOn reads one candidate row through the given connection.
 func scanCandidateOn(ctx context.Context, q queryer, candidateID int64) (CandidateSummary, error) {
-	row := q.QueryRowContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c WHERE c.id=?`, candidateID)
+	row := q.QueryRowContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c`+candidateSourceJoin+` WHERE c.id=?`, candidateID)
 	return readCandidateRow(row.Scan)
 }
 
@@ -67,7 +73,7 @@ func (service *Service) candidateSummaryOn(ctx context.Context, q queryer, candi
 
 // candidateBySource returns any-state candidate of one immutable source.
 func (service *Service) candidateBySource(ctx context.Context, q queryer, sourceType string, sourceID int64) (CandidateSummary, bool, error) {
-	row := q.QueryRowContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c WHERE c.source_type=? AND c.source_id=? ORDER BY c.id LIMIT 1`, sourceType, sourceID)
+	row := q.QueryRowContext(ctx, `SELECT `+candidateColumns+` FROM knowledge_candidates c`+candidateSourceJoin+` WHERE c.source_type=? AND c.source_id=? ORDER BY c.id LIMIT 1`, sourceType, sourceID)
 	summary, err := readCandidateRow(row.Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CandidateSummary{}, false, nil
@@ -82,8 +88,8 @@ func (service *Service) candidateBySource(ctx context.Context, q queryer, source
 func readCandidateRow(scan func(dest ...any) error) (CandidateSummary, error) {
 	var id, sourceID, rowVersion, generation, draftRevision, targetKnowledge, confirmedKnowledge int64
 	var sourceType, state, draftTitle, draftBody string
-	var draftScope sql.NullString
-	if err := scan(&id, &sourceType, &sourceID, &state, &rowVersion, &generation, &draftRevision, &draftTitle, &draftBody, &draftScope, &targetKnowledge, &confirmedKnowledge); err != nil {
+	var draftScope, batchState sql.NullString
+	if err := scan(&id, &sourceType, &sourceID, &state, &rowVersion, &generation, &draftRevision, &draftTitle, &draftBody, &draftScope, &targetKnowledge, &confirmedKnowledge, &batchState); err != nil {
 		return CandidateSummary{}, err
 	}
 	summary := CandidateSummary{
@@ -96,6 +102,9 @@ func readCandidateRow(scan func(dest ...any) error) (CandidateSummary, error) {
 		DraftRevision: draftRevision,
 		DraftTitle:    draftTitle,
 		DraftBody:     draftBody,
+	}
+	if batchState.Valid {
+		summary.BatchState = batchState.String
 	}
 	if draftScope.Valid && draftScope.String != "" {
 		summary.DraftScope = json.RawMessage(draftScope.String)
@@ -114,13 +123,13 @@ func readCandidateRow(scan func(dest ...any) error) (CandidateSummary, error) {
 func (service *Service) GetCandidate(ctx context.Context, candidateID int64) (CandidateDetail, error) {
 	row := service.reader.QueryRowContext(ctx, `
 		SELECT `+candidateColumns+`, c.original_suggestion_json
-		FROM knowledge_candidates c WHERE c.id=?`, candidateID)
+		FROM knowledge_candidates c`+candidateSourceJoin+` WHERE c.id=?`, candidateID)
 	var summary CandidateSummary
 	var id, sourceID, targetKnowledge, confirmedKnowledge int64
-	var draftScope sql.NullString
+	var draftScope, batchState sql.NullString
 	var original []byte
 	if err := row.Scan(&id, &summary.SourceType, &sourceID, &summary.State, &summary.RowVersion, &summary.Generation,
-		&summary.DraftRevision, &summary.DraftTitle, &summary.DraftBody, &draftScope, &targetKnowledge, &confirmedKnowledge, &original); err != nil {
+		&summary.DraftRevision, &summary.DraftTitle, &summary.DraftBody, &draftScope, &targetKnowledge, &confirmedKnowledge, &batchState, &original); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return CandidateDetail{}, ErrNotFound
 		}
@@ -136,6 +145,9 @@ func (service *Service) GetCandidate(ctx context.Context, candidateID int64) (Ca
 	}
 	if draftScope.Valid && draftScope.String != "" {
 		summary.DraftScope = json.RawMessage(draftScope.String)
+	}
+	if batchState.Valid {
+		summary.BatchState = batchState.String
 	}
 	return CandidateDetail{CandidateSummary: summary, OriginalSuggestion: append([]byte(nil), original...)}, nil
 }
@@ -168,7 +180,7 @@ func (service *Service) ListCandidates(ctx context.Context, filter ListFilter, a
 		where += " AND ((c.state='AwaitingConfirmation') < ? OR ((c.state='AwaitingConfirmation') = ? AND (c.created_at < ? OR (c.created_at = ? AND c.id < ?))))"
 		args = append(args, awaiting, awaiting, after.CreatedAt, after.CreatedAt, after.ID)
 	}
-	query := `SELECT ` + candidateColumns + `, c.created_at, (c.state='AwaitingConfirmation') FROM knowledge_candidates c WHERE 1=1` + where + ` ORDER BY ` + orderExpr + ` LIMIT ?`
+	query := `SELECT ` + candidateColumns + `, c.created_at, (c.state='AwaitingConfirmation') FROM knowledge_candidates c` + candidateSourceJoin + ` WHERE 1=1` + where + ` ORDER BY ` + orderExpr + ` LIMIT ?`
 	args = append(args, limit+1)
 	rows, err := service.reader.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -185,9 +197,9 @@ func (service *Service) ListCandidates(ctx context.Context, filter ListFilter, a
 	for rows.Next() {
 		var id, sourceID, rowVersion, generation, draftRevision, targetKnowledge, confirmedKnowledge int64
 		var sourceType, state, draftTitle, draftBody, createdAt string
-		var draftScope sql.NullString
+		var draftScope, batchState sql.NullString
 		var awaiting int
-		if err := rows.Scan(&id, &sourceType, &sourceID, &state, &rowVersion, &generation, &draftRevision, &draftTitle, &draftBody, &draftScope, &targetKnowledge, &confirmedKnowledge, &createdAt, &awaiting); err != nil {
+		if err := rows.Scan(&id, &sourceType, &sourceID, &state, &rowVersion, &generation, &draftRevision, &draftTitle, &draftBody, &draftScope, &targetKnowledge, &confirmedKnowledge, &batchState, &createdAt, &awaiting); err != nil {
 			return nil, nil, err
 		}
 		summary := CandidateSummary{
@@ -197,6 +209,9 @@ func (service *Service) ListCandidates(ctx context.Context, filter ListFilter, a
 		}
 		if draftScope.Valid && draftScope.String != "" {
 			summary.DraftScope = json.RawMessage(draftScope.String)
+		}
+		if batchState.Valid {
+			summary.BatchState = batchState.String
 		}
 		if targetKnowledge != 0 {
 			summary.TargetKnowledgeID = fmt.Sprintf("%d", targetKnowledge)

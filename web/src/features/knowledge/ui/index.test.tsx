@@ -513,6 +513,39 @@ describe("candidate editor", () => {
 		await waitFor(() => expect(api.exclude).toHaveBeenCalledWith("c1", 1));
 		expect(navigate).toHaveBeenCalledWith("/knowledge/candidates");
 	});
+
+	// 2026-09-21 实机验收:取消批次的候选在状态模型中仍是待确认,但批次围栏
+	// 已冻结它——编辑层必须呈现只读并说明原因,而不是渲染注定 409 的操作。
+	it("renders a cancelled-batch awaiting candidate read-only with the batch freeze explained", async () => {
+		const { api } = await import("@/features/knowledge/api");
+		vi.mocked(api.getCandidate).mockResolvedValue(
+			candidateDetail({
+				id: "c6",
+				draftTitle: "验收临时文档",
+				batchState: "Cancelled",
+			}),
+		);
+		renderView({ route: "/knowledge/candidates/c6" });
+		expect(await screen.findByText("查看知识候选")).toBeInTheDocument();
+		expect(
+			screen.getByText(/所属导入批次已取消,此候选已冻结/),
+		).toBeInTheDocument();
+		// 冻结候选不渲染任何写操作,输入只读。
+		expect(
+			screen.queryByRole("button", { name: "保存草稿" }),
+		).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: "确认知识" }),
+		).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: "排除" }),
+		).not.toBeInTheDocument();
+		expect(screen.getByLabelText("标题")).toBeDisabled();
+		expect(screen.getByLabelText("正文")).toBeDisabled();
+		// 原始建议仍可对照阅读。
+		fireEvent.click(screen.getByRole("button", { name: "查看 AI 原始建议" }));
+		expect(await screen.findByText("原始正文")).toBeInTheDocument();
+	});
 });
 
 describe("import batches", () => {
@@ -572,6 +605,45 @@ describe("import batches", () => {
 				{ candidateId: "c1", expectedRevision: 1 },
 			]),
 		);
+	});
+
+	// 2026-09-21 实机验收:取消批次后待确认候选仍以可勾选/可编辑呈现。
+	// 批次终态是围栏:候选不预选、复选框禁用、入口降为只读"查看",并说明原因。
+	it("freezes awaiting candidates of a cancelled batch instead of offering doomed operations", async () => {
+		const { api } = await import("@/features/knowledge/api");
+		vi.mocked(api.getImportBatch).mockResolvedValue({
+			...batch("b2", "Cancelled"),
+			candidates: [
+				{ ...candidate("c6", "验收临时一"), batchState: "Cancelled" },
+				{ ...candidate("c7", "验收临时二"), batchState: "Cancelled" },
+			],
+		} as ImportBatchDetail);
+		renderView({ route: "/knowledge/imports/b2" });
+		expect(await screen.findByText("验收临时一")).toBeInTheDocument();
+		// 已取消:勾选框全部禁用且不预选。
+		const first = screen.getByRole("checkbox", {
+			name: "选择 验收临时一",
+		}) as HTMLInputElement;
+		const second = screen.getByRole("checkbox", {
+			name: "选择 验收临时二",
+		}) as HTMLInputElement;
+		expect(first).toBeDisabled();
+		expect(second).toBeDisabled();
+		expect(first).not.toBeChecked();
+		expect(second).not.toBeChecked();
+		// 不可能操作不再出现:无整批确认/取消入口。
+		expect(
+			screen.queryByRole("button", { name: /确认所选/ }),
+		).not.toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: "取消批次" }),
+		).not.toBeInTheDocument();
+		// 入口如实降为只读导航并解释冻结原因。
+		expect(screen.getByText(/批次已取消:本批候选已冻结/)).toBeInTheDocument();
+		expect(screen.getAllByRole("button", { name: "查看" }).length).toBe(2);
+		expect(
+			screen.queryByRole("button", { name: "编辑" }),
+		).not.toBeInTheDocument();
 	});
 
 	it("stops import polling while suspended", async () => {

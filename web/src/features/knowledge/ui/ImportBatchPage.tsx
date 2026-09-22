@@ -107,12 +107,18 @@ export function ImportBatchDetailPage({
 		try {
 			const value = await api.getImportBatch(batchId);
 			setBatch(value);
+			// 预选只在批次仍可确认时成立；终态批次（取消/完成）的候选已冻结，
+			// 不预选也不允许勾选——与取消提示"本批候选将不能再编辑或确认"一致。
 			setSelected(
-				new Set(
-					value.candidates
-						.filter((candidate) => candidate.state === "AwaitingConfirmation")
-						.map((candidate) => candidate.id),
-				),
+				value.state === "AwaitingConfirmation"
+					? new Set(
+							value.candidates
+								.filter(
+									(candidate) => candidate.state === "AwaitingConfirmation",
+								)
+								.map((candidate) => candidate.id),
+						)
+					: new Set(),
 			);
 		} catch (reason) {
 			setError(messageOf(reason, "暂时无法完成操作,请重试。"));
@@ -206,6 +212,13 @@ export function ImportBatchDetailPage({
 					</AlertDescription>
 				</Alert>
 			)}
+			{batch.state === "Cancelled" && batch.candidates.length > 0 && (
+				<Alert>
+					<AlertDescription>
+						批次已取消:本批候选已冻结,不能再编辑或确认;点击"查看"仍可阅读草稿原文。
+					</AlertDescription>
+				</Alert>
+			)}
 			{error && (
 				<Alert variant="destructive">
 					<AlertDescription>{error}</AlertDescription>
@@ -214,13 +227,17 @@ export function ImportBatchDetailPage({
 			{batch.candidates.length > 0 ? (
 				<ul className="divide-y overflow-hidden rounded-lg border">
 					{batch.candidates.map((candidate) => (
-						<CandidateRow
-							key={candidate.id}
-							candidate={candidate}
-							checked={selected.has(candidate.id)}
-							disabled={
-								candidate.state !== "AwaitingConfirmation" || busy || suspended
-							}
+							<CandidateRow
+								key={candidate.id}
+								candidate={candidate}
+								checked={selected.has(candidate.id)}
+								disabled={
+									candidate.state !== "AwaitingConfirmation" ||
+									!actionable ||
+									busy ||
+									suspended
+								}
+								editable={actionable}
 							onToggle={(checked) =>
 								setSelected((current) => {
 									const next = new Set(current);
@@ -318,12 +335,15 @@ function CandidateRow({
 	candidate,
 	checked,
 	disabled,
+	editable,
 	onToggle,
 	onEdit,
 }: {
 	candidate: CandidateSummary;
 	checked: boolean;
 	disabled: boolean;
+	// editable=false（终态批次）时入口是只读导航:标签如实说"查看"。
+	editable: boolean;
 	onToggle: (checked: boolean) => void;
 	onEdit: () => void;
 }) {
@@ -345,7 +365,7 @@ function CandidateRow({
 				</p>
 			</div>
 			<Button variant="ghost" size="sm" onClick={onEdit}>
-				编辑
+				{editable ? "编辑" : "查看"}
 			</Button>
 		</li>
 	);

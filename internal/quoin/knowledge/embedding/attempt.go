@@ -103,8 +103,27 @@ func (service *Service) insertRebuildAttempt(ctx context.Context, tx *execution.
 
 // CreateQueryAttempt persists one Queued query-embedding attempt against the
 // serving generation. It fails with ErrBusy when the generation scope
-// already holds an active attempt.
+// already holds an active attempt. 查询创建按发起方归属：HTTP 搜索请求带着
+// 用户会话元数据进来（queryCreate 在事务内复核会话）；运行时后台续跑
+// （quoin_routed 工具 knowledge_search 的编排上下文）没有用户会话——它是
+// attempt 的异步延续，可能晚于任何 HTTP 会话存活——因此裸 context 在这里
+// 得到一个显式的系统主体后台窗口（与 Sweep 同一纪律），绝不伪装用户。
 func (service *Service) CreateQueryAttempt(ctx context.Context, query string) (int64, GenerationView, error) {
+	if _, ok := execution.FromContext(ctx); !ok {
+		correlationID, err := execution.NewCorrelationID()
+		if err != nil {
+			return 0, GenerationView{}, err
+		}
+		enriched, err := execution.WithMetadata(ctx, execution.Metadata{
+			CorrelationID: correlationID,
+			Actor:         execution.Principal{Kind: execution.PrincipalSystem},
+			Source:        execution.Source{Kind: execution.SourceTask, RequestID: "embedding-query"},
+		})
+		if err != nil {
+			return 0, GenerationView{}, err
+		}
+		ctx = enriched
+	}
 	generation, ok, err := service.CurrentGeneration(ctx)
 	if err != nil || !ok {
 		return 0, generation, err
