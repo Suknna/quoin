@@ -7,7 +7,7 @@ component: quoin
 enabledPlugins: [alertmanager, prometheus, thanos]
 publicOrigin: https://quoin.example.com
 # Exact public Alertmanager receiver; never an internal container endpoint.
-stelePublicURL: https://quoin.example.com/stele/alerts
+stelePublicURL: https://quoin.example.com/stele/webhook/alertmanager
 dataDirectory: /var/lib/quoin/data
 backupDirectory: /var/lib/quoin/backups
 rootKeyFile: /run/quoin-secrets/root-key

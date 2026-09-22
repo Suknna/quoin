@@ -71,12 +71,12 @@ make e2e-real QUOIN_E2E_RUNTIME="$PWD/.artifacts/my-e2e" QUOIN_E2E_PORT=9444 QUO
 ## #96 intake path
 
 1. Sign in with the generated Admin identity and complete the forced password change. When using the automated acceptance command afterwards, use the generated `admin.password` as the final password; the runner reads that value from the private credential file.
-2. Open **运维中心** → **接入管理** (`/integrations`) → **Alertmanager**. Create a unique source key, and copy the receiver YAML and Bearer credential before dismissing the one-time dialog. The public receiver URL must match this deployment (by default `https://localhost:8444/stele/alerts`), not a container address. Other catalog platforms are unavailable in this slice; model providers remain in administrator settings.
+2. Open **运维中心** → **接入管理** (`/integrations`) → **Alertmanager**. Create a unique source key, and copy the receiver YAML and Bearer credential before dismissing the one-time dialog. The public receiver URL must match this deployment (by default `https://localhost:8444/stele/webhook/alertmanager`), not a container address. Other catalog platforms are unavailable in this slice; model providers remain in administrator settings.
 3. Send the following controlled fixture through the public receiver. Run it from the repository root in Bash; the hidden prompt keeps the source credential out of command history and process arguments. For a custom runtime, change `runtime` and `receiver` to match the chosen deployment. Do not use the Admin password as the Bearer credential.
 
    ```bash
    runtime="$PWD/.artifacts/e2e-102"
-   receiver='https://localhost:8444/stele/alerts'
+   receiver='https://localhost:8444/stele/webhook/alertmanager'
    read -rsp 'One-time source Bearer credential: ' source_token; printf '\n'
    printf 'header = "Authorization: Bearer %s"\n' "$source_token" |
      curl --config - --cacert "$runtime/gateway/tls/tls.crt" \

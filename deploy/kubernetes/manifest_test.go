@@ -97,6 +97,15 @@ func TestManifestDeliversBrowserFreeStackBehindOneTLSGateway(t *testing.T) {
 		t.Fatalf("default enabledPlugins must be exactly %v, got %v", want, got)
 	}
 
+	// The alertmanager plugin is useless without a public receiver URL: Quoin
+	// answers receiver-config with 503 when stelePublicURL is unset, and the
+	// web editor refuses to create any source. The gateway already routes
+	// /stele/* to stele:8080, so the manifest must always carry the endpoint.
+	stelePublicURL, _ := quoinComponent["stelePublicURL"].(string)
+	if !strings.HasPrefix(stelePublicURL, "https://") || !strings.HasSuffix(stelePublicURL, "/stele/webhook/alertmanager") {
+		t.Fatalf("quoin-config must set stelePublicURL to the public https receiver endpoint (…/stele/webhook/alertmanager), got %q", stelePublicURL)
+	}
+
 	gateway := configMaps["gateway-config"]["data"].(map[string]any)["caddy.json"].(string)
 	apiRoute := strings.Index(gateway, `"/api/*"`)
 	steleRoute := strings.Index(gateway, `"/stele/*"`)

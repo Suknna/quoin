@@ -52,7 +52,7 @@ func newSSEStack(t *testing.T) *sseStack {
 		if err := application.SetReadOnlyReader(s.reader); err != nil {
 			t.Fatal(err)
 		}
-		application.SetStelePublicURL("https://alerts.example.com/stele/alerts")
+		application.SetStelePublicURL("https://alerts.example.com/stele/webhook/alertmanager")
 		handler, err := app.NewHandler(application, s.publicOrigin)
 		if err != nil {
 			t.Fatal(err)

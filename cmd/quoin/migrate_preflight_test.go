@@ -102,7 +102,7 @@ func seedFreshDeployment(t *testing.T, schemaDigest string, withMaintenance bool
 	configPath := filepath.Join(root, "component.yaml")
 	config := fmt.Sprintf(`component: quoin
 publicOrigin: https://quoin.test
-stelePublicURL: https://quoin.test/stele/alerts
+stelePublicURL: https://quoin.test/stele/webhook/alertmanager
 dataDirectory: %s
 backupDirectory: %s
 rootKeyFile: %s

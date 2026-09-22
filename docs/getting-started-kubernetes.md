@@ -78,7 +78,7 @@ SH
 
    ```yaml
    publicOrigin: https://quoin.example.com:30443
-   stelePublicURL: https://quoin.example.com:30443/stele/alerts
+   stelePublicURL: https://quoin.example.com:30443/stele/webhook/alertmanager
    ```
 
    保持其他字段，特别是数据路径与 Secret 文件路径。`enabledPlugins` 为 `[alertmanager, prometheus, thanos]`。

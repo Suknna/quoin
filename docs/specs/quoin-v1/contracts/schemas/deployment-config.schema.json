@@ -33,8 +33,8 @@
     },
     "stelePublicURL": {
       "type": "string",
-      "description": "Alertmanager 到 Stele 的部署公开 receiver URL；必须是 HTTPS 且固定为 /stele/alerts，不从请求 Host 推导。",
-      "pattern": "^https://(?:\\[[0-9A-Fa-f:]+\\]|[^/?#:\\s]+)(?::[0-9]{1,5})?/stele/alerts$",
+      "description": "Alertmanager 到 Stele 的部署公开 receiver URL；必须是 HTTPS 且固定为 /stele/webhook/alertmanager，不从请求 Host 推导。",
+      "pattern": "^https://(?:\\[[0-9A-Fa-f:]+\\]|[^/?#:\\s]+)(?::[0-9]{1,5})?/stele/webhook/alertmanager$",
       "maxLength": 512
     },
     "quoinRuntimeEndpoint": {

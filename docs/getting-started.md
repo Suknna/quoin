@@ -65,7 +65,7 @@ fi
 ```yaml
 enabledPlugins: [alertmanager, prometheus, thanos]
 publicOrigin: https://quoin.lab.example.com:8443
-stelePublicURL: https://quoin.lab.example.com:8443/stele/alerts
+stelePublicURL: https://quoin.lab.example.com:8443/stele/webhook/alertmanager
 ```
 
 `plinth.yaml` 和 `stele.yaml` 中 `quoinRuntimeEndpoint: https://quoin:8443` 保持不变。内部 Runtime TLS 与浏览器入口 TLS 是两套证书。

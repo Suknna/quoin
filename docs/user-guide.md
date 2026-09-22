@@ -28,7 +28,7 @@ mall-shop 建议：先建 Prometheus 接入（`baseUrl` 用宿主 LAN IP/`host-g
 
 ## 告警与告警源
 
-- **创建告警源**：运维中心 → 接入管理 → Alertmanager。填写**来源键**（如 `mall-shop-alertmanager`，不要放凭据或内部地址）；系统生成面向部署公共入口（`publicOrigin`）的 Alertmanager receiver 配置，**bearer 令牌只显示一次**——立即复制并配置进 lab Alertmanager 的 `alertmanager.yml`（receiver + route）。告警经 gateway 回传到 `/stele/alerts`，由 Stele 接收。
+- **创建告警源**：运维中心 → 接入管理 → Alertmanager。填写**来源键**（如 `mall-shop-alertmanager`，不要放凭据或内部地址）；系统生成面向部署公共入口（`publicOrigin`）的 Alertmanager receiver 配置，**bearer 令牌只显示一次**——立即复制并配置进 lab Alertmanager 的 `alertmanager.yml`（receiver + route）。告警经 gateway 回传到 `/stele/webhook/alertmanager`，由 Stele 接收。
 - 该 bearer 是**告警源凭据**，与 Stele→Quoin 的内部 `stele-service-token` 无关；支持轮换（最多同时两代，旧代按轮换语义退休）。
 - **告警列表**：运维中心 → 告警列表查看接收到的告警与状态流转；AI SRE 会对告警做初步分析（产生 Evidence 与模型调用）。
 
@@ -132,5 +132,5 @@ mall-shop 的 mall-tiny（JVM）、MySQL、Redis 以 lab Prometheus 已抓取的
 | 收不到验证码 / 登录二级验证失败 | 管理/初始化投递配置核对 TLS 模式、CA、私网 CIDR；投递失败不会降级为密码单因素登录 |
 | 巡检 Run 有报告但没有"重新采证" | Run 未到终态时只能取消；终态后可重新采证（新 Run）或重新分析 |
 | 定时巡检没有模型报告 | 定时触发的报告需显式启用（涉及模型费用）；确认模型提供方已启用 |
-| 告警没有到达 | 核对 lab Alertmanager receiver URL（`publicOrigin` + `/stele/alerts`）与 bearer；轮换后旧 bearer 失效 |
+| 告警没有到达 | 核对 lab Alertmanager receiver URL（`publicOrigin` + `/stele/webhook/alertmanager`）与 bearer；轮换后旧 bearer 失效 |
 | 观测资源为空 | 确认 lab Prometheus 真的抓到了对应 exporter；手动"刷新观测"后查看 Run 结果 |

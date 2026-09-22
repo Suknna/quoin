@@ -6825,7 +6825,7 @@ components:
         publicReceiverUrl:
           type: string
           format: uri
-          pattern: '^https://.*/stele/alerts$'
+          pattern: '^https://.*/stele/webhook/alertmanager$'
           description: 由部署配置冻结的 Stele 公共 URL，不接受请求 Host 推导。
     AlertSourceDetail:
       allOf:

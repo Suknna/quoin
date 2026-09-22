@@ -82,7 +82,7 @@ chmod 700 "${runtime_root}/secrets"
 cat >"${runtime_root}/config/quoin.yaml" <<EOF
 component: quoin
 publicOrigin: ${origin}
-stelePublicURL: ${origin}/stele/alerts
+stelePublicURL: ${origin}/stele/webhook/alertmanager
 dataDirectory: /var/lib/quoin/data
 backupDirectory: /var/lib/quoin/backups
 rootKeyFile: /run/quoin-secrets/root-key

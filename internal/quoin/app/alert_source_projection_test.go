@@ -67,7 +67,7 @@ func TestAlertSourceManagementProjection(t *testing.T) {
 	if err := json.NewDecoder(receiver.Body).Decode(&receiverBody); err != nil {
 		t.Fatal(err)
 	}
-	if receiverBody.PublicReceiverURL != "https://alerts.example.com/stele/alerts" {
+	if receiverBody.PublicReceiverURL != "https://alerts.example.com/stele/webhook/alertmanager" {
 		t.Fatalf("receiver URL=%q", receiverBody.PublicReceiverURL)
 	}
 

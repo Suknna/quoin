@@ -84,7 +84,7 @@ test("Admin creates Alertmanager, Stele persists its alert, and Operator is rest
 		.locator("input[readonly]")
 		.nth(1)
 		.inputValue();
-	expect(receiverURL).toBe(`${baseURL}/stele/alerts`);
+	expect(receiverURL).toBe(`${baseURL}/stele/webhook/alertmanager`);
 	expect(bearer).not.toEqual("");
 	// Stele refreshes the authoritative credential snapshot asynchronously after
 	// Quoin commits its source command. Wait for its production cache instead of

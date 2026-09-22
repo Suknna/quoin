@@ -213,7 +213,7 @@ func mustHandler(t *testing.T, service *auth.Service, db *sql.DB, reader executi
 	}
 	// Tests use a fixed deployment value rather than httptest's Host so receiver
 	// configuration cannot accidentally begin trusting request-controlled hosts.
-	application.SetStelePublicURL("https://alerts.example.com/stele/alerts")
+	application.SetStelePublicURL("https://alerts.example.com/stele/webhook/alertmanager")
 	handler, err := app.NewHandler(application, origin)
 	if err != nil {
 		t.Fatal(err)

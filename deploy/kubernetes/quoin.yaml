@@ -63,6 +63,12 @@ data:
     # IDs fail startup; IDs must match the well-known IDs in internal/plugins.
     enabledPlugins: [alertmanager, prometheus, thanos]
     publicOrigin: https://quoin.example.com
+    # Exact public Alertmanager receiver; never an internal service endpoint.
+    # Without it receiver-config answers 503 and the web editor cannot create
+    # any alert source. Stele serves POST /webhook/{source-kind} and the
+    # gateway strips the /stele prefix, so the frozen suffix is
+    # /stele/webhook/alertmanager (the config schema pins this exact shape).
+    stelePublicURL: https://quoin.example.com/stele/webhook/alertmanager
     dataDirectory: /var/lib/quoin/data
     backupDirectory: /var/lib/quoin/backups
     rootKeyFile: /run/quoin-secrets/root-key
