@@ -167,14 +167,21 @@ export async function probeMetricsInstance(
 						: detail.state === "Interrupted"
 							? "interrupted"
 							: "failed";
-			if (outcome !== "passed")
+			if (outcome !== "passed") {
+				// The typed result carries the concrete failure diagnostic (e.g. the
+				// gateway error string); the attempt's terminationReason is only the
+				// coarse terminal class, so prefer the typed details when present.
+				const typed = await probeResultDetails(name, attempt.id);
 				return {
 					outcome,
 					finishedAt: detail.endedAt,
-					details: detail.terminationReason
-						? { reason: detail.terminationReason }
-						: undefined,
+					details:
+						typed ??
+						(detail.terminationReason
+							? { reason: detail.terminationReason }
+							: undefined),
 				};
+			}
 			const results = await request<{
 				items?: { id: string; attemptId: string; outcome: string }[];
 			}>(
@@ -195,6 +202,31 @@ export async function probeMetricsInstance(
 		await new Promise((resolve) => setTimeout(resolve, 500));
 	}
 	throw new Error("验证仍在进行，可稍后在接入详情查看结果；本次等待结束不代表验证失败。");
+}
+
+/** Reads the typed probe-result details of one attempt; undefined when absent. */
+async function probeResultDetails(
+	name: string,
+	attemptId: string,
+): Promise<Record<string, unknown> | undefined> {
+	const results = await request<{
+		items?: { attemptId: string; details?: Record<string, unknown> }[];
+	}>(`/api/v1/connections/${encodeURIComponent(name)}/probe-results?limit=50`);
+	const matched = results.items?.find(
+		(result) => result.attemptId === attemptId,
+	);
+	return matched?.details;
+}
+
+/** Extracts the human-facing diagnostic line from typed probe details, if any. */
+export function probeDiagnostic(
+	details: Record<string, unknown> | undefined,
+): string | undefined {
+	const error = details?.error;
+	if (typeof error === "string" && error.trim()) return error.trim();
+	const reason = details?.reason;
+	if (typeof reason === "string" && reason.trim()) return reason.trim();
+	return undefined;
 }
 
 /** Reuses the shared connection command wrappers, preserving row-version fencing. */

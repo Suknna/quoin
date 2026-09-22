@@ -98,6 +98,7 @@ import {
 	listMetricsInstances,
 	type MetricsConnectionInput,
 	type MetricsInstance,
+	probeDiagnostic,
 	probeMetricsInstance,
 	retireAlertmanagerCredential,
 	revealAlertmanagerCredential,
@@ -263,7 +264,11 @@ function IntegrationCatalog({ navigate }: { navigate: (to: string) => void }) {
 function Instances({
 	navigate,
 	suspended,
-}: Pick<WorkspaceModuleProps, "navigate" | "suspended">) {
+	revision,
+}: Pick<WorkspaceModuleProps, "navigate" | "suspended"> & {
+		/** 抽屉内启用/停用/轮换成功后递增，让背后的列表行重新拉取，避免徽标停留在旧状态。 */
+		revision: number;
+	}) {
 	const [items, setItems] = useState<
 		(AlertmanagerInstance | MetricsInstance)[]
 	>([]);
@@ -305,7 +310,7 @@ function Instances({
 	};
 	useEffect(() => {
 		void loadFirstPage();
-	}, [loadFirstPage]);
+	}, [loadFirstPage, revision]);
 	const filtered = items.filter((item) =>
 		item.displayName
 			.toLocaleLowerCase()
@@ -578,10 +583,12 @@ function MetricsForm({
 			const probe = await probeMetricsInstance(instance.displayName);
 			if (!probe) throw new Error("未收到连通性验证结果。");
 			setResult(probe);
-			if (probe.outcome !== "passed" || !probe.id)
+			if (probe.outcome !== "passed" || !probe.id) {
+				const diagnostic = probeDiagnostic(probe.details);
 				throw new Error(
-					"连通性验证未通过。已创建的接入保持停用；修正服务端或网络后可重新验证，不会再次创建。",
+					`连通性验证未通过${diagnostic ? `：${diagnostic}` : ""}。已创建的接入保持停用；修正服务端或网络后可重新验证，不会再次创建。`,
 				);
+			}
 			const enabled = await enableMetricsInstance(instance, probe.id);
 			setCreated(enabled);
 			notify.success("接入已启用");
@@ -594,6 +601,7 @@ function MetricsForm({
 			setBearerToken("");
 		}
 	}
+	const resultDiagnostic = probeDiagnostic(result?.details);
 	return (
 		<section className="flex flex-col gap-6">
 			<div>
@@ -633,6 +641,11 @@ function MetricsForm({
 										{result.finishedAt
 											? `完成时间：${formatTime(result.finishedAt)}`
 											: "可在修正后重新验证。"}
+										{resultDiagnostic && (
+											<span className="block break-all">
+												诊断：{resultDiagnostic}
+											</span>
+										)}
 									</AlertDescription>
 								</Alert>
 							)}
@@ -805,10 +818,13 @@ function MetricsDetail({
 	id,
 	navigate,
 	suspended,
+	onMutated,
 }: {
 	id: string;
 	navigate: (to: string) => void;
 	suspended: boolean;
+	/** 状态变更（启用/停用）成功后通知宿主失效实例列表。 */
+	onMutated?: () => void;
 }) {
 	const [item, setItem] = useState<MetricsInstance>();
 	const [loading, setLoading] = useState(true);
@@ -835,10 +851,12 @@ function MetricsDetail({
 		try {
 			if (kind === "probe" || kind === "enable") {
 				const result = await probeMetricsInstance(item.displayName);
-				if (!result || result.outcome !== "passed" || !result.id)
+				if (!result || result.outcome !== "passed" || !result.id) {
+					const diagnostic = probeDiagnostic(result?.details);
 					throw new Error(
-						"连通性验证未通过或未生成可启用的验证结果，接入保持当前状态。",
+						`连通性验证未通过${diagnostic ? `：${diagnostic}` : ""}或未生成可启用的验证结果，接入保持当前状态。`,
 					);
+				}
 				if (kind === "enable")
 					setItem(await enableMetricsInstance(item, result.id));
 			} else setItem(await disableMetricsInstance(item));
@@ -846,6 +864,8 @@ function MetricsDetail({
 			else if (kind === "disable") notify.success("接入已停用");
 			else notify.success("验证通过");
 			await load();
+			// 抽屉背后的列表行还带着旧徽标；探测不改变状态，无需失效。
+			if (kind === "enable" || kind === "disable") onMutated?.();
 		} catch (reason) {
 			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
@@ -1205,6 +1225,9 @@ function AlertmanagerForm({
 	const [key, setKey] = useState("");
 	const [createdKey, setCreatedKey] = useState("");
 	const [saving, setSaving] = useState(false);
+	// 创建失败必须以常驻内联错误留在表单上：一次性凭据只有这一条取得途径，
+	// 只靠自动消失的 toast 会让失败表现得像“什么都没发生”。
+	const [error, setError] = useState("");
 	const [secret, setSecret] = useState("");
 	const [receiverUrl, setReceiverUrl] = useState("");
 	const revealEpoch = useRef(0);
@@ -1220,6 +1243,7 @@ function AlertmanagerForm({
 		if (suspended) return;
 		const epoch = revealEpoch.current;
 		setSaving(true);
+		setError("");
 		try {
 			const endpoint = await fetchPublicReceiverEndpoint();
 			const sourceKey = key.trim();
@@ -1236,7 +1260,7 @@ function AlertmanagerForm({
 				setKey("");
 			}
 		} catch (reason) {
-			notify.error(reason, "暂时无法完成操作，请重试。");
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
 			setSaving(false);
 		}
@@ -1262,6 +1286,12 @@ function AlertmanagerForm({
 						</CardHeader>
 						<CardContent>
 							<FieldGroup>
+								{error && (
+									<Alert variant="destructive">
+										<AlertTitle>无法创建告警源</AlertTitle>
+										<AlertDescription>{error}</AlertDescription>
+									</Alert>
+								)}
 								<Field>
 									<FieldLabel htmlFor="alertmanager-key">来源键</FieldLabel>
 									<Input
@@ -1442,9 +1472,12 @@ const credentialStateLabels: Record<string, string> = {
 function AlertmanagerDetail({
 	id,
 	suspended,
+	onMutated,
 }: {
 	id: string;
 	suspended: boolean;
+	/** 状态变更（停用/轮换）成功后通知宿主失效实例列表。 */
+	onMutated?: () => void;
 }) {
 	const [source, setSource] = useState<AlertmanagerInstance>();
 	const [credentials, setCredentials] = useState<AlertmanagerCredential[]>([]);
@@ -1495,6 +1528,7 @@ function AlertmanagerDetail({
 				setReceiverUrl(endpoint.publicReceiverUrl);
 			}
 			await load();
+			onMutated?.();
 		} catch (reason) {
 			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
@@ -1508,6 +1542,7 @@ function AlertmanagerDetail({
 			await disableAlertmanagerInstance(source);
 			notify.success("已停用");
 			await load();
+			onMutated?.();
 		} catch (reason) {
 			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
@@ -1702,6 +1737,11 @@ function AlertmanagerDetail({
 export function useIntegrationsModule(
 	props: WorkspaceModuleProps,
 ): WorkspaceModuleView {
+	// 实例列表与右侧详情抽屉是两棵独立数据流：抽屉里的启用/停用/轮换只刷新
+	// 抽屉自身，列表行徽标会停留在旧状态（关抽屉也不重挂载）。用递增的
+	// revision 让详情在变更成功后主动失效父列表。
+	const [instancesRevision, setInstancesRevision] = useState(0);
+	const bumpInstances = () => setInstancesRevision((value) => value + 1);
 	if (props.user.role !== "admin")
 		return {
 			title: "接入管理",
@@ -1738,12 +1778,14 @@ export function useIntegrationsModule(
 							<AlertmanagerDetail
 								id={decodeURIComponent(sheetInstance)}
 								suspended={props.suspended}
+								onMutated={bumpInstances}
 							/>
 						) : (
 							<MetricsDetail
 								id={decodeURIComponent(sheetInstance)}
 								navigate={props.navigate}
 								suspended={props.suspended}
+								onMutated={bumpInstances}
 							/>
 						)}
 					</div>
@@ -1772,7 +1814,11 @@ export function useIntegrationsModule(
 			)
 		) : platform === "instances" ? (
 			<>
-				<Instances navigate={props.navigate} suspended={props.suspended} />
+				<Instances
+					navigate={props.navigate}
+					suspended={props.suspended}
+					revision={instancesRevision}
+				/>
 				{instanceSheet}
 			</>
 		) : platform ? (

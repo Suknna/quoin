@@ -354,6 +354,77 @@ describe("integration workbench", () => {
 		).toHaveLength(1);
 	});
 
+	it("surfaces the typed probe failure diagnostic instead of a bare failure", async () => {
+		const diagnostic = "查询请求失败: credential unavailable: connection material denied";
+		const fetchMock = vi
+			.spyOn(globalThis, "fetch")
+			.mockImplementation(async (input) => {
+				const url = String(input);
+				if (url.endsWith("/api/v1/connections"))
+					return Response.json(
+						{
+							id: "43",
+							name: "prom-diag",
+							type: "prometheus",
+							enabled: false,
+							rowVersion: 1,
+							config: {
+								type: "prometheus",
+								baseUrl: "https://metrics.example",
+								authType: "none",
+							},
+						},
+						{ status: 201 },
+					);
+				if (url.endsWith("/probe"))
+					return Response.json({ id: "probe-diag" }, { status: 202 });
+				if (url.includes("probe-attempts/probe-diag"))
+					return Response.json({
+						state: "Failed",
+						endedAt: "2026-09-21T14:33:29.839Z",
+						terminationReason: "invalid_response",
+					});
+				if (url.includes("/probe-results"))
+					return Response.json({
+						items: [
+							{
+								id: "result-diag",
+								attemptId: "probe-diag",
+								outcome: "failed",
+								details: { error: diagnostic },
+							},
+						],
+					});
+				return Response.json(
+					{ message: "unexpected request" },
+					{ status: 500 },
+				);
+			});
+		render(
+			<IntegrationView route="/settings/platform/integrations/prometheus" />,
+		);
+		fireEvent.change(screen.getByLabelText("实例名称"), {
+			target: { value: "prom-diag" },
+		});
+		fireEvent.change(screen.getByLabelText("端点 URL"), {
+			target: { value: "https://metrics.example" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "创建、验证并启用" }));
+		await waitFor(() =>
+			expect(screen.getByText(/连通性验证未通过/)).toBeInTheDocument(),
+		);
+		// The failure alert carries the typed diagnostic, and the result card
+		// repeats it for copy-paste instead of showing only "failed".
+		expect(screen.getAllByText(new RegExp(diagnostic)).length).toBeGreaterThan(
+			0,
+		);
+		expect(
+			fetchMock.mock.calls.some(([url]) =>
+				String(url).includes("/probe-results"),
+			),
+		).toBe(true);
+	});
+
 	it("shows rotated metrics as requiring revalidation and offers recovery", async () => {
 		const fetchMock = vi
 			.spyOn(globalThis, "fetch")
@@ -613,6 +684,114 @@ describe("integration workbench", () => {
 				"https://quoin.example.test/api/v1/alert-receiver",
 			),
 		).toBeInTheDocument();
+		fetchMock.mockRestore();
+	});
+
+	// 回归：receiver-config 503（部署未配置 stelePublicURL）时，创建请求根本
+	// 不应发出，失败必须以常驻内联错误显示，而不是只靠会自动消失的 toast——
+	// 否则表单静默回到初始状态，看起来像“什么都没发生”。
+	it("keeps a persistent inline error and skips creation when the receiver endpoint is unavailable", async () => {
+		const fetchMock = vi
+			.spyOn(globalThis, "fetch")
+			.mockImplementation(async (input) => {
+				const url = String(input);
+				if (url.endsWith("/api/v1/alert-sources/receiver-config"))
+					return Response.json(
+						{ title: "Service Unavailable", status: 503, detail: "告警接收地址尚未配置" },
+						{ status: 503 },
+					);
+				return Response.json(
+					{ message: "unexpected request" },
+					{ status: 500 },
+				);
+			});
+		render(
+			<IntegrationView route="/settings/platform/integrations/alertmanager" />,
+		);
+		fireEvent.change(screen.getByLabelText("来源键"), {
+			target: { value: "mall-shop-alertmanager" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "创建并显示一次凭据" }));
+		const alert = await screen.findByRole("alert");
+		expect(alert).toHaveTextContent("告警接收地址尚未配置");
+		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+		// 表单回到可用状态，创建 POST 从未发出（凭据不会被白白消耗）。
+		expect(
+			screen.getByRole("button", { name: "创建并显示一次凭据" }),
+		).toBeEnabled();
+		expect(
+			fetchMock.mock.calls.some(
+				([input, init]) =>
+					String(input).endsWith("/api/v1/alert-sources") &&
+					(init as RequestInit | undefined)?.method === "POST",
+			),
+		).toBe(false);
+		fetchMock.mockRestore();
+	});
+
+	// 回归：抽屉内的启用/停用/轮换只刷新抽屉自身，背后的实例列表行徽标
+	// 停留在旧状态，且关抽屉不会重挂载列表（同 query 页内路由）。
+	it("refreshes the instances list behind the drawer after enabling a connection", async () => {
+		let enabled = false;
+		let listLoads = 0;
+		const projection = () => ({
+			id: "1",
+			name: "mall-prometheus",
+			type: "prometheus",
+			enabled,
+			rowVersion: enabled ? 8 : 7,
+			config: { type: "prometheus", baseUrl: "http://10.43.100.205:9090", authType: "none" },
+		});
+		const fetchMock = vi
+			.spyOn(globalThis, "fetch")
+			.mockImplementation(async (input, init) => {
+				const url = String(input);
+				if (url.startsWith("/api/v1/alert-sources"))
+					return Response.json({ items: [] });
+				if (url === "/api/v1/connections?limit=100") {
+					listLoads += 1;
+					return Response.json({ items: [projection()] });
+				}
+				if (url === "/api/v1/connections/mall-prometheus")
+					return Response.json(projection());
+				if (
+					url === "/api/v1/connections/mall-prometheus/probe" &&
+					init?.method === "POST"
+				)
+					return Response.json({ id: "attempt-1" });
+				if (url === "/api/v1/connections/mall-prometheus/probe-attempts/attempt-1")
+					return Response.json({
+						state: "Succeeded",
+						endedAt: "2026-09-21T10:00:00Z",
+					});
+				if (url === "/api/v1/connections/mall-prometheus/probe-results?limit=50")
+					return Response.json({
+						items: [
+							{ id: "result-1", attemptId: "attempt-1", outcome: "passed" },
+						],
+					});
+				if (
+					url === "/api/v1/connections/mall-prometheus/enable" &&
+					init?.method === "POST"
+				) {
+					enabled = true;
+					return Response.json(projection());
+				}
+				return Response.json(
+					{ message: `unexpected request ${url}` },
+					{ status: 500 },
+				);
+			});
+		render(
+			<IntegrationView route="/settings/platform/integrations/instances?platform=prometheus&instance=mall-prometheus" />,
+		);
+		// 列表行徽标与抽屉徽标初始一致为“已停用”。
+		expect(await screen.findAllByText("已停用")).toHaveLength(2);
+		fireEvent.click(screen.getByRole("button", { name: "验证并启用" }));
+		// 启用成功后两处都必须翻转为“已启用”：抽屉自刷新，列表经失效重拉。
+		await waitFor(() => expect(screen.getAllByText("已启用")).toHaveLength(2));
+		expect(screen.queryByText("已停用")).not.toBeInTheDocument();
+		expect(listLoads).toBeGreaterThanOrEqual(2);
 		fetchMock.mockRestore();
 	});
 });
