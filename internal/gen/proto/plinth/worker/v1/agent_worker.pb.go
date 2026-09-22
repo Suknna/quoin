@@ -1277,7 +1277,7 @@ func (x *ModelUsage) GetTotalTokens() uint64 {
 
 // worker 按 PreparedToolCall 顺序为三种 execution mode 都发送此请求；收到对应 ToolCallStarted 前
 // 不得执行 WORKER_LOCAL，也不得继续下一个 Tool。supervisor 只有在 Quoin 的 BeginToolCallAck 成功后
-// 才能回 ToolCallStarted；随后本地执行由 worker 完成，typed/browser 执行由 supervisor 发起。
+// 才能回 ToolCallStarted；随后本地执行由 worker 完成，typed 执行由 supervisor 发起。
 type ExecuteToolCall struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ToolCallId    int64                  `protobuf:"varint,1,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
