@@ -317,6 +317,58 @@ func paramsOf(t *testing.T, request collectRequestJSON) []byte {
 	return encoded
 }
 
+// TestLocalInspectionCollectionRefusesFrozenGrantAfterDisable reproduces the
+// P1 review finding: a collection whose grant froze while the connection was
+// enabled must NOT execute once an admin disables the connection — the
+// pre-execution guard transaction refuses the frozen grant before any tool
+// dispatch, so no platform call (and no Stele material acquire) can happen.
+func TestLocalInspectionCollectionRefusesFrozenGrantAfterDisable(t *testing.T) {
+	requests := stubLocalCollectTool(t)
+	db, service := newLocalInspectionFixture(t)
+	admin := localInspectionAdminContext(t)
+	detail, err := service.Inspections.CreatePlanRun(admin, 1, "disabled-guard-run", "local-collection-plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The run froze its child grants against the enabled connection; disable
+	// lands afterwards, exactly like an admin reacting to an incident.
+	if _, err := db.Exec(`INSERT INTO maintenance_state(id,active,row_version) VALUES(1,0,1)`); err != nil {
+		t.Fatal(err)
+	}
+	var rowVersion int64
+	mustQuery(t, db, `SELECT row_version FROM connections WHERE id=1`, &rowVersion)
+	if _, err := service.Connections.Disable(admin, "fixture-metrics", rowVersion); err != nil {
+		t.Fatalf("disable connection: %v", err)
+	}
+	service.runLocalExecutionPass(context.Background())
+
+	var attemptID int64
+	mustQuery(t, db, `SELECT id FROM execution_attempts WHERE scope_type='run_check' AND scope_id=?`, &attemptID, detail.RunID)
+	var state string
+	mustQuery(t, db, `SELECT state FROM execution_attempts WHERE id=?`, &state, attemptID)
+	if state == "Queued" || state == "Running" {
+		t.Fatalf("denied collection must converge instead of wedging %s (attempt %d)", state, attemptID)
+	}
+	// No tool dispatch happened: without an invoked metrics_collect there is no
+	// platform call and no gateway material acquire to serve it.
+	if len(*requests) != 0 {
+		t.Fatalf("metrics_collect was dispatched %d times against a disabled connection", len(*requests))
+	}
+	// The refusal is recorded honestly on the frozen check as a query gap, and
+	// no evidence was fabricated for the refused collection.
+	var status, gapReason string
+	var evidenceCount int
+	mustQuery(t, db, `SELECT status FROM inspection_check_results WHERE attempt_id=?`, &status, attemptID)
+	mustQuery(t, db, `SELECT COALESCE(gap_reason,'') FROM inspection_check_results WHERE attempt_id=?`, &gapReason, attemptID)
+	mustQuery(t, db, `SELECT COUNT(*) FROM evidence WHERE attempt_id=?`, &evidenceCount, attemptID)
+	if status != "gap" || gapReason != "query_failed" {
+		t.Fatalf("check result = %s/%s, want gap/query_failed", status, gapReason)
+	}
+	if evidenceCount != 0 {
+		t.Fatalf("refused collection must not fabricate evidence, found %d rows", evidenceCount)
+	}
+}
+
 // seedProbeModelCall / seedProbeEmbeddingCall mirror the inspection report
 // harness: the model-provider probe child trigger validates the qualification
 // against real model calls.

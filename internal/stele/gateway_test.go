@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -294,6 +295,43 @@ func TestGatewayLegacyAuthTypeFallsBackToBasic(t *testing.T) {
 	}
 	if got, _ := auth.Load().(string); got != "Basic "+basicAuthHeader("legacy-user", "legacy-pass") {
 		t.Fatalf("authorization = %q, want legacy basic auth", got)
+	}
+}
+
+func TestGatewayRevisionMismatchFailsClosedWithoutHTTP(t *testing.T) {
+	// The call froze grant revision 1; a rotation replaced the pair and Acquire
+	// now serves revision 2. The gateway must refuse the call instead of
+	// silently executing the frozen authorization with the new credentials,
+	// and must never touch the platform.
+	var hits atomic.Int64
+	platform := newPlatform(t, func(writer http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		writer.WriteHeader(http.StatusOK)
+	})
+	harness := startGateway(t, func(_ context.Context, connectionID int64) (*runtimev1.AcquireConnectionCredentialResponse, error) {
+		return acquireResponse(connectionID, 2, platform.URL, "none", "", "", ""), nil
+	}, gatewayDefaultRatePerMinute)
+
+	harness.pushExecute("call-stale", 5, 1, "GET", "/api/v1/query", "query=up", 5000, nil)
+	result := harness.awaitResult(t, "call-stale")
+	if result.GetStatus() != runtimev1.PlatformCallStatus_PLATFORM_CALL_STATUS_CREDENTIAL_UNAVAILABLE {
+		t.Fatalf("status = %v (%s %s), want CREDENTIAL_UNAVAILABLE", result.GetStatus(), result.GetErrorCode(), result.GetErrorDetail())
+	}
+	if !strings.Contains(result.GetErrorDetail(), "frozen grant revision 1") {
+		t.Fatalf("error detail = %q, want the revision mismatch diagnosis", result.GetErrorDetail())
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("platform saw %d requests, want 0 (stale grant must not reach the platform)", hits.Load())
+	}
+	// The mismatched material is not cached as usable: a follow-up call on the
+	// current revision re-acquires and succeeds.
+	harness.pushExecute("call-fresh", 5, 2, "GET", "/ok", "", 5000, nil)
+	fresh := harness.awaitResult(t, "call-fresh")
+	if fresh.GetStatus() != runtimev1.PlatformCallStatus_PLATFORM_CALL_STATUS_SUCCEEDED {
+		t.Fatalf("fresh status = %v (%s), want SUCCEEDED", fresh.GetStatus(), fresh.GetErrorDetail())
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("platform saw %d requests after the fresh call, want 1", hits.Load())
 	}
 }
 

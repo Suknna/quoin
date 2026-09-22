@@ -386,7 +386,9 @@ func (gateway *Gateway) executeCall(ctx context.Context, call *runtimev1.Execute
 
 // materialFor 解析连接材料：缓存命中且 revision 一致直接复用；miss 或
 // revision 漂移时重新 Acquire 并覆盖缓存。Acquire 失败不缓存（下一次调用
-// 重试），避免瞬时故障固化。
+// 重试），避免瞬时故障固化。Acquire 返回的是连接当前 revision——与调用
+// 冻结的 revision 不一致（调用发起后连接被轮换/复验）时拒绝执行而不是
+// 静默用新凭据跑旧授权，Quoin 侧按 CREDENTIAL_UNAVAILABLE 收敛重探测。
 func (gateway *Gateway) materialFor(ctx context.Context, connectionID, revisionID int64) (*material, error) {
 	gateway.mu.Lock()
 	cached, hit := gateway.materials[connectionID]
@@ -397,6 +399,10 @@ func (gateway *Gateway) materialFor(ctx context.Context, connectionID, revisionI
 	response, err := gateway.acquire(ctx, connectionID)
 	if err != nil {
 		return nil, fmt.Errorf("acquire connection credential: %w", err)
+	}
+	if revisionID > 0 && response.GetConnectionRevisionId() != revisionID {
+		return nil, fmt.Errorf("connection %d now serves revision %d, not the frozen grant revision %d",
+			connectionID, response.GetConnectionRevisionId(), revisionID)
 	}
 	material, err := parseMaterial(response)
 	if err != nil {

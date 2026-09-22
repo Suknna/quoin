@@ -326,9 +326,14 @@ func ValidateConfigGrantForExecution(ctx context.Context, conn execution.Executo
 	if err != nil {
 		return err
 	}
-	if enabled != 1 || revalidation != 0 || !currentRevisionID.Valid || !currentGenID.Valid ||
-		currentRevisionID.Int64 != grantRevisionID || currentGenID.Int64 != grantGenerationID || bindingRevision != rootBinding {
-		return ErrGrantNotCurrent
+	switch {
+	case enabled != 1 || revalidation != 0:
+		return fmt.Errorf("%w: connection disabled or pending revalidation", ErrGrantNotCurrent)
+	case !currentRevisionID.Valid || !currentGenID.Valid ||
+		currentRevisionID.Int64 != grantRevisionID || currentGenID.Int64 != grantGenerationID:
+		return fmt.Errorf("%w: frozen revision/generation pair no longer current", ErrGrantNotCurrent)
+	case bindingRevision != rootBinding:
+		return fmt.Errorf("%w: credential root binding drifted", ErrGrantNotCurrent)
 	}
 	return nil
 }

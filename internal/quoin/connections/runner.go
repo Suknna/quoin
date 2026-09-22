@@ -40,6 +40,7 @@ const (
 	opProbeInterrupt = "connection.probe.interrupt"
 	opProbeBind      = "connection.probe.bind"
 	opGrantFulfill   = "connection.grant.fulfill"
+	opGrantValidate  = "connection.grant.validate"
 	opModelDiscovery = "connection.model_discovery"
 	opMetricsAcquire = "connection.metrics.acquire"
 
@@ -93,6 +94,7 @@ type commandRunner struct {
 	probeInterrupt *execution.Operation
 	probeBind      *execution.Operation
 	grantFulfill   *execution.Operation
+	grantValidate  *execution.Operation
 	modelDiscovery *execution.Operation
 	metricsAcquire *execution.Operation
 }
@@ -123,6 +125,7 @@ func newCommandRunner(db *sql.DB, now func() time.Time) *commandRunner {
 		{&commands.probeInterrupt, opProbeInterrupt, objectProbeAttempt, requireProbeSystem},
 		{&commands.probeBind, opProbeBind, objectProbeAttempt, requireProbeSystem},
 		{&commands.grantFulfill, opGrantFulfill, objectGrantFulfill, requireProbeSystem},
+		{&commands.grantValidate, opGrantValidate, objectGrantFulfill, requireProbeSystem},
 		{&commands.modelDiscovery, opModelDiscovery, objectModelProvider, authorizeAdmin},
 		{&commands.metricsAcquire, opMetricsAcquire, objectMetricsAcquire, requireProbeSystem},
 	} {

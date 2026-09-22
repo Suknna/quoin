@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,5 +148,177 @@ func TestMetricsAuthSecretValidationRejectsSmuggledCredential(t *testing.T) {
 	config, _ := json.Marshal(map[string]any{"type": connections.TypePrometheus, "baseUrl": "https://metrics.example", "authType": "bearer", "bearerToken": "leak"})
 	if _, err := service.Create(ctx, connections.CreateInput{Name: "bad-prometheus", Type: connections.TypePrometheus, NonSecretJSON: config}, 1, fmt.Sprintf("metrics-bad-%d", seq.Next())); !errors.Is(err, connections.ErrValidation) {
 		t.Fatalf("secret in non-secret projection must be rejected, got %v", err)
+	}
+}
+
+// TestAcquireMetricsConnectionServesProbeBeforeEnable reproduces the live
+// acceptance failure (2026-09-21): the connection probe executes through the
+// Stele gateway, whose material acquire once rejected disabled connections —
+// but Create persists enabled=0 and Enable requires a passed probe result, so
+// no metrics connection could ever qualify. The acquire seam must therefore
+// serve freshly created (and rotated, revalidation-pending) connections;
+// enabled-gating for model-visible queries stays at grant authorization.
+func TestAcquireMetricsConnectionServesProbeBeforeEnable(t *testing.T) {
+	service, _, _ := newService(t)
+	ctx := adminContext(t, nextCorrelation())
+	config, _ := json.Marshal(map[string]any{"type": connections.TypePrometheus, "baseUrl": "http://prometheus.quoin-lab.svc.cluster.local:9090", "authType": "none"})
+	created, err := service.Create(ctx, connections.CreateInput{Name: "mall-shop-prometheus", Type: connections.TypePrometheus, NonSecretJSON: config}, 1, "acquire-probe-create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Enabled {
+		t.Fatal("Create must persist the connection disabled (probe-then-enable lifecycle)")
+	}
+	payload, err := service.AcquireMetricsConnection(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("material acquire for a not-yet-enabled connection must serve the probe: %v", err)
+	}
+	if payload.ConnectionType != connections.TypePrometheus ||
+		payload.ConnectionRevisionID != created.CurrentRevisionID ||
+		payload.CredentialGeneration != created.CurrentGenerationID {
+		t.Fatalf("acquire payload binds the wrong pair: %+v", payload)
+	}
+	var revision struct {
+		BaseURL  string `json:"baseUrl"`
+		AuthType string `json:"authType"`
+	}
+	if err := json.Unmarshal(payload.RevisionConfigJSON, &revision); err != nil {
+		t.Fatal(err)
+	}
+	if revision.BaseURL != "http://prometheus.quoin-lab.svc.cluster.local:9090" || revision.AuthType != "none" {
+		t.Fatalf("revision projection = %+v", revision)
+	}
+	if payload.Metrics == nil || payload.Metrics.Username != "" || payload.Metrics.Password != "" || payload.Metrics.BearerToken != "" {
+		t.Fatalf("auth-none connection must deliver an empty credential carrier: %+v", payload.Metrics)
+	}
+	// Deterministic denials keep their closed semantics.
+	if _, err := service.AcquireMetricsConnection(ctx, created.ID+999); !errors.Is(err, connections.ErrAcquireDenied) {
+		t.Fatalf("unknown connection acquire must be denied, got %v", err)
+	}
+	providerConfig, _ := json.Marshal(map[string]any{"type": connections.TypeModelProvider, "baseUrl": "https://api.example.com", "chatModelId": "chat", "embeddingModelId": "embed"})
+	providerSecret, _ := json.Marshal(map[string]string{"type": connections.TypeModelProvider, "apiKey": "sk-test"})
+	provider, err := service.Create(ctx, connections.CreateInput{Name: "main-openai", Type: connections.TypeModelProvider, NonSecretJSON: providerConfig, Secret: providerSecret, SecretPresent: true}, 1, "acquire-provider-create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AcquireMetricsConnection(ctx, provider.ID); !errors.Is(err, connections.ErrAcquireDenied) {
+		t.Fatalf("model_provider material must stay off the gateway seam, got %v", err)
+	}
+}
+
+// TestValidateMetricsExecutionGrantGuardsFrozenPair covers the P1 execution
+// guard: after the acquire seam opened for probe-before-enable, a frozen
+// Queued collection (observation discovery / inspection collection) must NOT
+// execute once an admin disables the connection or a rotation replaces the
+// frozen pair — no credential acquisition, no platform call. The guard re
+// checks enabled/revalidation/revision/generation/root binding inside the
+// runner transaction; the probe path deliberately stays off this guard.
+func TestValidateMetricsExecutionGrantGuardsFrozenPair(t *testing.T) {
+	service, db, _ := newService(t)
+	ctx := adminContext(t, nextCorrelation())
+	config, _ := json.Marshal(map[string]any{"type": connections.TypePrometheus, "baseUrl": "https://metrics.example", "authType": "none"})
+	created, err := service.Create(ctx, connections.CreateInput{Name: "guard-prometheus", Type: connections.TypePrometheus, NonSecretJSON: config}, 1, "guard-create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeID := passedMetricsProbe(t, service, db, created, "boot-guard", 1)
+	enabled, err := service.Enable(ctx, created.Name, created.RowVersion, probeID, 1)
+	if err != nil || !enabled.Enabled {
+		t.Fatalf("enable qualified connection: %v %+v", err, enabled)
+	}
+	seedSeq := 0
+	seedCollectionGrant := func(revisionID, generationID int64) int64 {
+		t.Helper()
+		seedSeq++
+		planKey := fmt.Sprintf("guard-plan-%d", seedSeq)
+		now := "2026-09-21T00:00:00Z"
+		if _, err := db.Exec(`INSERT INTO inspection_plans(plan_key,display_name,enabled,connection_id,plugin_id,template_id,template_version,params_json,scope_json,scope_kind,cron,timezone,row_version,created_by,created_at,updated_at)
+			VALUES(?, 'guard plan',1,?, 'prometheus','promql_instant','1','{"expression":"up"}','{"kind":"integration"}','integration',NULL,'UTC',1,1,?,?)`, planKey, enabled.ID, now, now); err != nil {
+			t.Fatal(err)
+		}
+		var planID int64
+		if err := db.QueryRow(`SELECT id FROM inspection_plans WHERE plan_key=?`, planKey).Scan(&planID); err != nil {
+			t.Fatal(err)
+		}
+		run, err := db.Exec(`INSERT INTO inspection_runs(plan_key,plan_id,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,trigger_kind,state,row_version,created_at)
+			VALUES(?,?,?, 'prometheus','promql_instant','1','{"expression":"up"}','{"kind":"integration"}','manual','Queued',1,?)`, planKey, planID, enabled.ID, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runID, _ := run.LastInsertId()
+		// Runs are born Queued (frozen trigger); advance to Running with the
+		// evidence timestamp the state machine requires before children attach.
+		if _, err := db.Exec(`UPDATE inspection_runs SET state='Running',evidence_at=?,row_version=2 WHERE id=?`, now, runID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO inspection_run_checks(run_id,check_key,display_name,plugin_id,template_id,template_version,params_json,created_at)
+			VALUES(?, 'up', 'up check', 'prometheus','promql_instant','1','{"expression":"up"}',?)`, runID, now); err != nil {
+			t.Fatal(err)
+		}
+		attempt, err := db.Exec(`INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,check_key,state,quoin_release_version,operation_correlation_id,initiator_type,initiator_id,created_at)
+			VALUES('inspection_collection','run_check',?,'up','Queued','test','corr-guard-fixture','user',1,?)`, runID, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		attemptID, _ := attempt.LastInsertId()
+		if _, err := db.Exec(`INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,created_at)
+			VALUES(?, 'config_thanos_query', ?, ?, ?, ?)`, attemptID, enabled.ID, revisionID, generationID, now); err != nil {
+			t.Fatal(err)
+		}
+		return attemptID
+	}
+	// Enabled connection, current pair: the frozen collection may execute.
+	frozen := seedCollectionGrant(enabled.CurrentRevisionID, enabled.CurrentGenerationID)
+	if err := service.ValidateMetricsExecutionGrant(context.Background(), frozen); err != nil {
+		t.Fatalf("enabled current pair must validate: %v", err)
+	}
+	// Admin disable: the still-Queued frozen collection must be refused.
+	disabled, err := service.Disable(ctx, created.Name, enabled.RowVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabled.Enabled || disabled.RowVersion == 0 {
+		t.Fatalf("disable returned %+v", disabled)
+	}
+	err = service.ValidateMetricsExecutionGrant(context.Background(), frozen)
+	if !errors.Is(err, connections.ErrGrantDenied) {
+		t.Fatalf("disabled connection must deny the frozen grant, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "disabled or pending revalidation") {
+		t.Fatalf("denial must name the failing condition, got %v", err)
+	}
+	// Rotation replaces the pair: the old frozen grant stays refused even after
+	// the rotated connection is requalified and re-enabled.
+	requalified := passedMetricsProbe(t, service, db, disabled, "boot-reenable", 2)
+	reenabled, err := service.Enable(ctx, created.Name, disabled.RowVersion, requalified, 1)
+	if err != nil {
+		t.Fatalf("re-enable after fresh probe: %v", err)
+	}
+	rotatedConfig, _ := json.Marshal(map[string]any{"type": connections.TypePrometheus, "baseUrl": "https://metrics-2.example", "authType": "none"})
+	rotated, err := service.Rotate(ctx, created.Name, reenabled.RowVersion, connections.CreateInput{
+		Name: created.Name, Type: connections.TypePrometheus, NonSecretJSON: rotatedConfig,
+	}, 1, "guard-rotate")
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	err = service.ValidateMetricsExecutionGrant(context.Background(), frozen)
+	if !errors.Is(err, connections.ErrGrantDenied) {
+		t.Fatalf("pre-rotation frozen grant must stay denied after rotation, got %v", err)
+	}
+	// A grant frozen on the rotated pair validates once the connection is
+	// requalified and enabled again (the recovery path stays open).
+	fresh := passedMetricsProbe(t, service, db, rotated, "boot-after-rotation", 3)
+	final, err := service.Enable(ctx, created.Name, rotated.RowVersion, fresh, 1)
+	if err != nil {
+		t.Fatalf("enable rotated connection: %v", err)
+	}
+	// Re-enabling clears the state gate, but must not revive the old pair.
+	err = service.ValidateMetricsExecutionGrant(context.Background(), frozen)
+	if !errors.Is(err, connections.ErrGrantDenied) || !strings.Contains(err.Error(), "frozen revision/generation pair no longer current") {
+		t.Fatalf("old grant must remain denied after requalification with the pair mismatch reason, got %v", err)
+	}
+	refrozen := seedCollectionGrant(final.CurrentRevisionID, final.CurrentGenerationID)
+	if err := service.ValidateMetricsExecutionGrant(context.Background(), refrozen); err != nil {
+		t.Fatalf("fresh frozen pair on the enabled rotated connection must validate: %v", err)
 	}
 }

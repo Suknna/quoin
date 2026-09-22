@@ -162,8 +162,9 @@ func (server *steleRelayServer) AcquireConnectionCredential(ctx context.Context,
 	payload, err := server.connections.AcquireMetricsConnection(ctx, request.GetConnectionId())
 	if err != nil {
 		if errors.Is(err, connections.ErrAcquireDenied) {
-			// 类型不符（含 model_provider）与禁用/不存在都是确定性拒绝。
-			return nil, status.Error(codes.PermissionDenied, "connection material denied")
+			// 类型不符（含 model_provider）与不存在都是确定性拒绝；detail 携带
+			// 具体原因（仅类型与连接号，无秘密），probe 结果据此可直接诊断。
+			return nil, status.Error(codes.PermissionDenied, "connection material denied: "+err.Error())
 		}
 		return nil, status.Error(codes.Unavailable, "connection material unavailable")
 	}

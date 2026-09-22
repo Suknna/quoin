@@ -197,6 +197,28 @@ func (service *Service) fulfillGrantOn(ctx context.Context, tx *execution.Tx, gr
 	return payload, nil
 }
 
+// ValidateMetricsExecutionGrant 在一次非 probe 本地执行（观察发现 / 巡检
+// 采集）派发前，于 runner 守卫事务内复核冻结的 config_thanos_query
+// grant：连接必须仍启用且无待复验，grant 冻结的 revision/generation 对
+// 必须仍是当前指针，root binding 不得漂移（与 FulfillGrant 同一复核纪律，
+// DATA-CONN-002——管理员禁用/轮换之后，已冻结排队的采集不得再取凭据或
+// 发起平台调用）。连接探测不经过本守卫：探测是 Enable 的资格前提，必须
+// 能在未启用/待复验的连接上运行（acquire 缝隙已按此语义放开 enabled）。
+func (service *Service) ValidateMetricsExecutionGrant(ctx context.Context, attemptID int64) error {
+	scope, err := service.probeLifecycleContext(ctx, attemptID)
+	if err != nil {
+		return err
+	}
+	_, err = execution.Execute(scope, service.commands.runner, service.commands.grantValidate,
+		func(tx *execution.Tx) (int64, error) {
+			if err := thanos.ValidateConfigGrantForExecution(ctx, tx, attemptID); err != nil {
+				return 0, fmt.Errorf("%w: %v", ErrGrantDenied, err)
+			}
+			return attemptID, nil
+		}, identity)
+	return err
+}
+
 // CancelProbe commits the cancellation fence for one Running probe attempt:
 // the cancelled typed result is inserted while the attempt is still Running
 // (the result-closure trigger requires it), then the same transaction moves

@@ -16,8 +16,8 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
-// ErrAcquireDenied 报告连接材料投递的确定性拒绝（连接不存在、禁用或类型
-// 不在出向执行词表内）。调用方据此返回 gRPC 拒绝而非 UNAVAILABLE。
+// ErrAcquireDenied 报告连接材料投递的确定性拒绝（连接不存在或类型不在
+// 出向执行词表内）。调用方据此返回 gRPC 拒绝而非 UNAVAILABLE。
 var ErrAcquireDenied = errors.New("connection material acquire denied")
 
 // MetricsConnectionPayload 是一次按需连接材料投递的产物（只在内存中存在，
@@ -34,10 +34,14 @@ type MetricsConnectionPayload struct {
 
 // AcquireMetricsConnection 按 connection_id 投递一次出向执行材料：读
 // connections + current_revision + 最新 credential_generations，校验连接
-// enabled 且 type ∈ {prometheus,thanos}，然后复用 FulfillGrant 的解密管线
-// 在 runner 守卫事务内打开 envelope（敏感读的审计纪律与 grant reveal 一致，
-// DATA-CONN-002）。model_provider 连接在此处被确定性拒绝——模型凭据只走
-// Plinth grant（FetchCredentialGrant），绝不经网关投递。
+// type ∈ {prometheus,thanos}（不校验 enabled：连接探测是 Enable 的资格
+// 前提，必须能在新建未启用/轮换待复验的连接上执行；模型可见查询的
+// enabled 门禁在授权侧——config_thanos_query grant 创建与执行前校验均
+// 要求 enabled=1 且无待复验——不依赖本缝隙重复把关），然后复用
+// FulfillGrant 的解密管线在 runner 守卫事务内打开 envelope（敏感读的
+// 审计纪律与 grant reveal 一致，DATA-CONN-002）。model_provider 连接在此
+// 处被确定性拒绝——模型凭据只走 Plinth grant（FetchCredentialGrant），
+// 绝不经网关投递。
 func (service *Service) AcquireMetricsConnection(ctx context.Context, connectionID int64) (MetricsConnectionPayload, error) {
 	// gRPC 流处理器上下文不带用户身份；这里以系统 task 主体建立执行范围，
 	// 与其它 runtime 驱动的连接生命周期操作同型。
@@ -70,12 +74,11 @@ func (service *Service) AcquireMetricsConnection(ctx context.Context, connection
 // 解密执行，被拒的投递不留任何审计之外的状态。
 func (service *Service) acquireMetricsConnectionOn(ctx context.Context, tx *execution.Tx, connectionID int64) (MetricsConnectionPayload, error) {
 	var connectionType string
-	var enabled int
 	var revisionID, generationID int64
 	if err := tx.QueryRowContext(ctx, `
-		SELECT c.type,c.enabled,COALESCE(c.current_revision_id,0),COALESCE(c.current_credential_generation_id,0)
+		SELECT c.type,COALESCE(c.current_revision_id,0),COALESCE(c.current_credential_generation_id,0)
 		FROM connections c WHERE c.id=?`, connectionID).
-		Scan(&connectionType, &enabled, &revisionID, &generationID); err != nil {
+		Scan(&connectionType, &revisionID, &generationID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return MetricsConnectionPayload{}, fmt.Errorf("%w: connection %d not found", ErrAcquireDenied, connectionID)
 		}
@@ -83,9 +86,6 @@ func (service *Service) acquireMetricsConnectionOn(ctx context.Context, tx *exec
 	}
 	if connectionType != TypePrometheus && connectionType != TypeThanos {
 		return MetricsConnectionPayload{}, fmt.Errorf("%w: connection type %q is not gateway-executable", ErrAcquireDenied, connectionType)
-	}
-	if enabled != 1 {
-		return MetricsConnectionPayload{}, fmt.Errorf("%w: connection %d is disabled", ErrAcquireDenied, connectionID)
 	}
 	var revisionConfig sql.NullString
 	if err := tx.QueryRowContext(ctx, `

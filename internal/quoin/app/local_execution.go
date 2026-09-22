@@ -207,7 +207,10 @@ type localConnection struct {
 }
 
 // loadLocalConnection 从 attempt 的 config_thanos_query grant 解析连接身份与
-// revision 配置（观察/巡检采集共用）。
+// revision 配置（观察/巡检采集共用），并在派发前于 runner 守卫事务内复核
+// 冻结 grant 的可执行性（连接禁用/轮换/复验待定后，已冻结排队的采集不得
+// 再取材料或发起平台调用；探测不经此守卫——探测本身就是 Enable 的资格
+// 前提，必须能在未启用连接上运行）。
 func (service *RuntimeService) loadLocalConnection(ctx context.Context, reader audit.Reader, attemptID int64) (localConnection, error) {
 	var connectionID, revisionID int64
 	var connectionType, configJSON string
@@ -221,6 +224,13 @@ func (service *RuntimeService) loadLocalConnection(ctx context.Context, reader a
 		Scan(&connectionID, &connectionType, &revisionID, &configJSON)
 	if err != nil {
 		return localConnection{}, fmt.Errorf("resolve metrics connection for attempt %d: %w", attemptID, err)
+	}
+	if service.Connections == nil {
+		// 无连接服务即无凭据授权面：fail closed，绝不带着未复核的 grant 派发。
+		return localConnection{}, fmt.Errorf("metrics grant validation unavailable for attempt %d", attemptID)
+	}
+	if err := service.Connections.ValidateMetricsExecutionGrant(ctx, attemptID); err != nil {
+		return localConnection{}, fmt.Errorf("metrics grant for attempt %d is no longer executable: %w", attemptID, err)
 	}
 	return localConnection{plugins.Connection{
 		ID: connectionID, RevisionID: revisionID, Type: connectionType, Settings: json.RawMessage(configJSON),
