@@ -21,10 +21,13 @@ import { usePagedList } from "./shared";
 export function BrowsePage({
 	suspended,
 	onOpen,
+	revision = 0,
 }: {
 	suspended: boolean;
 	onOpen: (knowledgeId: string) => void;
+	revision?: number;
 }) {
+	const [requestNumber, setRequestNumber] = useState(0);
 	const [query, setQuery] = useState("");
 	const [submitted, setSubmitted] = useState("");
 	return (
@@ -40,6 +43,7 @@ export function BrowsePage({
 				onSubmit={(event) => {
 					event.preventDefault();
 					setSubmitted(query.trim());
+					setRequestNumber((current) => current + 1);
 				}}
 			>
 				<div className="relative flex-1">
@@ -73,13 +77,13 @@ export function BrowsePage({
 			</form>
 			{submitted ? (
 				<SearchResults
-					key={submitted}
+					key={`${submitted}:${requestNumber}:${revision}`}
 					query={submitted}
 					suspended={suspended}
 					onOpen={onOpen}
 				/>
 			) : (
-				<BrowseTable suspended={suspended} onOpen={onOpen} />
+				<BrowseTable key={revision} suspended={suspended} onOpen={onOpen} />
 			)}
 		</section>
 	);
@@ -137,7 +141,8 @@ function BrowseTable({
 					</TableRow>
 				))}
 			</DataTable>
-			{list.items.length > 0 && list.error &&
+			{list.items.length > 0 &&
+				list.error &&
 				(suspended ? (
 					<Alert variant="destructive">
 						<AlertDescription>{list.error}</AlertDescription>
@@ -257,7 +262,8 @@ function SearchResults({
 					没有匹配的知识。换个说法试试,或把这次处置经验整理为知识。
 				</p>
 			)}
-			{error && (exact.length > 0 || semantic.length > 0) &&
+			{error &&
+				(exact.length > 0 || semantic.length > 0) &&
 				(suspended ? (
 					<Alert variant="destructive">
 						<AlertDescription>{error}</AlertDescription>

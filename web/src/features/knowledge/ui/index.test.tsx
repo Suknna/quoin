@@ -169,13 +169,11 @@ vi.mock("@/features/knowledge/api", async (importOriginal) => {
 	return {
 		...actual,
 		api: {
-			browse: vi
-				.fn()
-				.mockResolvedValue({
-					mode: "browse",
-					items: [],
-					nextCursor: undefined,
-				}),
+			browse: vi.fn().mockResolvedValue({
+				mode: "browse",
+				items: [],
+				nextCursor: undefined,
+			}),
 			search: vi.fn(),
 			getCandidate: vi.fn(),
 			editDraft: vi.fn(),
@@ -288,6 +286,18 @@ describe("knowledge home (browse + search)", () => {
 		expect(screen.getByText("仅语义")).toBeInTheDocument();
 		expect(screen.getByText(/语义索引已换代/)).toBeInTheDocument();
 		expect(api.search).toHaveBeenCalledWith("cpu", undefined);
+	});
+
+	it("repeats an unchanged search instead of retaining stale eligibility", async () => {
+		const { api } = await import("@/features/knowledge/api");
+		renderView();
+		fireEvent.change(await screen.findByLabelText("检索知识"), {
+			target: { value: "backup" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+		await waitFor(() => expect(api.search).toHaveBeenCalledTimes(1));
+		fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+		await waitFor(() => expect(api.search).toHaveBeenCalledTimes(2));
 	});
 
 	it("clears search back to the browse table", async () => {

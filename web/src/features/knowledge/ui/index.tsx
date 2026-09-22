@@ -54,6 +54,7 @@ export function useKnowledgeModule(
 	const knowledgeId = parsed.searchParams.get("item") || undefined;
 	// 抽屉标题跟随已加载的知识;换条目时由 key 重挂载并重置。
 	const [itemTitle, setItemTitle] = useState<string>();
+	const [revision, setRevision] = useState(0);
 	const section: Section =
 		parts[0] === "candidates"
 			? "candidates"
@@ -130,6 +131,7 @@ export function useKnowledgeModule(
 		content = (
 			<>
 				<BrowsePage
+					revision={revision}
 					suspended={props.suspended}
 					onOpen={(id) => props.navigate(`/knowledge?item=${id}`)}
 				/>
@@ -152,6 +154,7 @@ export function useKnowledgeModule(
 									navigate={props.navigate}
 									openEvidence={props.openEvidence}
 									onLoaded={setItemTitle}
+									onMutated={() => setRevision((current) => current + 1)}
 								/>
 							</div>
 						</div>

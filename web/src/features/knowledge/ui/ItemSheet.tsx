@@ -63,6 +63,7 @@ export function KnowledgeItemSheet({
 	navigate,
 	openEvidence,
 	onLoaded,
+	onMutated,
 }: {
 	id: string;
 	suspended: boolean;
@@ -70,6 +71,7 @@ export function KnowledgeItemSheet({
 	openEvidence: (id: string) => void;
 	/** 加载完成后把条目标题交给抽屉头。 */
 	onLoaded?: (title: string) => void;
+	onMutated?: () => void;
 }) {
 	const [detail, setDetail] = useState<KnowledgeDetail>();
 	const [versions, setVersions] = useState<KnowledgeVersionSummary[]>([]);
@@ -180,6 +182,7 @@ export function KnowledgeItemSheet({
 			notify.success("已停止复用");
 			setStopping(false);
 			await load();
+			onMutated?.();
 		} catch (reason) {
 			notify.error(reason, "暂时无法完成操作,请重试。");
 		} finally {
