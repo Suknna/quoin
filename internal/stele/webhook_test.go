@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/plugins"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // stubLookup 复刻 Relay 的快照认证语义：bearer 是 32 字节随机数的
@@ -94,11 +96,21 @@ const validPayload = `{"status":"firing","alerts":[{"labels":{"alertname":"Test"
 
 func newTestWebhook(t *testing.T, lookup *stubLookup, sources SourceRegistry) (*httptest.Server, *Queue) {
 	t.Helper()
+	server, queue, _ := newTestWebhookWithMetrics(t, lookup, sources)
+	return server, queue
+}
+
+// newTestWebhookWithMetrics builds the same real webhook but additionally
+// exposes the Metrics instance so tests can assert the intake counters of
+// the real pipeline.
+func newTestWebhookWithMetrics(t *testing.T, lookup *stubLookup, sources SourceRegistry) (*httptest.Server, *Queue, *Metrics) {
+	t.Helper()
 	queue := openTestQueue(t)
-	webhook := NewWebhook(queue, lookup, sources, NewMetrics())
+	metrics := NewMetrics()
+	webhook := NewWebhook(queue, lookup, sources, metrics)
 	server := httptest.NewServer(webhook.Handler())
 	t.Cleanup(server.Close)
-	return server, queue
+	return server, queue, metrics
 }
 
 // testBearer 是确定性的测试凭据：32 字节 1..32 的 base64url 文本 + 其
@@ -275,5 +287,105 @@ func TestWebhookMethodAndPathRouting(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("nested path status = %d, want 404", response.StatusCode)
+	}
+}
+
+// TestWebhookIntakeMetricPerRequestVerdict 验证入站计数的真实行为与单位：
+// 每次请求恰好一次裁决计数。202（含上游重复投递同批）各计一次
+// accepted；4xx 入站拒绝计 rejected；5xx 不可用计 unavailable；多事件
+// 载荷不放大 accepted（逐事件计数属于 stele_events_forwarded_total）。
+// source 解析前的传输层拒绝（404/405）不进入入站裁决计数。
+func TestWebhookIntakeMetricPerRequestVerdict(t *testing.T) {
+	_, digest := testBearer()
+	lookup := &stubLookup{ready: true, digest: digest}
+	server, queue, metrics := newTestWebhookWithMetrics(t, lookup, alertmanagerRegistry(false))
+
+	intake := func(status string) float64 {
+		var metricDTO dto.Metric
+		if err := metrics.deliveries.WithLabelValues(status).(prometheus.Metric).Write(&metricDTO); err != nil {
+			t.Fatalf("read intake counter %s: %v", status, err)
+		}
+		return metricDTO.GetCounter().GetValue()
+	}
+	if intake("accepted") != 0 || intake("rejected") != 0 || intake("unavailable") != 0 {
+		t.Fatalf("intake counters must start at the closed-label zeros")
+	}
+
+	// 成功 202：一次请求计一次 accepted。
+	response, err := http.DefaultClient.Do(bearerRequest(t, http.MethodPost, server.URL+"/webhook/alertmanager", validPayload))
+	if err != nil {
+		t.Fatalf("post valid: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("valid payload status = %d, want 202", response.StatusCode)
+	}
+	if intake("accepted") != 1 {
+		t.Fatalf("accepted = %v after first 202, want 1", intake("accepted"))
+	}
+
+	// 上游重复投递同一批：再次 202，再计一次 accepted（幂等去重在上游）。
+	response, err = http.DefaultClient.Do(bearerRequest(t, http.MethodPost, server.URL+"/webhook/alertmanager", validPayload))
+	if err != nil {
+		t.Fatalf("post duplicate: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("duplicate payload status = %d, want 202", response.StatusCode)
+	}
+	if intake("accepted") != 2 {
+		t.Fatalf("accepted = %v after duplicate 202, want 2", intake("accepted"))
+	}
+	if depth, _ := queue.QueueDepth(context.Background()); depth != 2 {
+		t.Fatalf("queue depth = %d, want 2 (each 202 enqueues its own batch)", depth)
+	}
+
+	// 认证失败 401：一次请求计一次 rejected，accepted 不变。
+	response, err = http.Post(server.URL+"/webhook/alertmanager", "application/json", strings.NewReader(validPayload))
+	if err != nil {
+		t.Fatalf("post without bearer: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("missing bearer status = %d, want 401", response.StatusCode)
+	}
+	if intake("rejected") != 1 || intake("accepted") != 2 {
+		t.Fatalf("after 401: accepted=%v rejected=%v, want 2/1", intake("accepted"), intake("rejected"))
+	}
+
+	// 解析失败 400：计一次 rejected。
+	response, err = http.DefaultClient.Do(bearerRequest(t, http.MethodPost, server.URL+"/webhook/alertmanager", "not-json"))
+	if err != nil {
+		t.Fatalf("post malformed: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed status = %d, want 400", response.StatusCode)
+	}
+	if intake("rejected") != 2 || intake("accepted") != 2 || intake("unavailable") != 0 {
+		t.Fatalf("after 400: accepted=%v rejected=%v unavailable=%v, want 2/2/0",
+			intake("accepted"), intake("rejected"), intake("unavailable"))
+	}
+
+	// 传输层拒绝（未知 source 404、GET 405、嵌套路径 404）：不是入站裁决，不计数。
+	if response, err = http.Post(server.URL+"/webhook/nosuchsource", "application/json", strings.NewReader(validPayload)); err != nil {
+		t.Fatalf("post unknown source: %v", err)
+	} else {
+		response.Body.Close()
+		if response.StatusCode != http.StatusNotFound {
+			t.Fatalf("unknown source status = %d, want 404", response.StatusCode)
+		}
+	}
+	if response, err = http.Get(server.URL + "/webhook/alertmanager"); err != nil {
+		t.Fatalf("get: %v", err)
+	} else {
+		response.Body.Close()
+		if response.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("GET status = %d, want 405", response.StatusCode)
+		}
+	}
+	if intake("accepted") != 2 || intake("rejected") != 2 || intake("unavailable") != 0 {
+		t.Fatalf("transport-level rejections must not be counted as intake verdicts: accepted=%v rejected=%v unavailable=%v",
+			intake("accepted"), intake("rejected"), intake("unavailable"))
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/Suknna/quoin/internal/buildinfo"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 )
 
 type Reason string
@@ -44,6 +45,11 @@ type Server struct {
 	accepting       prometheus.Gauge
 	collectors      map[string]prometheus.Collector
 	storageWritable map[string]bool
+	// componentMetrics holds component-owned runtime gatherers merged into
+	// the /metrics surface. Their families override same-named catalog
+	// placeholders so runtime counters are exported instead of staying at
+	// their preinitialized zeros (guarded by mu).
+	componentMetrics []prometheus.Gatherer
 }
 
 func New(component, address string, reason Reason) (*Server, error) {
@@ -98,7 +104,7 @@ func New(component, address string, reason Reason) (*Server, error) {
 		}
 		_ = json.NewEncoder(writer).Encode(current)
 	})
-	mux.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+	mux.Handle("GET /metrics", promhttp.HandlerFor(server, promhttp.HandlerOpts{}))
 	server.httpServer = &http.Server{
 		Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
@@ -111,6 +117,68 @@ func registryGauge(registry *prometheus.Registry, name, help string, value int) 
 	metric.Set(float64(value))
 	registry.MustRegister(metric)
 	return metric
+}
+
+// RegisterComponentGatherer merges a component-owned runtime registry into the
+// /metrics surface. Families the runtime gatherer provides replace the
+// catalog placeholders of the same name — the placeholders exist only so the
+// closed label sets are visible from startup; the runtime collectors are the
+// live authority. Catalog families the runtime does not own (readiness
+// gauges, request families, …) keep their placeholder projection untouched.
+// Registration is idempotent per gatherer and must complete before the server
+// starts serving.
+func (server *Server) RegisterComponentGatherer(gatherer prometheus.Gatherer) error {
+	if gatherer == nil {
+		return errors.New("component metrics gatherer is nil")
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	for _, existing := range server.componentMetrics {
+		if existing == gatherer {
+			return nil
+		}
+	}
+	server.componentMetrics = append(server.componentMetrics, gatherer)
+	return nil
+}
+
+// Gather implements prometheus.Gatherer: the catalog/process registry plus
+// every registered component gatherer, with component families overriding
+// same-named catalog placeholders so a family is never exposed twice.
+func (server *Server) Gather() ([]*dto.MetricFamily, error) {
+	base, err := server.registry.Gather()
+	if err != nil {
+		return nil, err
+	}
+	server.mu.RLock()
+	componentMetrics := append([]prometheus.Gatherer(nil), server.componentMetrics...)
+	server.mu.RUnlock()
+	if len(componentMetrics) == 0 {
+		return base, nil
+	}
+	merged := make([]*dto.MetricFamily, 0, len(base))
+	overridden := make(map[string]bool, len(base))
+	for _, gatherer := range componentMetrics {
+		families, err := gatherer.Gather()
+		if err != nil {
+			return nil, fmt.Errorf("gather component metrics: %w", err)
+		}
+		for _, family := range families {
+			if overridden[family.GetName()] {
+				return nil, fmt.Errorf("component metrics expose family %q twice", family.GetName())
+			}
+			overridden[family.GetName()] = true
+			merged = append(merged, family)
+		}
+	}
+	for _, family := range base {
+		if overridden[family.GetName()] {
+			continue
+		}
+		merged = append(merged, family)
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].GetName() < merged[j].GetName() })
+	return merged, nil
 }
 
 func boolValue(value bool) int {

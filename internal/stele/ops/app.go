@@ -57,6 +57,12 @@ func Run(ctx context.Context, configPath string) error {
 	defer relay.Close()
 
 	metrics := stele.NewMetrics()
+	// 运行期计数（deliveries/forwarded/queue 等）并入 :9090 导出面：同名的
+	// 目录占位族被这里的活值替换，未接线的目录族保持预置零值。不接线时
+	// /metrics 永远只见占位零，事件投递不可观测。
+	if err := server.RegisterComponentGatherer(metrics.Registry()); err != nil {
+		return fmt.Errorf("wire runtime metrics into ops surface: %w", err)
+	}
 	go relay.Run(ctx)
 	forwarder := stele.NewForwarder(queue, relay, metrics)
 	go forwarder.Run(ctx)

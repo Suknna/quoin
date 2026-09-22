@@ -127,6 +127,10 @@ func (webhook *Webhook) serveSource(writer http.ResponseWriter, request *http.Re
 		webhook.metrics.RecordIntake("unavailable")
 		return
 	}
+	// 202 即入站裁决通过。计数单位是“每次请求一次”，与 4xx 拒绝/5xx 不可用
+	// 路径一致：上游重复投递（同批重试）每次 202 各计一次 accepted，多事件
+	// 载荷也只计一次（逐事件计数属于 stele_events_forwarded_total）。
+	webhook.metrics.RecordIntake("accepted")
 	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	writer.WriteHeader(http.StatusAccepted)
 	_, _ = writer.Write([]byte("queued\n"))
