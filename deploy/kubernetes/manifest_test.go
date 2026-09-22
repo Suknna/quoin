@@ -48,7 +48,7 @@ func TestManifestDeliversBrowserFreeStackBehindOneTLSGateway(t *testing.T) {
 			t.Fatalf("missing %s Service", service)
 		}
 	}
-	for _, claim := range []string{"quoin-data", "quoin-backups", "plinth-state"} {
+	for _, claim := range []string{"quoin-data", "quoin-backups", "plinth-state", "stele-data"} {
 		if _, found := claims[claim]; !found {
 			t.Fatalf("missing %s PersistentVolumeClaim", claim)
 		}
@@ -152,6 +152,133 @@ func TestManifestDeliversBrowserFreeStackBehindOneTLSGateway(t *testing.T) {
 	if strategy["type"] != "Recreate" {
 		t.Fatalf("Stele must use Recreate because its relay is single-active: %v", strategy)
 	}
+}
+
+// volumeMountFields is the closed VolumeMount field set of the Kubernetes
+// API. Anything else on a volumeMount entry — above all a volume source such
+// as persistentVolumeClaim — is a pod-spec volumes field pasted into the
+// wrong list.
+var volumeMountFields = map[string]bool{
+	"name":              true,
+	"mountPath":         true,
+	"readOnly":          true,
+	"subPath":           true,
+	"subPathExpr":       true,
+	"mountPropagation":  true,
+	"recursiveReadOnly": true,
+}
+
+// TestManifestVolumeMountsStayMounts protects the manifest shape that
+// `kubectl apply --dry-run=server` enforces: a container volumeMount entry
+// may only carry mount fields and must not paste a volume source
+// (persistentVolumeClaim, secret, ...) in place of a mountPath — such an
+// entry makes the whole apply fail with "does not contain declared merge
+// key: mountPath". It also pins ADR-0011: Stele's local runtime state
+// (SQLite event queue, dedup, rate counters, token cache, dead letters)
+// must be mounted from the stele-data PVC at the dataDirectory configured
+// in stele-config.
+func TestManifestVolumeMountsStayMounts(t *testing.T) {
+	documents := loadDocuments(t, "quoin.yaml")
+	steleComponent := map[string]any{}
+	for _, document := range documents {
+		if document["kind"] != "Deployment" {
+			continue
+		}
+		name := document["metadata"].(map[string]any)["name"].(string)
+		podSpec := document["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+		volumes := map[string]map[string]any{}
+		for _, entry := range toList(t, name, podSpec["volumes"]) {
+			volume := toMap(t, name, "volumes entry", entry)
+			volumeName, _ := volume["name"].(string)
+			volumes[volumeName] = volume
+		}
+		for _, entry := range toList(t, name, podSpec["containers"]) {
+			container := toMap(t, name, "container", entry)
+			for _, mountEntry := range toList(t, name, container["volumeMounts"]) {
+				mount := toMap(t, name, "volumeMount", mountEntry)
+				for field := range mount {
+					if !volumeMountFields[field] {
+						t.Fatalf("%s volumeMount %v: %q is not a VolumeMount field; volume sources belong under pod volumes", name, mount, field)
+					}
+				}
+				if mountPath, _ := mount["mountPath"].(string); mountPath == "" {
+					t.Fatalf("%s volumeMount %v: mountPath is required", name, mount)
+				}
+				mountName, _ := mount["name"].(string)
+				if _, found := volumes[mountName]; !found {
+					t.Fatalf("%s volumeMount %v: no pod volume named %q", name, mount, mountName)
+				}
+			}
+		}
+	}
+
+	// ADR-0011 regression: the stele-data PVC must be mounted inside the
+	// container at the directory stele-config declares as dataDirectory.
+	for _, document := range documents {
+		metadata, _ := document["metadata"].(map[string]any)
+		if document["kind"] == "ConfigMap" && metadata["name"] == "stele-config" {
+			data, _ := document["data"].(map[string]any)
+			steleComponent = loadComponentYAML(t, data["component.yaml"].(string))
+		}
+	}
+	dataDirectory, _ := steleComponent["dataDirectory"].(string)
+	if dataDirectory == "" {
+		t.Fatal("stele-config must declare dataDirectory")
+	}
+	var steleDeployment map[string]any
+	for _, document := range documents {
+		if document["kind"] == "Deployment" && document["metadata"].(map[string]any)["name"] == "stele" {
+			steleDeployment = document
+		}
+	}
+	if steleDeployment == nil {
+		t.Fatal("missing stele Deployment")
+	}
+	podSpec := steleDeployment["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	mounted := map[string]string{}
+	for _, entry := range podSpec["containers"].([]any) {
+		for _, mountEntry := range toList(t, "stele", entry.(map[string]any)["volumeMounts"]) {
+			mount := toMap(t, "stele", "volumeMount", mountEntry)
+			mountName, _ := mount["name"].(string)
+			mounted[mountName], _ = mount["mountPath"].(string)
+		}
+	}
+	claim := ""
+	for _, entry := range toList(t, "stele", podSpec["volumes"]) {
+		volume := toMap(t, "stele", "volumes entry", entry)
+		if name, _ := volume["name"].(string); name == "data" {
+			if source, ok := volume["persistentVolumeClaim"].(map[string]any); ok {
+				claim, _ = source["claimName"].(string)
+			}
+		}
+	}
+	if claim != "stele-data" {
+		t.Fatalf("stele must back its data volume with the stele-data PVC, got %q", claim)
+	}
+	if mounted["data"] != dataDirectory {
+		t.Fatalf("stele must mount the stele-data PVC at its configured dataDirectory %q, got %q", dataDirectory, mounted["data"])
+	}
+}
+
+func toList(t *testing.T, deployment string, value any) []any {
+	t.Helper()
+	if value == nil {
+		return nil
+	}
+	list, ok := value.([]any)
+	if !ok {
+		t.Fatalf("%s: expected a list, got %T", deployment, value)
+	}
+	return list
+}
+
+func toMap(t *testing.T, deployment string, what string, value any) map[string]any {
+	t.Helper()
+	m, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("%s %s: expected a map, got %T", deployment, what, value)
+	}
+	return m
 }
 
 // TestComposeQuoinConfigDefaultsMatchThePluginContract protects the Compose
