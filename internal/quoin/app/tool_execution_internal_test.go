@@ -380,6 +380,165 @@ func TestQuoinRoutedArtifactReadExecutor(t *testing.T) {
 	}
 }
 
+// TestQuoinRoutedSpilledResultSealsWithCommittedArtifact 复现实机
+// 2026-09-21 首条调查的失败链（attempt=8 tool_call=7）：thanos_query 结果超限
+// 溢出为 tool_result Artifact 后，封存必须携带该 Artifact 链接——否则
+// EvidenceFor 以 "spilled thanos_query result lacks the committed artifact"
+// 拒绝，tool call 永久卡 running，worker 90s 等待超时后续跑 BeginToolCall
+// 被顺序围栏拒绝（1811），整个 attempt 以 worker_protocol_error 失败。
+// 本测试按生产 runQueryTool 的真实溢出形状驱动：Spill 提交 → 载荷携带
+// truncated+定位符 → 封存 succeeded + result_artifact_id + Evidence + 帧。
+func TestQuoinRoutedSpilledResultSealsWithCommittedArtifact(t *testing.T) {
+	storeDir := filepath.Join(t.TempDir(), "artifacts")
+	// 溢出提交读取 generated 保留期配置（bootstrap 播种；测试库自播种）。
+	fixture := newRoutedToolFixture(t, func(t *testing.T, db *sql.DB) {
+		t.Helper()
+		mustExec(t, db, `INSERT INTO artifact_retention_settings(id,generated_retention_days,row_version,updated_at) VALUES(1,90,1,?)`,
+			time.Now().UTC().Format(time.RFC3339Nano))
+	})
+	store, err := artifact.NewStore(fixture.db, storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetReader(fixtureReadOnlyPool(t, fixture.db)); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.Artifacts = store
+	// 与 app.go 组装一致：封存事务内写 tool result 读授权，RefFor 的闭包
+	// 查询依赖它。
+	fixture.attempts.ToolResultGrants = store.InsertToolResultGrant
+
+	body := []byte(`{"status":"success","data":{"resultType":"vector","result":[]},` + strings.Repeat(`"padding":"0123456789abcdef",`, 4096) + `"tail":"end"}`)
+	fixture.invoke = func(ctx context.Context, exec plugins.ToolExecution) (json.RawMessage, error) {
+		artifactID, spillErr := exec.Spill(ctx, body, "application/json")
+		if spillErr != nil {
+			return nil, spillErr
+		}
+		sum := sha256.Sum256(body)
+		payload, marshalErr := json.Marshal(map[string]any{
+			"success": true, "status": "success", "resultType": "vector", "sampleCount": 0,
+			"startedAt": "2026-09-21T15:23:51.2Z", "finishedAt": "2026-09-21T15:23:51.3Z",
+			"truncated": true, "totalBytes": len(body), "totalLines": 1,
+			"output": "…（完整输出已存入 Artifact）",
+			"artifact": map[string]any{
+				"id": fmt.Sprintf("%d", artifactID), "mediaType": "application/json",
+				"sha256": hex.EncodeToString(sum[:]), "sizeBytes": len(body), "totalLines": 1,
+			},
+		})
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		return payload, nil
+	}
+
+	if ack := fixture.beginRoutedToolCall(t, 1); !ack.GetBeginToolCallAck().GetAccepted() {
+		t.Fatalf("begin ack=%+v", ack.GetBeginToolCallAck())
+	}
+	// 没有修复时这里超时：封存被 EvidenceFor 拒绝，tool call 悬死 running。
+	fixture.awaitToolCallStatus(t, 1, "succeeded")
+
+	var resultArtifactID int64
+	var resultJSON string
+	if err := fixture.db.QueryRow(`SELECT result_artifact_id,result_json FROM tool_calls WHERE id=1`).Scan(&resultArtifactID, &resultJSON); err != nil {
+		t.Fatal(err)
+	}
+	if resultArtifactID == 0 {
+		t.Fatal("spilled result sealed without the committed artifact link")
+	}
+	if !strings.Contains(resultJSON, `"truncated":true`) {
+		t.Fatalf("sealed preview=%s", resultJSON)
+	}
+	// 溢出结果的 Evidence 闭包：evidence 行携带同一 artifact。
+	var evidenceArtifact sql.NullInt64
+	if err := fixture.db.QueryRow(`SELECT artifact_id FROM evidence WHERE tool_call_id=1`).Scan(&evidenceArtifact); err != nil {
+		t.Fatalf("evidence row missing for spilled tool call: %v", err)
+	}
+	if !evidenceArtifact.Valid || evidenceArtifact.Int64 != resultArtifactID {
+		t.Fatalf("evidence artifact=%v, want %d", evidenceArtifact, resultArtifactID)
+	}
+	// 帧必须携带 artifact 引用（模型据此 artifact_read 续读）。
+	result := fixture.awaitExternalResult(t)
+	if result.GetOutcome() != runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_SUCCEEDED {
+		t.Fatalf("outcome=%v", result.GetOutcome())
+	}
+	if ref := result.GetArtifactRef(); ref == nil || ref.GetArtifactId() != resultArtifactID {
+		t.Fatalf("external result artifact ref=%+v, want artifact %d", result.GetArtifactRef(), resultArtifactID)
+	}
+}
+
+// TestQuoinRoutedSealRejectionConvergesAsFailedResult 覆盖封存被拒后的收敛：
+// 载荷声明溢出但从未提交 Artifact（协议冲突）时，首次封存被 EvidenceFor 拒
+// 绝——收敛路径必须把该 tool call 封存为确定性 failed 结果并下发帧，让
+// agent 循环继续（同 attempt 的后续 tool call 可以开始），而不是悬死
+// running 直到 worker_protocol_error。
+func TestQuoinRoutedSealRejectionConvergesAsFailedResult(t *testing.T) {
+	storeDir := filepath.Join(t.TempDir(), "artifacts")
+	fixture := newRoutedToolFixture(t, func(t *testing.T, db *sql.DB) {
+		t.Helper()
+		mustExec(t, db, `INSERT INTO artifact_retention_settings(id,generated_retention_days,row_version,updated_at) VALUES(1,90,1,?)`,
+			time.Now().UTC().Format(time.RFC3339Nano))
+	})
+	store, err := artifact.NewStore(fixture.db, storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetReader(fixtureReadOnlyPool(t, fixture.db)); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.Artifacts = store
+	fixture.attempts.ToolResultGrants = store.InsertToolResultGrant
+
+	// 成功载荷声明 truncated 并指向一个从未提交的 artifact 定位符：与实机
+	// 同一条失败路径（EvidenceFor：spilled result lacks the committed
+	// artifact），但保持确定性、不依赖真 spills。
+	fixture.invoke = func(context.Context, plugins.ToolExecution) (json.RawMessage, error) {
+		return json.RawMessage(`{"success":true,"status":"success","resultType":"vector","sampleCount":1,"startedAt":"2026-09-21T15:23:51.2Z","finishedAt":"2026-09-21T15:23:51.3Z","truncated":true,"totalBytes":1024,"totalLines":1,"output":"preview","artifact":{"id":"999","mediaType":"application/json","sha256":"` + strings.Repeat("0", 64) + `","sizeBytes":1024,"totalLines":1}}`), nil
+	}
+
+	if ack := fixture.beginRoutedToolCall(t, 1); !ack.GetBeginToolCallAck().GetAccepted() {
+		t.Fatalf("begin ack=%+v", ack.GetBeginToolCallAck())
+	}
+	// 收敛封存：failed + seal_rejected（不是悬死 running）。
+	fixture.awaitToolCallStatus(t, 1, "failed")
+	var errorCode string
+	if err := fixture.db.QueryRow(`SELECT result_json FROM tool_calls WHERE id=1`).Scan(&errorCode); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errorCode, `"errorCode":"seal_rejected"`) {
+		t.Fatalf("converged result=%s", errorCode)
+	}
+	result := fixture.awaitExternalResult(t)
+	if result.GetOutcome() != runtimev1.ToolCallOutcome_TOOL_CALL_OUTCOME_FAILED {
+		t.Fatalf("outcome=%v", result.GetOutcome())
+	}
+	if result.GetErrorCode() != "seal_rejected" {
+		t.Fatalf("error code=%q", result.GetErrorCode())
+	}
+
+	// 续跑围栏：同一 attempt 的下一个 tool call 现在可以开始（实机在这里
+	// 被 1811 拒绝并拖垮整个 attempt）。提案序数 1 是夹具已声明的
+	// artifact_read（call-routed-2），保持与 proposal 闭包一致。
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	followUp := []byte(`{"artifactId":"1","offset":2,"limit":1}`)
+	mustExec(t, fixture.db, `INSERT INTO tool_calls(id,attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
+		VALUES(7,1,1,1,1,'call-routed-2','artifact_read','2',?,?,'quoin_routed','return_to_model','pending',?)`,
+		string(followUp), hex.EncodeToString(sha256SumBytes(followUp)), now)
+	fixture.resetFrames()
+	if ack := fixture.beginRoutedToolCall(t, 7); !ack.GetBeginToolCallAck().GetAccepted() {
+		t.Fatalf("follow-up begin rejected (continuation deadlock): %+v", ack.GetBeginToolCallAck())
+	}
+	// 到达任意终态即可（artifact 1 未播种，预期 failed：artifact_read_failed）。
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var status string
+		if err := fixture.db.QueryRow(`SELECT status FROM tool_calls WHERE id=7`).Scan(&status); err == nil && (status == "succeeded" || status == "failed") {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("follow-up tool call never reached a terminal state")
+}
+
 func sha256SumBytes(body []byte) []byte {
 	sum := sha256.Sum256(body)
 	return sum[:]

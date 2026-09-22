@@ -59,6 +59,10 @@ type routedToolContext struct {
 	// ExternalToolResult 下发围栏都以它为准。
 	bootID string
 	epoch  uint64
+	// spilledArtifactID 由本次执行内 Spill 提交的 tool_result Artifact 回填：
+	// 封存时作为 CompleteToolCall 的 artifact 链接（ARCH-TOOL-003：溢出结果的
+	// Evidence 投影与 artifact 读授权闭包都以它闭包，缺了它封存必被拒）。
+	spilledArtifactID int64
 }
 
 // toolCallSeal 是封存请求的内部形态（CompleteToolCall 帧与异步编排共用）。
@@ -184,9 +188,25 @@ func (service *RuntimeService) executeRoutedToolCall(ctx context.Context, attemp
 	}
 	receipt, sealErr := service.sealToolCall(ctx, attempts, seal)
 	if sealErr != nil {
-		// 封存失败（围栏拒绝/库错误）：终态以 ledger 为权威，这里只能审计。
+		// 封存失败（围栏拒绝/库错误）：终态以 ledger 为权威，先审计。
 		sharedops.LogEvent("quoin", "error", "toolcall.routed_seal_failed",
 			fmt.Sprintf("attempt=%d tool_call=%d outcome=%s: %v", attemptID, toolCallID, seal.outcome, sealErr))
+		// 但被拒的封存不能把 tool call 留在 running：Plinth 的
+		// ExternalToolResult 等待会悬死，续跑的 BeginToolCall 又被"前序
+		// tool call 必须终态"围栏拒绝，整个 attempt 最终以
+		// worker_protocol_error 失败且模型看不到任何工具结果（实机
+		// 2026-09-21 首条调查即此链）。退而封存一个确定性 failed 结果
+		// （return_to_model 语义：模型可见），让 agent 循环继续；收敛
+		// 封存仍被拒（tool call 已被其它路径终态化等）才交给对账/租约收口。
+		convergence := routedFailureSeal(loaded, "seal_rejected",
+			boundedRoutedDetail("工具结果封存被拒绝，已降级为确定性失败结果: "+sealErr.Error()))
+		convergenceReceipt, convergenceErr := service.sealToolCall(ctx, attempts, convergence)
+		if convergenceErr != nil {
+			sharedops.LogEvent("quoin", "error", "toolcall.routed_seal_convergence_failed",
+				fmt.Sprintf("attempt=%d tool_call=%d: %v", attemptID, toolCallID, convergenceErr))
+			return
+		}
+		service.sendExternalToolResult(ctx, loaded, convergence, convergenceReceipt)
 		return
 	}
 	service.sendExternalToolResult(ctx, loaded, seal, receipt)
@@ -269,6 +289,10 @@ func (service *RuntimeService) invokePluginTool(ctx context.Context, attempts *a
 	return toolCallSeal{
 		attemptID: loaded.attemptID, toolCallID: loaded.toolCallID,
 		outcome: "succeeded", schemaKind: loaded.resultSchemaKind, canonical: result,
+		// 执行内 Spill 已提交的 tool_result Artifact 就是本次封存的
+		// artifact 链接（ARCH-TOOL-003：载荷内的溢出定位符必须与它闭合，
+		// EvidenceFor 在封存事务内做该一致性裁决）。
+		artifactID: loaded.spilledArtifactID,
 	}
 }
 
@@ -668,6 +692,7 @@ func (service *RuntimeService) routedSpillFunc(loaded *routedToolContext) plugin
 		}
 		if replayID != 0 {
 			// 同一幂等能力的已提交重放：直接返回既有 artifact。
+			loaded.spilledArtifactID = replayID
 			return replayID, nil
 		}
 		if _, err := file.Write(body); err != nil {
@@ -675,7 +700,14 @@ func (service *RuntimeService) routedSpillFunc(loaded *routedToolContext) plugin
 			service.Artifacts.AbortUpload(uploadID)
 			return 0, err
 		}
-		return service.Artifacts.CommitUpload(ctx, header, file)
+		committed, commitErr := service.Artifacts.CommitUpload(ctx, header, file)
+		if commitErr != nil {
+			return 0, commitErr
+		}
+		// 回填给封存路径：CompleteToolCall 必须携带这个 artifact 链接，
+		// 溢出结果的 Evidence 才能闭包（缺了它封存确定性被拒）。
+		loaded.spilledArtifactID = committed
+		return committed, nil
 	}
 }
 
