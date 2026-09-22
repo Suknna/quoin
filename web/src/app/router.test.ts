@@ -99,6 +99,44 @@ describe("workspace history router", () => {
 		);
 	});
 
+	it("keeps the static alertmanager issues page on its own route instead of an instance drawer", () => {
+		// 验收回归 fix16：直达 /alertmanager/issues 曾被实例归并规则当成实例名
+		// "issues"，重定向到 instances 抽屉并报“该实例不存在”。
+		expect(
+			consolidatedRouteTarget("/settings/platform/integrations/alertmanager/issues"),
+		).toBeUndefined();
+		window.history.replaceState(
+			null,
+			"",
+			"/settings/platform/integrations/alertmanager/issues",
+		);
+		navigateWorkspace("/settings/platform/integrations/alertmanager/issues");
+		expect(window.location.pathname).toBe(
+			"/settings/platform/integrations/alertmanager/issues",
+		);
+		expect(window.location.search).toBe("");
+	});
+
+	it("still folds deep-linked instance names into the instances drawer", () => {
+		expect(
+			consolidatedRouteTarget("/settings/platform/integrations/alertmanager/prod-cluster"),
+		).toBe(
+			"/settings/platform/integrations/instances?platform=alertmanager&instance=prod-cluster",
+		);
+		expect(
+			consolidatedRouteTarget(
+				"/settings/platform/integrations/prometheus/prom-main",
+			),
+		).toBe(
+			"/settings/platform/integrations/instances?platform=prometheus&instance=prom-main",
+		);
+		expect(
+			consolidatedRouteTarget("/settings/platform/integrations/thanos/edge-01"),
+		).toBe(
+			"/settings/platform/integrations/instances?platform=thanos&instance=edge-01",
+		);
+	});
+
 	it("redirects retired account routes into the settings module", () => {
 		expect(consolidatedRouteTarget("/account")).toBe("/settings/profile");
 		expect(consolidatedRouteTarget("/account/profile")).toBe(

@@ -43,11 +43,16 @@ export function consolidatedRouteTarget(pathname: string): string | undefined {
 		if (itemId) return `/knowledge?item=${itemId}`;
 	}
 	// Instance details are drawers over the instances list; only rotate/editor
-	// sub-routes stay real pages.
+	// sub-routes stay real pages. The static read-only issues page belongs to the
+	// Alertmanager section itself, so the segment must not be mistaken for an
+	// instance name (a drawer keyed "issues" can never resolve).
 	const instanceMatch = pathname.match(
 		/^\/settings\/platform\/integrations\/(prometheus|thanos|alertmanager)\/([^/]+)$/,
 	);
-	if (instanceMatch)
+	if (
+		instanceMatch &&
+		!(instanceMatch[1] === "alertmanager" && instanceMatch[2] === "issues")
+	)
 		return `${integrationsBase}/instances?platform=${instanceMatch[1]}&instance=${instanceMatch[2]}`;
 	if (pathname === "/integrations" || pathname.startsWith("/integrations/"))
 		return `${integrationsBase}${pathname.slice("/integrations".length)}`;
