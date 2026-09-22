@@ -12,6 +12,7 @@ vi.mock('@/features/investigation/api', () => ({ api, sourceLabel: (type: string
 vi.mock('@/features/investigation/attachments/api', () => ({ attachmentCommandId: () => 'upload-command', uploadAttachment }))
 vi.mock('@/features/investigation/tools/api', async (original) => ({ ...await original<typeof import('@/features/investigation/tools/api')>(), listToolCalls: vi.fn() }))
 vi.mock('@/features/investigation/stream', () => ({ streamInvestigationMessage: vi.fn() }))
+vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } }))
 vi.mock('@/features/feedback/api', () => ({ appendFeedback: vi.fn(), fetchFeedback: vi.fn(), feedbackValueLabels: {} }))
 vi.mock('@/features/knowledge/api', async (original) => ({ ...await original<typeof import('@/features/knowledge/api')>(), api: { createMessageCandidate: vi.fn() } }))
 const user = { id: 'u', username: 'operator', displayName: 'Operator', role: 'operator' as const, passwordChangeRequired: false, authRevision: 1, enabled: true, initialized: true, lastLoginAt: null, rowVersion: 1 }
@@ -120,6 +121,23 @@ describe('investigations module', () => {
     api.list.mockRejectedValue(new Error('调查服务不可用'))
     render(<View route="/investigations" />)
     expect(await screen.findByText('调查服务不可用')).toBeInTheDocument()
+  })
+  it('surfaces the stream failure reason instead of a silent Failed turn (error 帧 → 提示)', async () => {
+    api.list.mockResolvedValue({ items: [] }); api.get.mockResolvedValue({ ...detail, activeAttemptId: undefined })
+    api.listMessages.mockResolvedValue({ items: [] }); api.listAttempts.mockResolvedValue({ items: [] })
+    api.sendMessage.mockResolvedValue({ id: 'm2', seq: 2, role: 'user', status: 'active', content: '查一下', attachments: [], evidenceIds: [], createdAt: '2026-01-01T00:00:00Z' })
+    // 后端失败轮走 ui-message-stream 的 error 帧：assistant-stream 把它
+    // 累积为消息 status.error；消费方必须展示该 reason，而不是静默 Failed
+    // 加一条误导性的"已发送"成功提示。
+    vi.mocked(streamInvestigationMessage).mockImplementation(async function* () {
+      yield { content: [], status: { type: 'incomplete', reason: 'error', error: { code: 'unknown', message: '执行环境异常，该轮回复未能生成。请重试。' } } } as never
+    })
+    render(<View route="/investigations/i1" />)
+    fireEvent.change(await screen.findByRole('textbox', { name: '消息内容' }), { target: { value: '查一下' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    const { toast } = await import('sonner')
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('执行环境异常，该轮回复未能生成。请重试。'))
+    expect(toast.success).not.toHaveBeenCalledWith('已发送')
   })
 })
 

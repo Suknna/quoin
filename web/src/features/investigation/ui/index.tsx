@@ -511,6 +511,10 @@ function Thread({
 			setPendingSources([]);
 			setStreaming(true);
 			controller.current = new AbortController();
+			// 失败轮的 reason 走 ui-message-stream 的 error 帧（后端已按
+			// termination reason 渲染成自然语言）；不读取它时失败轮只会
+			// 静默变 Failed，用户看不到任何说明，还会误报"已发送"成功。
+			let failureText: string | undefined
 			for await (const update of streamInvestigationMessage(
 				detail.id,
 				sent.id,
@@ -518,7 +522,9 @@ function Thread({
 			)) {
 				const result = update as unknown as {
 					content?: Array<{ type?: string; text?: string }>;
+					status?: { error?: { message?: string } }
 				};
+				if (result.status?.error?.message) failureText = result.status.error.message
 				setStreamText(
 					(result.content ?? [])
 						.filter((part) => part.type === "text")
@@ -527,7 +533,8 @@ function Thread({
 				);
 			}
 			await reload();
-			notify.success("已发送");
+			if (failureText) notify.error(new Error(failureText), "该轮回复未能生成。")
+			else notify.success("已发送");
 		} catch (reason) {
 			if (!(reason instanceof DOMException && reason.name === "AbortError"))
 				notify.error(reason, "消息发送失败。");
