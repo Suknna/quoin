@@ -260,10 +260,9 @@ func TestManifestVolumeMountsStayMounts(t *testing.T) {
 	}
 }
 
-// TestNginxManifestProvidesAnHTTPGateway keeps the Nginx alternative safe to
-// use behind an external TLS terminator. It is a complete stack manifest, not
-// an overlay that could leave Caddy configuration or a TLS secret behind.
-func TestNginxManifestProvidesAnHTTPGateway(t *testing.T) {
+// TestNginxManifestTerminatesTLSAndProxiesHTTP keeps the Nginx alternative a
+// complete TLS gateway rather than an overlay that relies on another proxy.
+func TestNginxManifestTerminatesTLSAndProxiesHTTP(t *testing.T) {
 	documents := loadDocuments(t, "quoin-nginx.yaml")
 	var gateway, gatewayService map[string]any
 	var config string
@@ -281,7 +280,7 @@ func TestNginxManifestProvidesAnHTTPGateway(t *testing.T) {
 	if gateway == nil || gatewayService == nil || config == "" {
 		t.Fatal("Nginx manifest must contain gateway ConfigMap, Deployment, and Service")
 	}
-	for _, required := range []string{"nginx:1.27.5-alpine", "location ^~ /api/", "http://quoin:8080", "location ^~ /stele/", "http://stele:8080/", "http://frontend:8080", "X-Forwarded-Proto"} {
+	for _, required := range []string{"nginx:1.27.5-alpine", "listen 8443 ssl", "ssl_certificate /etc/nginx/tls/tls.crt", "ssl_certificate_key /etc/nginx/tls/tls.key", "location ^~ /api/", "http://quoin:8080", "location ^~ /stele/", "http://stele:8080/", "http://frontend:8080", "X-Forwarded-Proto https", "Strict-Transport-Security"} {
 		if !strings.Contains(mustMarshal(t, gateway)+config, required) {
 			t.Fatalf("Nginx gateway missing %q", required)
 		}
@@ -291,12 +290,12 @@ func TestNginxManifestProvidesAnHTTPGateway(t *testing.T) {
 	if len(args) != 4 || args[0] != "-g" || args[1] != "daemon off;" || args[2] != "-c" || args[3] != "/etc/nginx/nginx.conf" {
 		t.Fatalf("Nginx gateway must start with its mounted config: %v", args)
 	}
-	if strings.Contains(mustMarshal(t, documents), "gateway-tls") {
-		t.Fatal("HTTP Nginx manifest must delegate TLS and must not mount gateway-tls")
+	if !strings.Contains(mustMarshal(t, gateway), "gateway-tls") {
+		t.Fatal("Nginx gateway must mount deployer-provided gateway-tls")
 	}
 	ports := gatewayService["spec"].(map[string]any)["ports"].([]any)
-	if len(ports) != 1 || ports[0].(map[string]any)["port"] != 80 || ports[0].(map[string]any)["targetPort"] != "http" {
-		t.Fatalf("Nginx gateway Service must expose HTTP port 80: %v", ports)
+	if len(ports) != 1 || ports[0].(map[string]any)["port"] != 443 || ports[0].(map[string]any)["targetPort"] != "https" {
+		t.Fatalf("Nginx gateway Service must expose HTTPS port 443: %v", ports)
 	}
 }
 

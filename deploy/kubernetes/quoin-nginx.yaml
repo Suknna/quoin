@@ -1,6 +1,6 @@
-# Alternative Kubernetes manifest for clusters whose Ingress or load balancer
-# terminates TLS. Nginx is an HTTP-only in-cluster reverse proxy; use this
-# manifest instead of quoin.yaml, never alongside it.
+# Alternative Kubernetes manifest using Nginx as the TLS-terminating gateway.
+# It proxies HTTP to the in-cluster services; use this manifest instead of
+# quoin.yaml, never alongside it.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -27,8 +27,12 @@ data:
         '' close;
       }
       server {
-        listen 8080;
+        listen 8443 ssl;
         server_name _;
+        ssl_certificate /etc/nginx/tls/tls.crt;
+        ssl_certificate_key /etc/nginx/tls/tls.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         location = /api { return 404; }
         location ^~ /api/ {
           proxy_pass http://quoin:8080;
@@ -36,7 +40,7 @@ data:
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+          proxy_set_header X-Forwarded-Proto https;
           proxy_set_header Upgrade $http_upgrade;
           proxy_set_header Connection $connection_upgrade;
         }
@@ -47,7 +51,7 @@ data:
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+          proxy_set_header X-Forwarded-Proto https;
         }
         location / {
           proxy_pass http://frontend:8080;
@@ -55,7 +59,7 @@ data:
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+          proxy_set_header X-Forwarded-Proto https;
         }
       }
     }
@@ -67,7 +71,7 @@ data:
   component.yaml: |
     component: quoin
     enabledPlugins: [alertmanager, prometheus, thanos]
-    # Set both values to the exact HTTPS origin served by the external TLS terminator.
+    # Set both values to the exact HTTPS origin served by this gateway.
     publicOrigin: https://quoin.example.com
     stelePublicURL: https://quoin.example.com/stele/webhook/alertmanager
     dataDirectory: /var/lib/quoin/data
@@ -140,15 +144,17 @@ spec:
           image: nginx:1.27.5-alpine
           command: [nginx]
           args: ["-g", "daemon off;", "-c", "/etc/nginx/nginx.conf"]
-          ports: [{name: http, containerPort: 8080}]
+          ports: [{name: https, containerPort: 8443}]
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
-          readinessProbe: {tcpSocket: {port: http}, periodSeconds: 10}
-          livenessProbe: {tcpSocket: {port: http}, periodSeconds: 10}
+          readinessProbe: {tcpSocket: {port: https}, periodSeconds: 10}
+          livenessProbe: {tcpSocket: {port: https}, periodSeconds: 10}
           volumeMounts:
             - {name: config, mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf, readOnly: true}
+            - {name: tls, mountPath: /etc/nginx/tls, readOnly: true}
             - {name: tmp, mountPath: /tmp}
       volumes:
         - {name: config, configMap: {name: gateway-config}}
+        - {name: tls, secret: {secretName: gateway-tls}}
         - {name: tmp, emptyDir: {}}
 ---
 apiVersion: apps/v1
@@ -293,7 +299,7 @@ metadata: {name: gateway}
 spec:
   type: ClusterIP
   selector: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: gateway}
-  ports: [{name: http, port: 80, targetPort: http}]
+  ports: [{name: https, port: 443, targetPort: https}]
 ---
 apiVersion: v1
 kind: Service

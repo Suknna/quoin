@@ -8,15 +8,15 @@ Quoin 采用插件体系扩展平台接入。当前可用插件为 **Prometheus�
 
 Kubernetes Deployment controller 与 Docker Compose 管理部署生命周期。Quoin 不包含 `quoin-deploy`，不会创建、更新或删除 Kubernetes 工作负载、PVC、Secret、实例，也不会编排 Compose 安装、升级、备份或恢复。运维人员负责清单应用、镜像替换、扩缩容、数据卷和 Secret 生命周期。
 
-不需要 Helm、Ingress Controller、cert-manager 或 ACME。Caddy 使用固定的 `caddy:2.10.2-alpine` 镜像；它不是本项目构建产物。
+不需要 Helm、Ingress Controller、cert-manager 或 ACME。Caddy（`caddy:2.10.2-alpine`）和 Nginx（`nginx:1.27.5-alpine`）都是固定的上游网关镜像，不是本项目构建产物。
 
 ## 文件和权限
 
 - [`deploy/kubernetes/quoin.yaml`](../deploy/kubernetes/quoin.yaml)：可直接 `kubectl apply` 的默认 Caddy HTTPS 网关清单，定义五服务、内部 Service、ConfigMap、PVC 和 Secret 挂载。
-- [`deploy/kubernetes/quoin-nginx.yaml`](../deploy/kubernetes/quoin-nginx.yaml)：Nginx HTTP 网关变体，适用于由集群 Ingress 或负载均衡器终止 TLS 的场景。它是完整的替代清单，不能与 `quoin.yaml` 同时应用；Nginx Service 为 `gateway:80`，外部 TLS 终止器必须转发 `X-Forwarded-Proto` 并将 HTTPS Origin 保持在 `publicOrigin` 和 `stelePublicURL` 中。
+- [`deploy/kubernetes/quoin-nginx.yaml`](../deploy/kubernetes/quoin-nginx.yaml)：Nginx HTTPS 网关变体。Nginx 挂载部署者提供的 `gateway-tls` 并在 8443 终止 TLS，随后通过 HTTP 代理至集群内服务。它是完整的替代清单，不能与 `quoin.yaml` 同时应用；Gateway Service 暴露 `443`。
 - [`deploy/kubernetes/ops-services.yaml`](../deploy/kubernetes/ops-services.yaml)：内部运维端口 Service；不得公开暴露。
 - [`deploy/compose.yaml`](../deploy/compose.yaml) 与 [`deploy/config`](../deploy/config)：本地/辅助环境的同一拓扑示例。
-- `deploy/secrets/`：仅供 Compose 示例的部署者私有目录，必须为 `0700`；不提交。Gateway TLS 文件应仅可被 Caddy UID 读取；Quoin 根密钥、Runtime TLS 身份和组件客户端证书仅可被 Quoin UID 读取。
+- `deploy/secrets/`：仅供 Compose 示例的部署者私有目录，必须为 `0700`；不提交。Gateway TLS 文件应仅可被网关进程读取；Quoin 根密钥、Runtime TLS 身份和组件客户端证书仅可被 Quoin UID 读取。
 
 `quoin-data` 保存 SQLite 与 Artifact，`quoin-backups` 保存核心一致性备份，`plinth-state` 保存活动 Runtime 的工作区状态。升级既有部署时，额外的历史卷应保留并单独评估，不作为新安装的依赖。不要删除或替换这些卷而不执行已批准的恢复流程。丢失 `quoin-data` 意味着权威业务数据丢失；丢失根密钥时，必须停机、独占数据库并执行 `quoin root-key rebind --config /etc/quoin/component.yaml`，随后重新录入受影响连接。普通 SQLite 备份不包含部署外部的组件客户端证书、TLS 私钥或根密钥，Secret 必须由运维独立备份并与数据匹配保管。
 
@@ -51,7 +51,7 @@ kubectl -n quoin create secret generic quoin-secrets \
   --from-file=stele-client.key=/secure/path/stele-client.key \
   --from-file=plinth-client.crt=/secure/path/plinth-client.crt \
   --from-file=plinth-client.key=/secure/path/plinth-client.key
-# 二选一：Caddy 自行终止 TLS，或 Nginx 在外部 TLS 终止器之后代理 HTTP。
+# 二选一：Caddy 或 Nginx 自行终止 TLS。
 kubectl -n quoin apply -f deploy/kubernetes/quoin.yaml
 # kubectl -n quoin apply -f deploy/kubernetes/quoin-nginx.yaml
 kubectl -n quoin apply -f deploy/kubernetes/ops-services.yaml
@@ -60,6 +60,18 @@ kubectl -n quoin apply -f deploy/kubernetes/ops-services.yaml
 上述 `quoin-secrets` 内容由部署方用仓库脚本生成（见 Kubernetes 启动指南）：`scripts/generate-deployment-secrets.sh <secrets-dir>` 产出 root-key、runtime-ca、runtime-tls 与两张组件客户端证书，再由运维以 kubectl 从文件创建 Secret。
 
 先将 `quoin-config` 的 `publicOrigin` 改为精确公开 HTTPS Origin，并以发布的 tag 或 digest 替换四个默认应用镜像。默认 gateway Service 是 `ClusterIP`；按集群网络条件由运维改为 `LoadBalancer` 或 `NodePort`。PVC 的 StorageClass、容量、备份策略和回收策略也由运维平台决定。
+
+若以 NodePort 发布 Nginx Gateway，将其唯一端口改为下列形式，并将 `publicOrigin` 与 `stelePublicURL` 设为实际的 `https://<节点IP>:30443`（后者加 `/stele/webhook/alertmanager`）。不能使用 `0.0.0.0`、Pod IP 或 ClusterIP；TLS 证书必须带有该节点 IP 的 IP SAN：
+
+```yaml
+spec:
+  type: NodePort
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      nodePort: 30443
+```
 
 首次 Admin 初始化不需要部署编排创建任何用户：首次启动 Quoin 在空库上自动播种唯一待初始化的内置管理员，初始密码由进程随机生成并写入数据目录 `initial-admin-password` 文件（0600，与 SQLite 同卷；启动日志只报路径与 24 小时期限）。运维用 `kubectl exec`/`docker compose exec` 读取该文件后，以 `admin` + 初始密码登录——单步登录签发受限会话，强制设置正式密码后自动进入工作台；初始密码随之永久失效（24 小时未改密则作废，见下文恢复）。不存在公开默认密码。
 
