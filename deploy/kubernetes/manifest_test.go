@@ -260,6 +260,46 @@ func TestManifestVolumeMountsStayMounts(t *testing.T) {
 	}
 }
 
+// TestNginxManifestProvidesAnHTTPGateway keeps the Nginx alternative safe to
+// use behind an external TLS terminator. It is a complete stack manifest, not
+// an overlay that could leave Caddy configuration or a TLS secret behind.
+func TestNginxManifestProvidesAnHTTPGateway(t *testing.T) {
+	documents := loadDocuments(t, "quoin-nginx.yaml")
+	var gateway, gatewayService map[string]any
+	var config string
+	for _, document := range documents {
+		metadata := document["metadata"].(map[string]any)
+		switch {
+		case document["kind"] == "ConfigMap" && metadata["name"] == "gateway-config":
+			config = document["data"].(map[string]any)["nginx.conf"].(string)
+		case document["kind"] == "Deployment" && metadata["name"] == "gateway":
+			gateway = document
+		case document["kind"] == "Service" && metadata["name"] == "gateway":
+			gatewayService = document
+		}
+	}
+	if gateway == nil || gatewayService == nil || config == "" {
+		t.Fatal("Nginx manifest must contain gateway ConfigMap, Deployment, and Service")
+	}
+	for _, required := range []string{"nginx:1.27.5-alpine", "location ^~ /api/", "http://quoin:8080", "location ^~ /stele/", "http://stele:8080/", "http://frontend:8080", "X-Forwarded-Proto"} {
+		if !strings.Contains(mustMarshal(t, gateway)+config, required) {
+			t.Fatalf("Nginx gateway missing %q", required)
+		}
+	}
+	container := gateway["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	args := container["args"].([]any)
+	if len(args) != 4 || args[0] != "-g" || args[1] != "daemon off;" || args[2] != "-c" || args[3] != "/etc/nginx/nginx.conf" {
+		t.Fatalf("Nginx gateway must start with its mounted config: %v", args)
+	}
+	if strings.Contains(mustMarshal(t, documents), "gateway-tls") {
+		t.Fatal("HTTP Nginx manifest must delegate TLS and must not mount gateway-tls")
+	}
+	ports := gatewayService["spec"].(map[string]any)["ports"].([]any)
+	if len(ports) != 1 || ports[0].(map[string]any)["port"] != 80 || ports[0].(map[string]any)["targetPort"] != "http" {
+		t.Fatalf("Nginx gateway Service must expose HTTP port 80: %v", ports)
+	}
+}
+
 func toList(t *testing.T, deployment string, value any) []any {
 	t.Helper()
 	if value == nil {

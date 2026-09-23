@@ -1,0 +1,319 @@
+# Alternative Kubernetes manifest for clusters whose Ingress or load balancer
+# terminates TLS. Nginx is an HTTP-only in-cluster reverse proxy; use this
+# manifest instead of quoin.yaml, never alongside it.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+data:
+  nginx.conf: |
+    worker_processes auto;
+    pid /tmp/nginx.pid;
+    events { worker_connections 1024; }
+    http {
+      include /etc/nginx/mime.types;
+      default_type application/octet-stream;
+      access_log /dev/stdout;
+      error_log /dev/stderr warn;
+      sendfile on;
+      client_body_temp_path /tmp/client_body;
+      proxy_temp_path /tmp/proxy;
+      fastcgi_temp_path /tmp/fastcgi;
+      uwsgi_temp_path /tmp/uwsgi;
+      scgi_temp_path /tmp/scgi;
+      map $http_upgrade $connection_upgrade {
+        default upgrade;
+        '' close;
+      }
+      server {
+        listen 8080;
+        server_name _;
+        location = /api { return 404; }
+        location ^~ /api/ {
+          proxy_pass http://quoin:8080;
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+        }
+        location = /stele { proxy_pass http://stele:8080/; }
+        location ^~ /stele/ {
+          proxy_pass http://stele:8080/;
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        }
+        location / {
+          proxy_pass http://frontend:8080;
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: quoin-config}
+data:
+  component.yaml: |
+    component: quoin
+    enabledPlugins: [alertmanager, prometheus, thanos]
+    # Set both values to the exact HTTPS origin served by the external TLS terminator.
+    publicOrigin: https://quoin.example.com
+    stelePublicURL: https://quoin.example.com/stele/webhook/alertmanager
+    dataDirectory: /var/lib/quoin/data
+    backupDirectory: /var/lib/quoin/backups
+    rootKeyFile: /run/quoin-secrets/root-key
+    runtimeTlsCertificateFile: /run/quoin-secrets/runtime-tls.crt
+    runtimeTlsPrivateKeyFile: /run/quoin-secrets/runtime-tls.key
+    runtimeClientCaFile: /run/quoin-secrets/runtime-ca.pem
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: plinth-config}
+data:
+  component.yaml: |
+    component: plinth
+    stateDirectory: /var/lib/plinth
+    workspaceDirectory: /var/lib/plinth/workspaces
+    quoinRuntimeEndpoint: https://quoin:8443
+    quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
+    quoinRuntimeClientCertificateFile: /run/quoin-secrets/plinth-client.crt
+    quoinRuntimeClientPrivateKeyFile: /run/quoin-secrets/plinth-client.key
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: stele-config}
+data:
+  component.yaml: |
+    component: stele
+    quoinRuntimeEndpoint: https://quoin:8443
+    quoinRuntimeCaFile: /run/quoin-secrets/runtime-ca.pem
+    quoinRuntimeClientCertificateFile: /run/quoin-secrets/stele-client.crt
+    quoinRuntimeClientPrivateKeyFile: /run/quoin-secrets/stele-client.key
+    dataDirectory: /var/lib/stele
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: quoin-data}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 10Gi}}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: quoin-backups}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 10Gi}}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: plinth-state}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 10Gi}}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: stele-data}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: gateway}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: gateway}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: gateway}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 101, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: gateway
+          image: nginx:1.27.5-alpine
+          command: [nginx]
+          args: ["-g", "daemon off;", "-c", "/etc/nginx/nginx.conf"]
+          ports: [{name: http, containerPort: 8080}]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          readinessProbe: {tcpSocket: {port: http}, periodSeconds: 10}
+          livenessProbe: {tcpSocket: {port: http}, periodSeconds: 10}
+          volumeMounts:
+            - {name: config, mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: config, configMap: {name: gateway-config}}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: frontend}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: frontend}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: frontend}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: frontend
+          image: quoin/frontend:v0.1.0
+          ports: [{name: http, containerPort: 8080}]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          readinessProbe: {tcpSocket: {port: http}, periodSeconds: 10}
+          livenessProbe: {tcpSocket: {port: http}, periodSeconds: 10}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quoin
+  labels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: quoin}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: quoin}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: quoin}}
+    spec:
+      terminationGracePeriodSeconds: 60
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, fsGroup: 65532, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: quoin
+          image: quoin/quoin:v0.1.0
+          args: [serve, --config, /etc/quoin/component.yaml]
+          ports: [{name: public, containerPort: 8080}, {name: runtime, containerPort: 8443}, {name: ops, containerPort: 9090}]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          startupProbe: {httpGet: {path: /livez, port: ops}, periodSeconds: 5, failureThreshold: 24}
+          readinessProbe: {httpGet: {path: /readyz, port: ops}, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /livez, port: ops}, periodSeconds: 10}
+          volumeMounts:
+            - {name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true}
+            - {name: data, mountPath: /var/lib/quoin/data}
+            - {name: backups, mountPath: /var/lib/quoin/backups}
+            - {name: secrets, mountPath: /run/quoin-secrets, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: config, configMap: {name: quoin-config}}
+        - {name: data, persistentVolumeClaim: {claimName: quoin-data}}
+        - {name: backups, persistentVolumeClaim: {claimName: quoin-backups}}
+        - {name: secrets, secret: {secretName: quoin-secrets}}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plinth
+  labels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: plinth}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: plinth}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: plinth}}
+    spec:
+      terminationGracePeriodSeconds: 60
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, fsGroup: 65532, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: plinth
+          image: quoin/plinth:v0.1.0
+          args: [--config, /etc/quoin/component.yaml]
+          ports: [{name: ops, containerPort: 9090}]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          startupProbe: {httpGet: {path: /livez, port: ops}, periodSeconds: 5, failureThreshold: 24}
+          readinessProbe: {httpGet: {path: /readyz, port: ops}, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /livez, port: ops}, periodSeconds: 10}
+          volumeMounts:
+            - {name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true}
+            - {name: state, mountPath: /var/lib/plinth}
+            - {name: runtime-ca, mountPath: /run/quoin-secrets/runtime-ca.pem, subPath: runtime-ca.pem, readOnly: true}
+            - {name: plinth-client-cert, mountPath: /run/quoin-secrets/plinth-client.crt, subPath: plinth-client.crt, readOnly: true}
+            - {name: plinth-client-key, mountPath: /run/quoin-secrets/plinth-client.key, subPath: plinth-client.key, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: config, configMap: {name: plinth-config}}
+        - {name: state, persistentVolumeClaim: {claimName: plinth-state}}
+        - {name: runtime-ca, secret: {secretName: quoin-secrets, items: [{key: runtime-ca.pem, path: runtime-ca.pem}]}}
+        - {name: plinth-client-cert, secret: {secretName: quoin-secrets, items: [{key: plinth-client.crt, path: plinth-client.crt}]}}
+        - {name: plinth-client-key, secret: {secretName: quoin-secrets, items: [{key: plinth-client.key, path: plinth-client.key}]}}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stele
+  labels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: stele}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: stele}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: stele}}
+    spec:
+      terminationGracePeriodSeconds: 60
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, fsGroup: 65532, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: stele
+          image: quoin/stele:v0.1.0
+          args: [--config, /etc/quoin/component.yaml]
+          ports: [{name: webhook, containerPort: 8080}, {name: ops, containerPort: 9090}]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          startupProbe: {httpGet: {path: /livez, port: ops}, periodSeconds: 5, failureThreshold: 24}
+          readinessProbe: {httpGet: {path: /readyz, port: ops}, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /livez, port: ops}, periodSeconds: 10}
+          volumeMounts:
+            - {name: config, mountPath: /etc/quoin/component.yaml, subPath: component.yaml, readOnly: true}
+            - {name: runtime-ca, mountPath: /run/quoin-secrets/runtime-ca.pem, subPath: runtime-ca.pem, readOnly: true}
+            - {name: stele-client-cert, mountPath: /run/quoin-secrets/stele-client.crt, subPath: stele-client.crt, readOnly: true}
+            - {name: stele-client-key, mountPath: /run/quoin-secrets/stele-client.key, subPath: stele-client.key, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+            - {name: data, mountPath: /var/lib/stele}
+      volumes:
+        - {name: config, configMap: {name: stele-config}}
+        - {name: runtime-ca, secret: {secretName: quoin-secrets, items: [{key: runtime-ca.pem, path: runtime-ca.pem}]}}
+        - {name: stele-client-cert, secret: {secretName: quoin-secrets, items: [{key: stele-client.crt, path: stele-client.crt}]}}
+        - {name: stele-client-key, secret: {secretName: quoin-secrets, items: [{key: stele-client.key, path: stele-client.key}]}}
+        - {name: tmp, emptyDir: {}}
+        - {name: data, persistentVolumeClaim: {claimName: stele-data}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: gateway}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: gateway}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: frontend}
+spec:
+  selector: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: frontend}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: quoin}
+spec:
+  selector: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: quoin}
+  ports:
+    - {name: public, port: 8080, targetPort: public}
+    - {name: runtime, port: 8443, targetPort: runtime}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: stele}
+spec:
+  selector: {app.kubernetes.io/name: quoin, app.kubernetes.io/component: stele}
+  ports: [{name: webhook, port: 8080, targetPort: webhook}]

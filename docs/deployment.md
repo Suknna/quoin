@@ -12,7 +12,8 @@ Kubernetes Deployment controller 与 Docker Compose 管理部署生命周期。Q
 
 ## 文件和权限
 
-- [`deploy/kubernetes/quoin.yaml`](../deploy/kubernetes/quoin.yaml)：可直接 `kubectl apply` 的普通多文档 YAML，定义默认五服务、内部 Service、ConfigMap、PVC 和 Secret 挂载。
+- [`deploy/kubernetes/quoin.yaml`](../deploy/kubernetes/quoin.yaml)：可直接 `kubectl apply` 的默认 Caddy HTTPS 网关清单，定义五服务、内部 Service、ConfigMap、PVC 和 Secret 挂载。
+- [`deploy/kubernetes/quoin-nginx.yaml`](../deploy/kubernetes/quoin-nginx.yaml)：Nginx HTTP 网关变体，适用于由集群 Ingress 或负载均衡器终止 TLS 的场景。它是完整的替代清单，不能与 `quoin.yaml` 同时应用；Nginx Service 为 `gateway:80`，外部 TLS 终止器必须转发 `X-Forwarded-Proto` 并将 HTTPS Origin 保持在 `publicOrigin` 和 `stelePublicURL` 中。
 - [`deploy/kubernetes/ops-services.yaml`](../deploy/kubernetes/ops-services.yaml)：内部运维端口 Service；不得公开暴露。
 - [`deploy/compose.yaml`](../deploy/compose.yaml) 与 [`deploy/config`](../deploy/config)：本地/辅助环境的同一拓扑示例。
 - `deploy/secrets/`：仅供 Compose 示例的部署者私有目录，必须为 `0700`；不提交。Gateway TLS 文件应仅可被 Caddy UID 读取；Quoin 根密钥、Runtime TLS 身份和组件客户端证书仅可被 Quoin UID 读取。
@@ -50,7 +51,9 @@ kubectl -n quoin create secret generic quoin-secrets \
   --from-file=stele-client.key=/secure/path/stele-client.key \
   --from-file=plinth-client.crt=/secure/path/plinth-client.crt \
   --from-file=plinth-client.key=/secure/path/plinth-client.key
+# 二选一：Caddy 自行终止 TLS，或 Nginx 在外部 TLS 终止器之后代理 HTTP。
 kubectl -n quoin apply -f deploy/kubernetes/quoin.yaml
+# kubectl -n quoin apply -f deploy/kubernetes/quoin-nginx.yaml
 kubectl -n quoin apply -f deploy/kubernetes/ops-services.yaml
 ```
 
