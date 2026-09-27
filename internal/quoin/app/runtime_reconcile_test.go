@@ -11,11 +11,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
+	"github.com/Suknna/quoin/internal/quoin/inspection"
+	"github.com/Suknna/quoin/internal/quoin/observation"
 	_ "modernc.org/sqlite"
 )
 
@@ -223,6 +226,158 @@ func TestFreezeRecoveryLossPendingRollsBackOnAuditFailure(t *testing.T) {
 	mustQuery(t, db, `SELECT source FROM pending_attempt_terminals WHERE attempt_id=2`, &source)
 	if source != "recovery_loss" {
 		t.Fatalf("recovered freeze row source=%s", source)
+	}
+}
+
+// A lease expiry must close the visible analysis and its attempt in the
+// same audited operation; a terminal attempt cannot be offered to the
+// analysis lifecycle later as if it were still Running.
+func expiredInitialAnalysisFixture(t *testing.T) (*sql.DB, *RuntimeService) {
+	t.Helper()
+	db, service := newReconcileFixture(t)
+	if err := service.Analyses.SetReader(fixtureReadOnlyPool(t, db)); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	digest := strings.Repeat("a", 64)
+	mustExec(t, db, `INSERT INTO alert_sources(id,source_key,protocol,enabled,created_at) VALUES(1,'lease-test','alertmanager',1,?)`, now)
+	mustExec(t, db, `INSERT INTO alert_occurrences(id,source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,first_seen_at,last_state_change_at) VALUES(1,1,?,?,'Firing','{}',?,?,?)`, []byte{0, 0, 0, 0, 0, 0, 0, 1}, now, digest, now, now)
+	mustExec(t, db, `INSERT INTO initial_analyses(id,occurrence_id,state,input_snapshot_digest,created_by,created_at) VALUES(1,1,'Queued',?,1,?)`, digest, now)
+	mustExec(t, db, `INSERT INTO execution_attempts(id,attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,operation_correlation_id,initiator_type,initiator_id,created_at) VALUES(3,'initial_analysis','analysis',1,'Queued','q','initial-analysis-v2','corr-expired-analysis','user',1,?)`, now)
+	mustExec(t, db, `INSERT INTO attempt_input_snapshots(id,attempt_id,schema_kind,renderer_version,content_digest,created_at) VALUES(3,3,'initial_analysis_v1','v1',?,?)`, digest, now)
+	mustExec(t, db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,occurrence_id) VALUES(3,1,'user',?,1)`, digest)
+	mustExec(t, db, `INSERT INTO attempt_connection_grants(id,attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at) VALUES(4,3,'chat_model',1,1,1,1,?)`, now)
+	mustExec(t, db, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='plinth-boot',connection_epoch=1,lease_until=?,runtime_release_version='p',row_version=row_version+1 WHERE id=3`, past)
+	mustExec(t, db, `UPDATE execution_attempts SET state='Running',accepted_at=?,started_at=?,row_version=row_version+1 WHERE id=3`, now, now)
+	mustExec(t, db, `UPDATE initial_analyses SET state='Running',row_version=row_version+1 WHERE id=1`)
+	return db, service
+}
+
+func TestLeaseSweepClosesInitialAnalysisAndAuditTogether(t *testing.T) {
+	db, service := expiredInitialAnalysisFixture(t)
+	service.runLeaseSweepPass(context.Background(), service.attemptsService())
+	var attemptState, analysisState string
+	reconcileScan(t, db, `SELECT state FROM execution_attempts WHERE id=3`, &attemptState)
+	reconcileScan(t, db, `SELECT state FROM initial_analyses WHERE id=1`, &analysisState)
+	if attemptState != "Interrupted" || analysisState != "Interrupted" {
+		t.Fatalf("expired analysis left divergent states: attempt=%s analysis=%s", attemptState, analysisState)
+	}
+	var correlation string
+	reconcileScan(t, db, `SELECT correlation_id FROM audit_events WHERE action='initial_analysis.interrupted' AND domain_ref_id=1`, &correlation)
+	if correlation != "corr-expired-analysis" {
+		t.Fatalf("interruption audit correlation=%q", correlation)
+	}
+}
+
+func TestLeaseSweepRetriesAtomicAnalysisClosureAfterAuditFailure(t *testing.T) {
+	db, service := expiredInitialAnalysisFixture(t)
+	abortAuditForAction(t, db, "initial_analysis.interrupted")
+	service.runLeaseSweepPass(context.Background(), service.attemptsService())
+	var attemptState, analysisState string
+	reconcileScan(t, db, `SELECT state FROM execution_attempts WHERE id=3`, &attemptState)
+	reconcileScan(t, db, `SELECT state FROM initial_analyses WHERE id=1`, &analysisState)
+	if attemptState != "Running" || analysisState != "Running" {
+		t.Fatalf("audit failure left partial state: attempt=%s analysis=%s", attemptState, analysisState)
+	}
+	dropAuditAbort(t, db)
+	service.runLeaseSweepPass(context.Background(), service.attemptsService())
+	reconcileScan(t, db, `SELECT state FROM execution_attempts WHERE id=3`, &attemptState)
+	reconcileScan(t, db, `SELECT state FROM initial_analyses WHERE id=1`, &analysisState)
+	if attemptState != "Interrupted" || analysisState != "Interrupted" {
+		t.Fatalf("retry did not close both rows: attempt=%s analysis=%s", attemptState, analysisState)
+	}
+	var count int
+	mustQuery(t, db, `SELECT COUNT(*) FROM audit_events WHERE action='initial_analysis.interrupted' AND domain_ref_id=1`, &count)
+	if count != 1 {
+		t.Fatalf("terminal audit rows=%d, want one", count)
+	}
+}
+
+func TestLeaseSweepRetriesObservationClosureAfterAuditFailure(t *testing.T) {
+	db, service := newReconcileFixture(t)
+	reader := fixtureReadOnlyPool(t, db)
+	if err := service.Analyses.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	service.Observations = observation.NewService(db, nil, nil)
+	if err := service.Observations.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	digest := strings.Repeat("a", 64)
+	mustExec(t, db, `INSERT INTO observation_runs(id,connection_id,plugin_id,trigger_kind,state,evidence_at,created_at) VALUES(1,1,'fixture','manual','Running',?,?)`, now, now)
+	mustExec(t, db, `INSERT INTO observation_run_objects(id,observation_run_id,object_type,status,gap_reason,created_at) VALUES(1,1,'fixture','gap','runtime_unavailable',?)`, now)
+	mustExec(t, db, `INSERT INTO execution_attempts(id,attempt_type,scope_type,scope_id,discovery_key,state,quoin_release_version,operation_correlation_id,initiator_type,initiator_id,created_at) VALUES(3,'inspection_collection','observation_run',1,'fixture','Queued','q','corr-observation-expired','user',1,?)`, now)
+	mustExec(t, db, `UPDATE observation_run_objects SET attempt_id=3 WHERE id=1`)
+	mustExec(t, db, `INSERT INTO attempt_input_snapshots(id,attempt_id,schema_kind,renderer_version,content_digest,created_at) VALUES(3,3,'source_observation_execution_v1','v1',?,?)`, digest, now)
+	mustExec(t, db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,connection_revision_id) VALUES(3,1,'source',?,1)`, digest)
+	mustExec(t, db, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='plinth-boot',connection_epoch=1,lease_until=?,runtime_release_version='p',row_version=row_version+1 WHERE id=3`, past)
+	mustExec(t, db, `UPDATE execution_attempts SET state='Running',accepted_at=?,started_at=?,row_version=row_version+1 WHERE id=3`, now, now)
+	abortAuditForAction(t, db, "observation.source.converge")
+	service.runLeaseSweepPass(context.Background(), service.attemptsService())
+	var attemptState, runState string
+	reconcileScan(t, db, `SELECT state FROM execution_attempts WHERE id=3`, &attemptState)
+	reconcileScan(t, db, `SELECT state FROM observation_runs WHERE id=1`, &runState)
+	if attemptState != "Running" || runState != "Running" {
+		t.Fatalf("failed projection setup: attempt=%s run=%s", attemptState, runState)
+	}
+	dropAuditAbort(t, db)
+	service.runLeaseSweepPass(context.Background(), service.attemptsService())
+	reconcileScan(t, db, `SELECT state FROM execution_attempts WHERE id=3`, &attemptState)
+	reconcileScan(t, db, `SELECT state FROM observation_runs WHERE id=1`, &runState)
+	if attemptState != "Interrupted" || runState != "CompletedWithWarnings" {
+		t.Fatalf("terminal child did not recover its run: attempt=%s run=%s", attemptState, runState)
+	}
+	var correlation string
+	reconcileScan(t, db, `SELECT correlation_id FROM audit_events WHERE action='observation.source.converge' AND domain_ref_id=1`, &correlation)
+	if correlation != "corr-observation-expired" {
+		t.Fatalf("observation closure lost original correlation: %q", correlation)
+	}
+}
+
+func TestLeaseSweepRetriesRunCheckClosureAfterAuditFailure(t *testing.T) {
+	db, service := newReconcileFixture(t)
+	reader := fixtureReadOnlyPool(t, db)
+	if err := service.Analyses.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	service.Inspections = inspection.NewService(db)
+	if err := service.Inspections.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	digest := strings.Repeat("b", 64)
+	mustExec(t, db, `INSERT INTO inspection_plans(id,plan_key,display_name,enabled,connection_id,plugin_id,template_id,template_version,params_json,scope_kind,scope_json,timezone,created_at,updated_at) VALUES(1,'lease-check','Lease check',1,1,'fixture','check','1','{}','integration','{"kind":"integration"}','UTC',?,?)`, now, now)
+	mustExec(t, db, `INSERT INTO inspection_runs(id,plan_key,plan_id,connection_id,plugin_id,template_id,template_version,frozen_params_json,frozen_scope_json,trigger_kind,state,created_at) VALUES(1,'lease-check',1,1,'fixture','check','1','{}','{"kind":"integration"}','manual','Queued',?)`, now)
+	mustExec(t, db, `INSERT INTO inspection_run_checks(run_id,check_key,display_name,plugin_id,template_id,template_version,params_json,created_at) VALUES(1,'check-1','Check','fixture','check','1','{}',?)`, now)
+	mustExec(t, db, `UPDATE inspection_runs SET state='Running',evidence_at=?,row_version=row_version+1 WHERE id=1`, now)
+	mustExec(t, db, `INSERT INTO execution_attempts(id,attempt_type,scope_type,scope_id,check_key,state,quoin_release_version,operation_correlation_id,initiator_type,initiator_id,created_at) VALUES(3,'inspection_collection','run_check',1,'check-1','Queued','q','corr-expired-check','user',1,?)`, now)
+	mustExec(t, db, `INSERT INTO attempt_input_snapshots(id,attempt_id,schema_kind,renderer_version,content_digest,created_at) VALUES(3,3,'inspection_plugin_execution_v1','v1',?,?)`, digest, now)
+	mustExec(t, db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,connection_revision_id) VALUES(3,1,'source',?,1)`, digest)
+	mustExec(t, db, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='plinth-boot',connection_epoch=1,lease_until=?,runtime_release_version='p',row_version=row_version+1 WHERE id=3`, past)
+	mustExec(t, db, `UPDATE execution_attempts SET state='Running',accepted_at=?,started_at=?,row_version=row_version+1 WHERE id=3`, now, now)
+	abortAuditForAction(t, db, "inspection_run.gap.promql")
+	service.runLeaseSweepPass(context.Background(), service.attemptsService())
+	var attemptState, runState string
+	reconcileScan(t, db, `SELECT state FROM execution_attempts WHERE id=3`, &attemptState)
+	reconcileScan(t, db, `SELECT state FROM inspection_runs WHERE id=1`, &runState)
+	if attemptState != "Running" || runState != "Running" {
+		t.Fatalf("audit failure left partial state: attempt=%s run=%s", attemptState, runState)
+	}
+	dropAuditAbort(t, db)
+	service.runLeaseSweepPass(context.Background(), service.attemptsService())
+	reconcileScan(t, db, `SELECT state FROM execution_attempts WHERE id=3`, &attemptState)
+	reconcileScan(t, db, `SELECT state FROM inspection_runs WHERE id=1`, &runState)
+	if attemptState != "Interrupted" || runState != "Interrupted" {
+		t.Fatalf("retry left divergent state: attempt=%s run=%s", attemptState, runState)
+	}
+	var correlation string
+	reconcileScan(t, db, `SELECT correlation_id FROM audit_events WHERE action='inspection_run.gap.promql' AND domain_ref_id=1`, &correlation)
+	if correlation != "corr-expired-check" {
+		t.Fatalf("run check closure correlation=%q", correlation)
 	}
 }
 

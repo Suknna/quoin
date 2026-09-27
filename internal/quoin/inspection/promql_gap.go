@@ -13,8 +13,46 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
+
+// ExpirePromQLCollection owns the lease-loss transition for a run_check:
+// the attempt terminal, its audit fact and the last-child Run closure share
+// one transaction. A failed audit leaves the attempt active for the next
+// lease pass instead of making the parent permanently unreachable.
+func (s *Service) ExpirePromQLCollection(ctx context.Context, attemptID int64) error {
+	scope, err := s.resultContext(ctx, attemptID)
+	if err != nil {
+		return err
+	}
+	_, err = execution.Execute(scope, s.runner, s.promqlGap,
+		func(tx *execution.Tx) (int64, error) {
+			var runID int64
+			var state string
+			if err := tx.QueryRowContext(scope, `SELECT scope_id,state FROM execution_attempts
+				WHERE id=? AND attempt_type='inspection_collection' AND scope_type='run_check'`, attemptID).Scan(&runID, &state); err != nil {
+				return 0, err
+			}
+			if state != "Assigned" && state != "Running" && state != "Cancelling" {
+				return 0, fmt.Errorf("%w: collection attempt %d is %s", execution.ErrNoTransition, attemptID, state)
+			}
+			if _, err := attempt.NewService(s.db).InterruptOn(scope, tx, attemptID, "lease_expired"); err != nil {
+				return 0, err
+			}
+			if _, err := tx.ExecContext(scope, `UPDATE inspection_runs SET state='Interrupted',row_version=row_version+1
+				WHERE id=? AND state='Running' AND NOT EXISTS (
+					SELECT 1 FROM execution_attempts WHERE scope_type='run_check' AND scope_id=?
+					AND state IN ('Queued','Assigned','Running','Cancelling'))`, runID, runID); err != nil {
+				return 0, err
+			}
+			return runID, nil
+		}, func(runID int64) int64 { return runID })
+	if errors.Is(err, execution.ErrNoTransition) {
+		return nil // A concurrent terminal result owns the closure.
+	}
+	return err
+}
 
 // RecordPromQLTechnicalGap closes a terminally lost run_check PromQL child:
 // the frozen closure admits no check result without a Running attempt, so the

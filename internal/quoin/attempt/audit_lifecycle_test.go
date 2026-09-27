@@ -348,9 +348,11 @@ func TestSweepAuditKeepsOriginalCorrelationAndExplicitSchedulerScope(t *testing.
 	service := newTestService(t, db)
 	ctx := context.Background()
 
-	correlatedID := correlatedRunningAttempt(t, db, service)
-	legacyID, _ := seedAttempt(t, db)
-	bindAndAccept(t, service, legacyID, "boot-audit", 1)
+	correlatedID := seedGenericSweepEmbedding(t, db, service)
+	if err := persistCorrelationForTest(t, correlationContext(t), db, correlatedID); err != nil {
+		t.Fatal(err)
+	}
+	legacyID := seedGenericSweepEmbedding(t, db, service)
 	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
 	if _, err := db.Exec(`UPDATE execution_attempts SET lease_until=?,row_version=row_version+1 WHERE id IN (?,?)`, past, correlatedID, legacyID); err != nil {
 		t.Fatal(err)
@@ -398,8 +400,7 @@ func TestSweepAuditKeepsOriginalCorrelationAndExplicitSchedulerScope(t *testing.
 	}
 
 	// The next trigger is a NEW operation with a fresh correlation.
-	nextID, _ := seedAttempt(t, db)
-	bindAndAccept(t, service, nextID, "boot-audit", 1)
+	nextID := seedGenericSweepEmbedding(t, db, service)
 	if _, err := db.Exec(`UPDATE execution_attempts SET lease_until=?,row_version=row_version+1 WHERE id=?`, past, nextID); err != nil {
 		t.Fatal(err)
 	}

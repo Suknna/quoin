@@ -301,20 +301,11 @@ func (service *RuntimeService) finalizeLoss(ctx context.Context, view attempt.Vi
 		service.reconcilePendingAttemptTerminals(ctx)
 		return
 	}
-	// A connection_probe has its own immutable typed result closure. During a
-	// restart it must append the interrupted child before the terminal Attempt
-	// update; generic interruption would violate that database fence. A probe
-	// nobody accepted (legacy Assigned binding) has no typed observation to
-	// seal and converges through the generic interruption instead.
+	// A connection_probe has its own immutable typed result closure. Both
+	// Assigned (no observation) and Running (typed result required) are owned
+	// by InterruptProbe; never fall back to an unpaired generic UPDATE.
 	if view.AttemptType == "connection_probe" && service.Connections != nil {
-		if err := service.Connections.InterruptProbe(ctx, view.ID, reason); err == nil {
-			return
-		}
-		attempts := service.attemptsService()
-		if attempts == nil {
-			return
-		}
-		if _, err := attempts.Interrupt(ctx, view.ID, reason); err != nil {
+		if err := service.Connections.InterruptProbe(ctx, view.ID, reason); err != nil {
 			sharedops.LogEvent("quoin", "error", "reconcile.interrupt_failed", fmt.Sprintf("attempt=%d %v", view.ID, err))
 		}
 		return
@@ -438,6 +429,12 @@ func (service *RuntimeService) finalizeCancellation(ctx context.Context, attempt
 		if service.Investigations != nil {
 			if err := service.Investigations.CancelAck(ctx, attemptID); err != nil {
 				sharedops.LogEvent("quoin", "error", "reconcile.cancel_converge", fmt.Sprintf("attempt=%d %v", attemptID, err))
+			}
+		}
+	case "knowledge_extraction":
+		if service.Knowledge != nil {
+			if err := service.Knowledge.Attempts().CancelAck(ctx, attemptID); err != nil {
+				sharedops.LogEvent("quoin", "error", "knowledge.cancel_converge", fmt.Sprintf("attempt=%d %v", attemptID, err))
 			}
 		}
 	case "connection_probe":
@@ -635,69 +632,61 @@ func (service *RuntimeService) RunLeaseSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			swept, err := attempts.SweepExpired(ctx)
-			if err != nil {
-				sharedops.LogEvent("quoin", "error", "reconcile.sweep_failed", err.Error())
-				continue
-			}
-			for _, item := range swept {
-				if item.DeferredLoss {
-					view, viewErr := attempts.Get(ctx, item.AttemptID)
-					if viewErr != nil {
-						sharedops.LogEvent("quoin", "error", "reconcile.sweep_candidate", fmt.Sprintf("attempt=%d %v", item.AttemptID, viewErr))
-						continue
-					}
-					if view.State == "Cancelling" {
-						service.finalizeCancellation(ctx, view.ID, view.AttemptType)
-					} else {
-						service.finalizeLoss(ctx, view, "lease_expired")
-					}
-					continue
-				}
-				sharedops.LogEvent("quoin", "info", "reconcile.swept", fmt.Sprintf("attempt=%d final=%s", item.AttemptID, item.Final))
-				switch item.Type {
-				case "initial_analysis":
-					if service.Analyses != nil {
-						if err := service.Analyses.CommitInterruption(ctx, item.AttemptID, "lease_expired"); err != nil {
-							sharedops.LogEvent("quoin", "error", "reconcile.sweep_closure", fmt.Sprintf("attempt=%d %v", item.AttemptID, err))
-						}
-					}
-				case "investigation":
-					if service.Investigations != nil {
-						// The sweep converged the attempt row; close any
-						// attached stream with the interruption terminal view.
-						service.Investigations.NotifyTerminal(ctx, item.AttemptID)
-					}
-				case "knowledge_extraction":
-					if service.Knowledge != nil {
-						if err := service.Knowledge.InterruptExtraction(ctx, item.AttemptID, "lease_expired"); err != nil {
-							sharedops.LogEvent("quoin", "error", "knowledge_extraction.sweep_closure", fmt.Sprintf("attempt=%d %v", item.AttemptID, err))
-						}
-					}
-				case "inspection_collection":
-					var closeErr error
-					switch item.ScopeType {
-					case "run_check":
-						if service.Inspections != nil {
-							closeErr = service.Inspections.RecordPromQLTechnicalGap(ctx, item.AttemptID, "interrupted")
-						}
-					case "observation_run":
-						if service.Observations != nil {
-							closeErr = service.Observations.ConvergeInterruptedChild(ctx, item.AttemptID, "interrupted")
-						}
-					default:
-						sharedops.LogEvent("quoin", "info", "reconcile.sweep_scope_unhandled", fmt.Sprintf("attempt=%d scope=%s", item.AttemptID, item.ScopeType))
-					}
-					if closeErr != nil {
-						sharedops.LogEvent("quoin", "error", "inspection_collection.sweep_closure", fmt.Sprintf("attempt=%d %v", item.AttemptID, closeErr))
-					}
-				}
-			}
+			service.runLeaseSweepPass(ctx, attempts)
 			// Keep the semantic projection converging between external
 			// triggers: drift detection, pending batches and settled
 			// generation switches all reconcile on the tick.
 			service.dispatchQueuedEmbeddings(ctx)
 		}
+	}
+}
+
+// runLeaseSweepPass routes each confirmed transition, even if a later item
+// failed. Domain-owned candidates keep their lease until their parent and
+// attempt have committed together, so a failed closure is retried next tick.
+func (service *RuntimeService) runLeaseSweepPass(ctx context.Context, attempts *attempt.Service) {
+	swept, sweepErr := attempts.SweepExpired(ctx)
+	for _, item := range swept {
+		if item.DomainOwned {
+			view, viewErr := attempts.Get(ctx, item.AttemptID)
+			if viewErr != nil {
+				sharedops.LogEvent("quoin", "error", "reconcile.sweep_candidate", fmt.Sprintf("attempt=%d %v", item.AttemptID, viewErr))
+				continue
+			}
+			if view.AttemptType == "inspection_collection" {
+				var closeErr error
+				switch view.ScopeType {
+				case "run_check":
+					if service.Inspections != nil {
+						closeErr = service.Inspections.ExpirePromQLCollection(ctx, view.ID)
+					}
+				case "observation_run":
+					if service.Observations != nil {
+						var scope context.Context
+						scope, closeErr = reconcileScopeContext(ctx, attempts.Reader(), view.ID)
+						if closeErr == nil {
+							closeErr = service.Observations.ExpireCollectionChild(scope, view.ID)
+						}
+					}
+				default:
+					closeErr = fmt.Errorf("unhandled collection scope %q", view.ScopeType)
+				}
+				if closeErr != nil {
+					sharedops.LogEvent("quoin", "error", "reconcile.collection_expiry", fmt.Sprintf("attempt=%d %v", view.ID, closeErr))
+				}
+				continue
+			}
+			if view.State == "Cancelling" {
+				service.finalizeCancellation(ctx, view.ID, view.AttemptType)
+			} else {
+				service.finalizeLoss(ctx, view, "lease_expired")
+			}
+			continue
+		}
+		sharedops.LogEvent("quoin", "info", "reconcile.swept", fmt.Sprintf("attempt=%d final=%s", item.AttemptID, item.Final))
+	}
+	if sweepErr != nil {
+		sharedops.LogEvent("quoin", "error", "reconcile.sweep_failed", sweepErr.Error())
 	}
 }
 

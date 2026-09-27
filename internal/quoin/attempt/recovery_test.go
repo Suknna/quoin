@@ -9,6 +9,7 @@ package attempt
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -183,7 +184,7 @@ func TestAcceptAcrossSameBootEpochs(t *testing.T) {
 	}
 }
 
-func TestSweepExpiredInterruptsAndConvergesCancelling(t *testing.T) {
+func TestSweepExpiredDefersDomainOwnedAttempts(t *testing.T) {
 	db := newTestDB(t)
 	service := newTestService(t, db)
 	ctx := context.Background()
@@ -213,12 +214,12 @@ func TestSweepExpiredInterruptsAndConvergesCancelling(t *testing.T) {
 	for _, item := range swept {
 		byFinal[item.AttemptID] = item.Final
 	}
-	if byFinal[expiredID] != "Interrupted" || byFinal[cancelledID] != "Cancelled" {
+	if byFinal[expiredID] != "" || byFinal[cancelledID] != "" || !swept[0].DomainOwned || !swept[1].DomainOwned {
 		t.Fatalf("sweep outcomes wrong: %+v", swept)
 	}
 	var reason string
-	if err := db.QueryRow(`SELECT termination_reason FROM execution_attempts WHERE id=?`, expiredID).Scan(&reason); err != nil || reason != "lease_expired" {
-		t.Fatalf("sweep reason=%q err=%v", reason, err)
+	if err := db.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, expiredID).Scan(&reason); err != nil || reason != "Running" {
+		t.Fatalf("domain-owned attempt changed before closure: state=%q err=%v", reason, err)
 	}
 	var state string
 	if err := db.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, liveID).Scan(&state); err != nil || state != "Running" {
@@ -229,6 +230,71 @@ func TestSweepExpiredInterruptsAndConvergesCancelling(t *testing.T) {
 		if item.ScopeType != "analysis" || item.ScopeID == 0 {
 			t.Fatalf("sweep lost scope identity: %+v", item)
 		}
+	}
+}
+
+func seedGenericSweepEmbedding(t *testing.T, db *sql.DB, service *Service) int64 {
+	t.Helper()
+	connectionID, revisionID, credentialID, probeID := seedProviderChain(t, db)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	generation, err := db.Exec(`INSERT INTO embedding_generations(model_name,model_version,generation,created_at)
+		VALUES('fixture','1',(SELECT COALESCE(MAX(generation),0)+1 FROM embedding_generations),?)`, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generationID, _ := generation.LastInsertId()
+	insert, err := db.Exec(`INSERT INTO execution_attempts(attempt_type,scope_type,scope_id,state,quoin_release_version,created_at)
+		VALUES('embedding','embedding_generation',?,'Queued','test',?)`, generationID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID, _ := insert.LastInsertId()
+	digest := strings.Repeat("a", 64)
+	snapshot, err := db.Exec(`INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at) VALUES(?,'embedding_v1','v1',?,?)`, attemptID, digest, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotID, _ := snapshot.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,embedding_generation_id) VALUES(?,1,'source',?,?)`, snapshotID, digest, generationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at)
+		VALUES(?,'embedding',?,?,?,?,?)`, attemptID, connectionID, revisionID, credentialID, probeID, now); err != nil {
+		t.Fatal(err)
+	}
+	bindAndAccept(t, service, attemptID, "boot-partial", 1)
+	return attemptID
+}
+
+func TestSweepExpiredReturnsOnlyCommittedTransitionsAfterPartialFailure(t *testing.T) {
+	db := newTestDB(t)
+	service := newTestService(t, db)
+	firstID := seedGenericSweepEmbedding(t, db, service)
+	secondID := seedGenericSweepEmbedding(t, db, service)
+	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	if _, err := db.Exec(`UPDATE execution_attempts SET lease_until=?,row_version=row_version+1 WHERE id IN (?,?)`, past, firstID, secondID); err != nil {
+		t.Fatal(err)
+	}
+	// The second audit write fails after the first attempt and its audit have
+	// committed. An unprocessed candidate must not masquerade as a swept row.
+	if _, err := db.Exec(`CREATE TRIGGER abort_second_sweep BEFORE INSERT ON audit_events
+		WHEN NEW.action='attempt.lease_sweep' AND NEW.domain_ref_id=` + fmt.Sprint(secondID) + `
+		BEGIN SELECT RAISE(ABORT, 'second sweep audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	swept, err := service.SweepExpired(context.Background())
+	if err == nil {
+		t.Fatal("expected the second audit write to fail")
+	}
+	if len(swept) != 1 || swept[0].AttemptID != firstID || swept[0].Final != "Interrupted" {
+		t.Fatalf("completed transitions = %+v, want only attempt %d (failure: %v)", swept, firstID, err)
+	}
+	var state string
+	if err := db.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, firstID).Scan(&state); err != nil || state != "Interrupted" {
+		t.Fatalf("first attempt state=%q err=%v", state, err)
+	}
+	if err := db.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, secondID).Scan(&state); err != nil || state != "Running" {
+		t.Fatalf("second attempt state=%q err=%v", state, err)
 	}
 }
 

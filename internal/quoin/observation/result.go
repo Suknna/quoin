@@ -239,6 +239,45 @@ func (service *Service) ConvergeInterruptedChild(ctx context.Context, attemptID 
 	return err
 }
 
+// ExpireCollectionChild commits the lease-loss terminal and its observation
+// gap/run projection together. Unlike the post-terminal recovery helper,
+// this path leaves an active attempt available for retry if audit or any
+// other part of the closure cannot commit.
+func (service *Service) ExpireCollectionChild(ctx context.Context, attemptID int64) error {
+	ctx, err := ensureSystemScope(ctx, execution.SourceTask)
+	if err != nil {
+		return err
+	}
+	_, err = execution.Execute(ctx, service.runner, service.convergeOp, func(tx *execution.Tx) (int64, error) {
+		var runID int64
+		var state string
+		if err := tx.QueryRowContext(ctx, `SELECT scope_id,state FROM execution_attempts
+			WHERE id=? AND attempt_type='inspection_collection' AND scope_type='observation_run'`, attemptID).Scan(&runID, &state); err != nil {
+			return 0, err
+		}
+		if state != "Assigned" && state != "Running" && state != "Cancelling" {
+			return 0, fmt.Errorf("%w: observation attempt %d is %s", execution.ErrNoTransition, attemptID, state)
+		}
+		final, err := attempt.NewService(service.db).InterruptOn(ctx, tx, attemptID, "lease_expired")
+		if err != nil {
+			return 0, err
+		}
+		reason := "interrupted"
+		if final == "Cancelled" {
+			reason = "cancelled"
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE observation_run_objects SET status='gap',gap_reason=?
+			WHERE attempt_id=? AND result_digest IS NULL`, reason, attemptID); err != nil {
+			return 0, err
+		}
+		return runID, service.convergeRunOn(ctx, tx, runID)
+	}, func(runID int64) int64 { return runID })
+	if errors.Is(err, execution.ErrNoTransition) {
+		return nil // A concurrent result owns this attempt and its projection.
+	}
+	return err
+}
+
 // projectObservedObjects re-projects one complete object-type pass. The pass
 // is complete by construction (the proposal envelope is success), so marking
 // previously observed identities absent (current=0) is the only place

@@ -188,17 +188,18 @@ type Swept struct {
 	ScopeType string
 	ScopeID   int64
 	Final     string // Interrupted | Cancelled
-	// DeferredLoss means this row is an investigation parent. Runtime must
-	// first create the durable recovery-loss work item; a generic lease
-	// update may never bypass that closure.
-	DeferredLoss bool
+	// DomainOwned means the owning domain must perform the terminal write.
+	// These scopes have a parent or pending-terminal obligation that cannot
+	// be safely closed after the generic attempt UPDATE has committed.
+	DomainOwned bool
 }
 
-// SweepExpired converges every active attempt whose lease has burned down
-// without renewal (RUNTIME-TASK-006): Assigned/Running → Interrupted
-// (lease_expired), Cancelling → Cancelled. The caller routes each outcome to
-// the owning scope aggregate. Queued attempts carry no lease and are never
-// swept.
+// SweepExpired discovers active attempts whose lease has burned down without
+// renewal (RUNTIME-TASK-006). Scopes with typed or parent closure obligations
+// are returned as candidates and stay active until their domain transaction
+// closes them. Only standalone attempts transition here: Assigned/Running →
+// Interrupted (lease_expired), Cancelling → Cancelled. Queued attempts carry
+// no lease and are never swept.
 //
 // The batch runs under an EXPLICIT scheduler scope (ADR-0006, audit design):
 // the trigger mints a fresh correlation, and each transition re-roots onto
@@ -209,8 +210,8 @@ type Swept struct {
 // audited transition carries the attempt's ORIGINAL persisted correlation.
 // A candidate that lost a fenced race against a concurrent terminal commit
 // is skipped for this tick (the winner owns the state); the first real
-// failure stops the batch and is returned alongside the outcomes already
-// converged, so the caller can still route them.
+// failure stops the batch and is returned alongside ONLY the candidates and
+// transitions already processed, so the caller can still route them safely.
 func (service *Service) SweepExpired(ctx context.Context) ([]Swept, error) {
 	now := service.nowText()
 	// Each trigger is a new scheduler operation with its own correlation.
@@ -220,13 +221,13 @@ func (service *Service) SweepExpired(ctx context.Context) ([]Swept, error) {
 	}
 	rows, err := service.Reader().QueryContext(ctx, `
 		SELECT a.id, a.attempt_type, a.scope_type, a.scope_id, a.state,
-		       CASE WHEN a.attempt_type='investigation' THEN 1 ELSE 0 END
+		       CASE WHEN a.attempt_type IN ('investigation','initial_analysis','knowledge_extraction','connection_probe','inspection_collection') THEN 1 ELSE 0 END
 		FROM execution_attempts a
 		WHERE a.state IN ('Assigned','Running','Cancelling') AND a.lease_until <= ? ORDER BY a.id`, now)
 	if err != nil {
 		return nil, err
 	}
-	var swept []Swept
+	var candidates []Swept
 	for rows.Next() {
 		var item Swept
 		var state string
@@ -235,32 +236,32 @@ func (service *Service) SweepExpired(ctx context.Context) ([]Swept, error) {
 			rows.Close()
 			return nil, err
 		}
-		item.DeferredLoss = deferred != 0
-		swept = append(swept, item)
+		item.DomainOwned = deferred != 0
+		candidates = append(candidates, item)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for index := 0; index < len(swept); index++ {
-		if swept[index].DeferredLoss {
-			// This is deliberately a typed candidate, not a terminal transition.
-			// The caller creates recovery_loss first, eliminating the lease-sweep
-			// race. Nothing transitioned here, so nothing records.
+	var swept []Swept
+	for _, candidate := range candidates {
+		if candidate.DomainOwned {
+			// The domain transaction owns the terminal state and its audit.
+			// This is only a candidate; it stays eligible for the next sweep
+			// if its domain closure fails.
+			swept = append(swept, candidate)
 			continue
 		}
-		final, err := service.sweepOne(ctx, swept[index].AttemptID, now, trigger)
+		final, err := service.sweepOne(ctx, candidate.AttemptID, now, trigger)
 		if err != nil {
 			if errors.Is(err, errSweepRaceLost) {
-				// A concurrent cancel/fence/ack won the transition: the attempt
-				// is no longer this batch's to converge. Drop the candidate.
-				swept = append(swept[:index], swept[index+1:]...)
-				index--
+				// Only the winning transaction owns this transition.
 				continue
 			}
 			return swept, err
 		}
-		swept[index].Final = final
+		candidate.Final = final
+		swept = append(swept, candidate)
 	}
 	return swept, nil
 }
