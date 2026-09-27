@@ -30,12 +30,12 @@ ARG TARGETARCH
 RUN apt-get update \
  && if [ "$TARGETARCH" = "arm64" ]; then apt-get install -y --no-install-recommends \
         bash=5.2.37-2+b9 coreutils=9.7-3 findutils=4.10.0-3 grep=3.11-4+b1 sed=4.9-2+deb13u1 \
-        gawk=1:5.2.1-2+b2 jq=1.7.1-6+deb13u3 file=1:5.46-5 tar=1.35+dfsg-3.1 gzip=1.13-1 \
+        gawk=1:5.2.1-2+b2 jq=1.7.1-6+deb13u4 file=1:5.46-5 tar=1.35+dfsg-3.1 gzip=1.13-1 \
         xz-utils=5.8.1-1+deb13u1 unzip=6.0-29+deb13u1 ripgrep=14.1.1-1+b4 diffutils=1:3.10-4 \
         ca-certificates=20250419; \
     else apt-get install -y --no-install-recommends \
         bash=5.2.37-2+b9 coreutils=9.7-3 findutils=4.10.0-3 grep=3.11-4 sed=4.9-2+deb13u1 \
-        gawk=1:5.2.1-2+b1 jq=1.7.1-6+deb13u3 file=1:5.46-5 tar=1.35+dfsg-3.1 gzip=1.13-1 \
+        gawk=1:5.2.1-2+b1 jq=1.7.1-6+deb13u4 file=1:5.46-5 tar=1.35+dfsg-3.1 gzip=1.13-1 \
         xz-utils=5.8.1-1+deb13u1 unzip=6.0-29+deb13u1 ripgrep=14.1.1-1+b4 diffutils=1:3.10-4 \
         ca-certificates=20250419; \
     fi \
