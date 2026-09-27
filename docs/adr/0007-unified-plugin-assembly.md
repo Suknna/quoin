@@ -4,6 +4,8 @@ status: accepted
 
 # 单一插件装配：目录、实现查找与执行分发表同源派生
 
+> 路径说明：本文记录当时的 `internal/plugins/builtin` 布局。当前插件实现已迁移至根目录 `plugins/`，契约与注册表仍在 `internal/plugins`；见 [插件开发指南](../plugin-development.md)。
+
 ## Context
 
 ADR 0004 确立了插件注册机制（Descriptor / ExecutionBundle），但实施中并存了多条工具来源路径：`attempt` 核心硬编码插件工具表（thanos_query、kubernetes_read 与平台工具混在同一编译表）、无消费者的 `RegisterImplementation` 实现注册点、worker `init()` 旁路注册的插件执行器，以及 `RegisterPluginExecutor`/`SetPluginCallHost` 这条从未接线的 ExecutionBundle 缝。同一工具契约因此存在四份可漂移的表述，"声明不能伪装不存在的实现"只靠人工纪律维持。同时受控浏览器与 Kubernetes 插件已退役，其编译实现必须继续服务历史冻结目录，却不允许重新通告或启用。

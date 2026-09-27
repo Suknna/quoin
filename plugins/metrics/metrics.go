@@ -1,4 +1,4 @@
-package builtin
+package metrics
 
 // The Prometheus-compatible metrics plugins (ADR-0004, reworked by
 // ADR-0011): prometheus and thanos share one typed tool set —

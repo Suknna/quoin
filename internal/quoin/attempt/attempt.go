@@ -131,7 +131,7 @@ func (service *Service) Reader() audit.Reader {
 // The application wiring replaces it with a registry-built set resolved
 // from the deployment configuration; tests and minimal hosts get whatever
 // the process registered (hosts wanting the builtin mainline blank-import
-// internal/plugins/builtin).
+// plugins/metrics).
 func DefaultCatalogs() *Catalogs {
 	registry := plugins.Default()
 	enabled, err := registry.ResolveEnabled(nil)

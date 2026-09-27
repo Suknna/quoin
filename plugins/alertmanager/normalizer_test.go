@@ -1,10 +1,10 @@
-package builtin_test
+package alertmanager_test
 
 import (
 	"testing"
 
 	"github.com/Suknna/quoin/internal/plugins"
-	_ "github.com/Suknna/quoin/internal/plugins/builtin"
+	_ "github.com/Suknna/quoin/plugins/alertmanager"
 )
 
 func TestAlertmanagerNormalizerMapsUnifiedSemantics(t *testing.T) {
@@ -75,4 +75,6 @@ func TestNormalizerRequiresEventSource(t *testing.T) {
 
 type alertmanagerNormalizerShim struct{}
 
-func (alertmanagerNormalizerShim) NormalizeAlert([]byte) ([]plugins.NormalizedAlert, error) { return nil, nil }
+func (alertmanagerNormalizerShim) NormalizeAlert([]byte) ([]plugins.NormalizedAlert, error) {
+	return nil, nil
+}

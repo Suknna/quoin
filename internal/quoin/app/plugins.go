@@ -18,8 +18,8 @@ import (
 
 // initPluginRegistry installs the process default plugin registry
 // (ADR-0011 blank-import assembly: cmd/quoin blank-imports
-// internal/plugins/builtin, whose init() registrations populate the
-// registry). The registry freezes on first read; a rejected registration
+// plugins/alertmanager and plugins/metrics, whose init() registrations
+// populate the registry). The registry freezes on first read; a rejected registration
 // panics at init — a compile-time fact, not a runtime condition.
 func (application *apiServer) initPluginRegistry() {
 	application.pluginRegistry = plugins.Default()

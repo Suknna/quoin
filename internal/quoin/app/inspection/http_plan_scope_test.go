@@ -13,10 +13,11 @@ import (
 	"testing"
 
 	gen "github.com/Suknna/quoin/internal/gen/contracts"
-	_ "github.com/Suknna/quoin/internal/plugins/builtin"
 	_ "github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
+	_ "github.com/Suknna/quoin/plugins/alertmanager"
+	_ "github.com/Suknna/quoin/plugins/metrics"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/humatest"
 	_ "modernc.org/sqlite"

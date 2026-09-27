@@ -3,7 +3,7 @@ package attempt
 // The platform tool table plus the shared tool-contract machinery
 // (ARCH-WORKER-003, ARCH-OUTPUT-004). PLATFORM tools (workspace + artifact)
 // are owned here and never by a plugin. PLUGIN tools live with their owning
-// plugin (internal/plugins/builtin) and reach this package only through the
+// plugin (plugins/metrics) and reach this package only through the
 // assembled registry: implementation lookup, frozen catalogs and the
 // executing hosts' dispatch tables all derive from that one assembly
 // (ADR-0004). The frozen historical fallback (legacy_catalog.go) is the

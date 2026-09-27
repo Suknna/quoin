@@ -19,8 +19,9 @@ import (
 
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/plugins"
-	_ "github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/execution"
+	_ "github.com/Suknna/quoin/plugins/alertmanager"
+	_ "github.com/Suknna/quoin/plugins/metrics"
 	_ "modernc.org/sqlite"
 )
 

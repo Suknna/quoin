@@ -1,4 +1,4 @@
-package builtin
+package alertmanager
 
 // The alertmanager plugin (ADR-0011): a pure EventSource. Stele's webhook
 // layer authenticates the bearer against Quoin's digest snapshot and hands

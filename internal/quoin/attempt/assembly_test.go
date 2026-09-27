@@ -14,7 +14,8 @@ import (
 	"testing"
 
 	"github.com/Suknna/quoin/internal/plugins"
-	_ "github.com/Suknna/quoin/internal/plugins/builtin"
+	_ "github.com/Suknna/quoin/plugins/alertmanager"
+	_ "github.com/Suknna/quoin/plugins/metrics"
 )
 
 // The assembled implementation table resolves every registered plugin tool,

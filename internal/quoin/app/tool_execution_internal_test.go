@@ -24,13 +24,14 @@ import (
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	"github.com/Suknna/quoin/internal/plugins"
-	_ "github.com/Suknna/quoin/internal/plugins/builtin"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/knowledge"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
+	_ "github.com/Suknna/quoin/plugins/alertmanager"
+	_ "github.com/Suknna/quoin/plugins/metrics"
 	_ "modernc.org/sqlite"
 )
 

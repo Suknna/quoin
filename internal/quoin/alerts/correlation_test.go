@@ -13,9 +13,10 @@ import (
 	"testing"
 	"time"
 
-	// 与 cmd/quoin 相同的装配：blank-import 内置插件注册表，使 alertmanager
+	// 与 cmd/quoin 相同的装配：blank-import 插件包，使 alertmanager
 	// 协议在进程默认注册表中携带 AlertNormalizer（ADR-0012）。
-	_ "github.com/Suknna/quoin/internal/plugins/builtin"
+	_ "github.com/Suknna/quoin/plugins/alertmanager"
+	_ "github.com/Suknna/quoin/plugins/metrics"
 )
 
 func deliverWebhookFrom(t *testing.T, service *Service, eventID string, sourceID, credentialID int64, labels map[string]string, startsAt string) DeliveryResult {

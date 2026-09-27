@@ -10,7 +10,8 @@ import (
 	"testing"
 
 	"github.com/Suknna/quoin/internal/plugins"
-	_ "github.com/Suknna/quoin/internal/plugins/builtin"
+	_ "github.com/Suknna/quoin/plugins/alertmanager"
+	_ "github.com/Suknna/quoin/plugins/metrics"
 )
 
 func buildTestCatalogs(t *testing.T, configured []string) (*plugins.Registry, *Catalogs) {

@@ -77,7 +77,7 @@ type Collector interface {
 
 `plugins.ExecutionBundle.ToolExecutor` 是工具执行的唯一声明来源；宿主的执行路由注册表只是它的**适配层**：
 
-- 插件自持声明与实现：每个插件包同时拥有 Descriptor 与编译 ToolDef，工具声明由 `ToolDef.DescriptorTool()` 从实现派生，声明与实现在构造上不可漂移；`internal/plugins/builtin` 是内建插件的唯一声明源。
+- 插件自持声明与实现：插件实现位于根目录 `plugins/`，契约与注册表位于 `internal/plugins`；各插件包自注册，`cmd/quoin`、`cmd/stele` 在 main 中显式空白导入选定插件包（指标插件共享实现）。工具声明由实现派生，声明与实现在构造上不可漂移。
 - Plinth 进程装配（`supervisor.HostRegistry`）：从共享 builtin 源注册全部内建描述符，并按描述符声明的能力绑定本进程真实执行 bundle——观测 Discoverer、巡检 Collector 与指标插件的 `ToolExecutor`（`internal/plinth/worker` 的执行适配器）。一个进程每插件恰有一个 bundle。
 - 分发表装配（`worker.AssembleTypedExecutors(registry, table)`）：平台工具（artifact_read/artifact_grep）由宿主注册；每个 supervisor 位置的插件工具解析其 owner 描述符与绑定 bundle，经 `worker.RegisterPluginExecutor(descriptor, bundle, table)` 注册。注册即验证：bundle 归属描述符、携带 `execute_tool` 且 `ToolExecutor` 非 nil、位置为本进程、每个声明工具与装配实现表逐字段一致（版本/失败模式/执行位置/参数 schema 规范化字节相等）。装配完成即冻结：二次装配与冻结后注册是确定性 wiring 失败；未注册工具显式 `unknown_tool` 失败。
 - 运行时消费者：supervisor 的 Runner 帧桥（`internal/plinth/worker` 的 `executeTool`→`executeTypedTool`）查装配表执行；`plugins.Call` 由 Runner 自身解析（冻结 grant → 连接配置与 SecretResolver），秘密只在 supervisor 进程解析，冻结失败码（如 `grant_missing`）经类型化错误保持线上语义。serve 接线（`internal/plinth/ops`）先装配 registry 与分发表再接受派发。

@@ -1,8 +1,8 @@
 # 插件开发指南（ADR-0011 插件体系 v2）
 
 本指南面向为 Quoin 编写插件的开发者。现行体系是**接口 + 注册表 + 空白导入**的经典编译期装配：
-不用 Go 标准库 `plugin` 包（无 dlopen、无动态安装），每个插件文件 `init()` 自注册，宿主进程空白
-导入插件包即完成装配；装配失败（重复 ID、词表外名称、共享工具契约分歧）在启动期 panic。
+不用 Go 标准库 `plugin` 包（无 dlopen、无动态安装），每个插件包 `init()` 自注册，宿主进程空白
+导入选定插件包即完成装配；装配失败（重复 ID、词表外名称、共享工具契约分歧）在启动期 panic。
 
 权威决策见 [ADR-0011](adr/0011-component-responsibility-and-plugin-v2.md)；体系前身（能力六分类、
 ExecutionBundle、显式装配）见 ADR-0004/0007，其"声明派生自实现、不可漂移"与冻结目录不变式在
@@ -50,8 +50,11 @@ func init() {
 }
 ```
 
-宿主装配：`cmd/quoin` 与 `cmd/stele` 已空白导入 `internal/plugins/builtin`。新增插件在该包加一个
-文件即被两个宿主同时装配；新宿主只需同样的空白导入。注册表首次读取即冻结，之后不可再注册。
+插件实现放在项目根目录 `plugins/<插件包>/`；契约和注册表仍在 `internal/plugins`。宿主装配：
+`cmd/quoin/main.go` 与 `cmd/stele/main.go` 显式空白导入 `plugins/alertmanager` 和
+`plugins/metrics`（后者共享实现并注册 prometheus、thanos）。新增插件须在需要该能力的宿主
+`main.go` 中空白导入它的包；测试若依赖进程默认注册表，也须导入所需插件包。Plinth 不导入插件。
+注册表首次读取即冻结，之后不可再注册。
 
 ## 入向：EventSource
 
@@ -70,7 +73,7 @@ func (mySource) VerifyAndParse(ctx context.Context, req plugins.InboundRequest) 
 
 Stele 网关负责 Bearer/digest 认证（"签名对不对"）与 16MiB body 上限；解析失败在**入队前**拒绝
 （HTTP 400），解析成功即本地入队并返回 202。`Event.Payload` 是你与 Quoin 消费者之间的归一化
-契约（参考 builtin/alertmanager.go：payload 保持平台 wire 投影形状）。
+契约（参考 `plugins/alertmanager/alertmanager.go`：payload 保持平台 wire 投影形状）。
 
 ## 出向：泛型工具
 
@@ -122,7 +125,7 @@ func (myTools) Tools() []plugins.ToolEntry {
 - **错误分类**：网关哨兵（`plugins.ErrPlatformRateLimited` 等）会被 Quoin 编排层映射为稳定错误
   码；结构化失败应像示例一样写进结果 payload（success=false），模型可见可重试。
 - **内部工具**：`Internal: true` 的工具不进模型目录，仅供 Quoin 调度器调用（连接探测、有界发
-  现、确定性采集——见 builtin/metrics.go 的 `metrics_probe`/`metrics_discover`/`metrics_collect`）。
+  现、确定性采集——见 `plugins/metrics/metrics.go` 的 `metrics_probe`/`metrics_discover`/`metrics_collect`）。
 - **共享契约**：多个插件可贡献同名同 manifest 的工具（如 prometheus 与 thanos 共享
   `thanos_query`）；目录单条目，溯源列全部启用的贡献者，manifest 分歧是装配错误。
 
@@ -154,7 +157,7 @@ func init() {
 }
 ```
 
-- severity 映射表放插件里(参考 builtin/alertmanager.go);词表外的值降级 `Info`,Quoin 侧不会丢事件。
+- severity 映射表放插件里(参考 `plugins/alertmanager/alertmanager.go`);词表外的值降级 `Info`,Quoin 侧不会丢事件。
 - Quoin 的 intake 流水线(归一化→富化→去重→关联)在首观测事务内执行你的 normalizer,语义列
   (severity/title/annotations_canonical/resource)冻结后不可变;缺 normalizer 的来源记
   `normalizer_missing` intake issue 并用缺省语义。

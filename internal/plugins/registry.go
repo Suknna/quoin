@@ -10,7 +10,7 @@ package plugins
 //
 // Host wiring:
 //
-//   - cmd/quoin and cmd/stele blank-import the builtin plugin packages; the
+//   - cmd/quoin and cmd/stele blank-import the selected packages in plugins/; the
 //     process default registry (Default) assembles from those init calls.
 //   - cmd/plinth imports nothing from this package beyond the pure contract
 //     types — Plinth is plugin-unaware by construction (ADR-0011).

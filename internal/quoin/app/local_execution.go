@@ -266,7 +266,7 @@ func (service *RuntimeService) invokeLocalTool(ctx context.Context, name string,
 // ---------------------------------------------------------------------------
 
 // metricsProbeResultJSON 是 metrics_probe 的 canonical 结果形状（与
-// internal/plugins/builtin/metrics.go 的 metricsProbeResult 对齐）。
+// plugins/metrics/metrics.go 的 metricsProbeResult 对齐）。
 type metricsProbeResultJSON struct {
 	Reachable    bool   `json:"reachable"`
 	LatencyMS    int64  `json:"latencyMs"`

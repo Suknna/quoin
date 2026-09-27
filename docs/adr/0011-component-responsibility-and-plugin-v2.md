@@ -66,8 +66,8 @@ Alertmanager 返回 204；_Avoid_: 先返回 2xx 再异步持久化"。本 ADR *
 ### 3. 插件体系 v2：接口 + 注册表 + 空白导入 + 泛型工具
 
 - **不用** Go 标准库 `plugin` 包（无 dlopen、无动态安装，延续 ADR-0004）；采用经典"接口 + 注
-  册表 + 空白导入"模式：每个插件文件 `init()` 调 `plugins.Register(Plugin{...})`，宿主
-  （cmd/quoin、cmd/stele）空白导入 `internal/plugins/builtin` 即完成装配；注册表首次读取即冻
+  册表 + 空白导入"模式：插件包 `init()` 调 `plugins.Register(Plugin{...})`，宿主
+  （cmd/quoin、cmd/stele）在 main 中空白导入根目录 `plugins/` 下选定的插件包即完成装配；注册表首次读取即冻
   结，重复 ID/词表外名称/共享工具契约分歧一律启动期 panic（fail-fast 不变）。
 - 能力收敛为两类：**EventSource**（入向：`Kind()` + `VerifyAndParse` → 归一化 Event）与
   **ToolProvider**（出向：`Tools()`）。六类 Capability、ExecutionBundle、

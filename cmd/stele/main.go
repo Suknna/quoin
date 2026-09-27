@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 
-	// 装配内置插件（ADR-0011）：alertmanager EventSource 等在 init() 注册进
-	// 进程默认插件表，webhook 路由据此解析 /webhook/{source}。
+	// 编译期选择插件（ADR-0011）：EventSource 等在 init() 注册进默认表。
 	sharedops "github.com/Suknna/quoin/internal/ops"
-	_ "github.com/Suknna/quoin/internal/plugins/builtin"
 	steleops "github.com/Suknna/quoin/internal/stele/ops"
+	_ "github.com/Suknna/quoin/plugins/alertmanager"
+	_ "github.com/Suknna/quoin/plugins/metrics"
 )
 
 func main() {
