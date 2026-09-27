@@ -1,22 +1,9 @@
 // Admin connections feature API (T07): typed projections for connections,
 // probe attempts and immutable probe results.
 
-export interface ConnectionSummaryView {
-  name: string
-  type: 'prometheus' | 'thanos' | 'model_provider'
-  enabled: boolean
-  revalidationRequired: boolean
-  currentRevisionId?: string
-  currentCredentialGenerationId?: string
-  rowVersion: number
-  config: Record<string, unknown>
-}
+import type { ConnectionDetailView, ConnectionSummaryView } from '@/api/workbench'
 
-export interface ConnectionDetailView extends ConnectionSummaryView {
-  revisionCount: number
-  generationCount: number
-  activeProbeAttempt?: ProbeAttemptView
-}
+export type { ConnectionSummaryView, ConnectionDetailView }
 
 export interface ProbeAttemptView {
   id: string

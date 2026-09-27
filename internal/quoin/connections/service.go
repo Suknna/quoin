@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/connections/modelprovider"
@@ -195,12 +196,14 @@ func validateConfig(connectionType string, config json.RawMessage) (json.RawMess
 			return nil, fmt.Errorf("%w: username only applies to basic auth", ErrValidation)
 		}
 	case TypeModelProvider:
-		baseURL, _ := document["baseUrl"].(string)
-		chat, _ := document["chatModelId"].(string)
+		var provider contract.ModelProviderConfig
+		if err := json.Unmarshal(config, &provider); err != nil {
+			return nil, fmt.Errorf("%w: model provider config has invalid field types", ErrValidation)
+		}
 		// Embeddings are an optional capability. Chat-only providers remain
 		// suitable for analysis and investigation while knowledge workflows
 		// stay unavailable until a separately qualified embedding model exists.
-		if baseURL == "" || chat == "" {
+		if provider.BaseURL == "" || provider.ChatModelID == "" {
 			return nil, fmt.Errorf("%w: baseUrl and chatModelId are required", ErrValidation)
 		}
 		if embed, exists := document["embeddingModelId"]; exists {

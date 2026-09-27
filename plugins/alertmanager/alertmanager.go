@@ -13,32 +13,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/plugins"
 )
-
-// alertmanagerEventPayload is the normalized event document this source
-// produces and Quoin's alert consumer parses: the cleaned Alertmanager
-// webhook projection. It intentionally mirrors the historical wire shape so
-// the intake transaction's machine semantics are unchanged.
-type alertmanagerEventPayload struct {
-	Status string `json:"status"`
-	Alerts []struct {
-		Status       string            `json:"status"`
-		Labels       map[string]string `json:"labels"`
-		Annotations  map[string]string `json:"annotations"`
-		StartsAt     string            `json:"startsAt"`
-		EndsAt       string            `json:"endsAt"`
-		Fingerprint  string            `json:"fingerprint"`
-		GeneratorURL string            `json:"generatorURL"`
-	} `json:"alerts"`
-	GroupLabels       map[string]string `json:"groupLabels"`
-	CommonLabels      map[string]string `json:"commonLabels"`
-	CommonAnnotations map[string]string `json:"commonAnnotations"`
-	ExternalURL       string            `json:"externalURL"`
-	Version           string            `json:"version"`
-	GroupKey          string            `json:"groupKey"`
-	TruncatedAlerts   int               `json:"truncatedAlerts"`
-}
 
 // alertmanagerSource is the inbound EventSource for Alertmanager webhooks.
 type alertmanagerSource struct{}
@@ -52,9 +29,8 @@ func (alertmanagerSource) VerifyAndParse(_ context.Context, req plugins.InboundR
 	if len(req.Body) == 0 {
 		return nil, errors.New("alertmanager webhook body is empty")
 	}
-	var payload alertmanagerEventPayload
-	decoder := json.NewDecoder(strings.NewReader(string(req.Body)))
-	if err := decoder.Decode(&payload); err != nil {
+	payload, err := contract.ParseAlertmanagerWebhook(req.Body)
+	if err != nil {
 		return nil, fmt.Errorf("alertmanager webhook body is not valid JSON: %w", err)
 	}
 	if payload.Status == "" || len(payload.Alerts) == 0 {
@@ -94,8 +70,8 @@ func alertmanagerSeverity(raw string) plugins.Severity {
 type alertmanagerNormalizer struct{}
 
 func (alertmanagerNormalizer) NormalizeAlert(payload []byte) ([]plugins.NormalizedAlert, error) {
-	var document alertmanagerEventPayload
-	if err := json.Unmarshal(payload, &document); err != nil {
+	document, err := contract.ParseAlertmanagerWebhook(payload)
+	if err != nil {
 		return nil, fmt.Errorf("alertmanager payload is not valid JSON: %w", err)
 	}
 	alerts := make([]plugins.NormalizedAlert, 0, len(document.Alerts))

@@ -1,11 +1,41 @@
 package alertmanager_test
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/Suknna/quoin/internal/plugins"
+	"github.com/Suknna/quoin/internal/quoin/alerts"
 	_ "github.com/Suknna/quoin/plugins/alertmanager"
 )
+
+func TestEventSourcePayloadIsIntakeWebhook(t *testing.T) {
+	source, _, ok := plugins.Default().EventSource("alertmanager")
+	if !ok {
+		t.Fatal("alertmanager event source missing")
+	}
+	events, err := source.VerifyAndParse(context.Background(), plugins.InboundRequest{Body: []byte(`{
+		"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"CPU"},"annotations":{"summary":"hot"},"startsAt":"2026-01-01T00:00:00Z","fingerprint":"0123456789abcdef"}],
+		"groupKey":"group","truncatedAlerts":2,"unknownField":"ignored"}`)})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("event source result: %v, %v", events, err)
+	}
+	webhook, err := alerts.ParseWebhook(events[0].Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if webhook.GroupKey != "group" || webhook.TruncatedAlerts != 2 || len(webhook.Alerts) != 1 || webhook.Alerts[0].Annotations["summary"] != "hot" {
+		t.Fatalf("intake lost event fields: %+v", webhook)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload["unknownField"]; ok {
+		t.Fatal("unknown source field leaked into normalized event")
+	}
+}
 
 func TestAlertmanagerNormalizerMapsUnifiedSemantics(t *testing.T) {
 	normalizer, pluginID, ok := plugins.Default().AlertNormalizer("alertmanager")

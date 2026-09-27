@@ -19,17 +19,12 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	plinthconnections "github.com/Suknna/quoin/internal/plinth/connections"
 )
 
-// Config is the non-secret model provider revision projection.
-type Config struct {
-	Type                string `json:"type"`
-	BaseURL             string `json:"baseUrl"`
-	ChatModelID         string `json:"chatModelId"`
-	EmbeddingModelID    string `json:"embeddingModelId"`
-	ContextBudgetTokens int    `json:"contextBudgetTokens"`
-	MaxOutputTokens     int    `json:"maxOutputTokens"`
-}
+// Config is the shared non-secret revision projection used for model calls.
+type Config = plinthconnections.ModelProviderConfig
 
 const (
 	// DefaultProbeContextBudgetTokens and DefaultProbeMaxOutputTokens give the

@@ -2,43 +2,22 @@ import type {
 	LoginRequest,
 	PasswordChangeRequest,
 	UserSummary,
+	ConnectionSummary,
+	ConnectionDetail,
+	AttemptSummary,
 } from "@/api/generated/types";
 
-export type ConnectionType = "thanos" | "model_provider";
-
-export interface ConnectionSummaryView {
-	name: string;
-	type: ConnectionType;
-	enabled: boolean;
-	revalidationRequired: boolean;
-	currentRevisionId?: string;
-	currentCredentialGenerationId?: string;
-	rowVersion: number;
+export type ConnectionType = ConnectionSummary["type"];
+// Historic revisions and the chat-only provider path can have a config shape
+// older than the generated current-write schema. Keep the read projection open
+// without hand-copying the common connection fields.
+export type ConnectionSummaryView = Omit<ConnectionSummary, "config"> & {
 	config: Record<string, unknown>;
-}
-export interface ConnectionDetailView extends ConnectionSummaryView {
-	revisionCount: number;
-	generationCount: number;
-	activeProbeAttempt?: ProbeAttemptView;
-}
-export interface ProbeAttemptView {
-	id: string;
-	type: "connection_probe";
-	state:
-		| "Queued"
-		| "Assigned"
-		| "Running"
-		| "Cancelling"
-		| "Succeeded"
-		| "Failed"
-		| "Cancelled"
-		| "Interrupted";
-	rowVersion: number;
-	createdAt: string;
-	startedAt?: string;
-	endedAt?: string;
-	terminationReason?: string;
-}
+};
+export type ConnectionDetailView = Omit<ConnectionDetail, "config"> & {
+	config: Record<string, unknown>;
+};
+export type ProbeAttemptView = AttemptSummary;
 export interface ConnectionRevisionView {
 	id: string;
 	revisionSeq: number;
@@ -357,8 +336,8 @@ export const workbenchApi = {
 			},
 		),
 };
-export interface ThanosConnectionInput {
-	type: "thanos";
+export interface MetricsConnectionInput {
+	type: "prometheus" | "thanos";
 	baseUrl: string;
 	username?: string;
 	password?: string;
@@ -379,7 +358,7 @@ export interface ModelProviderConnectionInput {
 }
 
 export type ConnectionInput =
-	| ThanosConnectionInput
+	| MetricsConnectionInput
 	| ModelProviderConnectionInput;
 
 export interface ProviderDiscoveryResult {

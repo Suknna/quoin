@@ -63,7 +63,7 @@ func (supervisor *Supervisor) runEmbedding(parent context.Context, sink *runtime
 	}
 	batchCtx := modelprovider.WithAttempt(ctx, attemptID)
 	ledger := &modelprovider.StreamLedger{Sink: sink, Channel: supervisor.Channel}
-	canonical, digest, runErr := modelprovider.RunBatch(batchCtx, modelprovider.Config{Type: config.Type, BaseURL: config.BaseURL, ChatModelID: config.ChatModelID, EmbeddingModelID: config.EmbeddingModelID, ContextBudgetTokens: config.ContextBudgetTokens, MaxOutputTokens: config.MaxOutputTokens}, payload.GetModelProvider().GetApiKey(), input, ledger)
+	canonical, digest, runErr := modelprovider.RunBatch(batchCtx, config, payload.GetModelProvider().GetApiKey(), input, ledger)
 	if runErr != nil {
 		sharedops.LogEvent("plinth", "info", "embedding.batch_failed", runErr.Error())
 		supervisor.proposeEmbeddingTerminal(sink, attemptID, binding, "provider_unavailable", runErr.Error())

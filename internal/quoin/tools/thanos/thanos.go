@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
 	"github.com/Suknna/quoin/internal/quoin/execution"
@@ -384,34 +385,14 @@ func ValidateGrantForExecution(ctx context.Context, conn execution.Executor, att
 // ArtifactRef is the bounded artifact locator embedded in a spilled
 // result payload (ARCH-OUTPUT-003: the model context only receives the
 // locator and size facts, never the full body).
-type ArtifactRef struct {
-	ID         string `json:"id"`
-	MediaType  string `json:"mediaType"`
-	SHA256     string `json:"sha256"`
-	SizeBytes  int64  `json:"sizeBytes"`
-	TotalLines int64  `json:"totalLines"`
-}
+type ArtifactRef = contract.PromQLArtifactRef
 
 // Result is the frozen thanos_query_result_v1 payload shape. Success
 // carries the bounded output preview (or the full inline body when it fit
 // the spill thresholds) plus, when truncated, the Artifact locator of the
 // complete raw response. Failure is a structured return_to_model error the
 // model sees as a committed Tool Result.
-type Result struct {
-	Success     bool         `json:"success"`
-	Status      string       `json:"status,omitempty"`
-	ResultType  string       `json:"resultType,omitempty"`
-	SampleCount int          `json:"sampleCount,omitempty"`
-	StartedAt   string       `json:"startedAt"`
-	FinishedAt  string       `json:"finishedAt"`
-	Truncated   bool         `json:"truncated"`
-	TotalBytes  int64        `json:"totalBytes"`
-	TotalLines  int64        `json:"totalLines"`
-	Output      string       `json:"output"`
-	Artifact    *ArtifactRef `json:"artifact,omitempty"`
-	ErrorCode   string       `json:"errorCode,omitempty"`
-	ErrorDetail string       `json:"errorDetail,omitempty"`
-}
+type Result = contract.PromQLQueryResult
 
 // ParseResult validates the sealed payload against the frozen result
 // schema (RUNTIME-AGENT-008: Quoin validates the fixed result schema in

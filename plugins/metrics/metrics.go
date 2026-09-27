@@ -33,6 +33,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql/parser"
 
+	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/plugins"
 )
 
@@ -83,31 +84,11 @@ type queryArgs struct {
 }
 
 // queryArtifactRef is the long-body spill locator inside the sealed result.
-type queryArtifactRef struct {
-	ID         string `json:"id"`
-	MediaType  string `json:"mediaType"`
-	SHA256     string `json:"sha256"`
-	SizeBytes  int64  `json:"sizeBytes"`
-	TotalLines int64  `json:"totalLines"`
-}
+type queryArtifactRef = contract.PromQLArtifactRef
 
 // queryResult is the canonical thanos_query_result_v1 payload. Structured
 // failures travel inside the same shape (success=false).
-type queryResult struct {
-	Success     bool              `json:"success"`
-	StartedAt   string            `json:"startedAt"`
-	FinishedAt  string            `json:"finishedAt"`
-	ErrorCode   string            `json:"errorCode,omitempty"`
-	ErrorDetail string            `json:"errorDetail,omitempty"`
-	Status      string            `json:"status,omitempty"`
-	ResultType  string            `json:"resultType,omitempty"`
-	SampleCount int               `json:"sampleCount,omitempty"`
-	Truncated   bool              `json:"truncated"`
-	TotalBytes  int64             `json:"totalBytes"`
-	TotalLines  int64             `json:"totalLines"`
-	Output      string            `json:"output"`
-	Artifact    *queryArtifactRef `json:"artifact,omitempty"`
-}
+type queryResult = contract.PromQLQueryResult
 
 // queryTool is the shared compiled PromQL query tool: the complete frozen
 // contract (version, execution location, result schema, model-facing

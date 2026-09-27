@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Suknna/quoin/internal/contract"
 )
 
 const (
@@ -25,35 +27,13 @@ const (
 // AlertmanagerWebhook is the exact wire shape Alertmanager v0.28+ posts
 // (version 4). Only the fields Quoin treats as machine semantics are
 // decoded; unknown fields stay untouched inside the preserved body bytes.
-type AlertmanagerWebhook struct {
-	Status string `json:"status"`
-	Alerts []struct {
-		Status       string            `json:"status"`
-		Labels       map[string]string `json:"labels"`
-		Annotations  map[string]string `json:"annotations"`
-		StartsAt     string            `json:"startsAt"`
-		EndsAt       string            `json:"endsAt"`
-		Fingerprint  string            `json:"fingerprint"`
-		GeneratorURL string            `json:"generatorURL"`
-	} `json:"alerts"`
-	GroupLabels       map[string]string `json:"groupLabels"`
-	CommonLabels      map[string]string `json:"commonLabels"`
-	CommonAnnotations map[string]string `json:"commonAnnotations"`
-	ExternalURL       string            `json:"externalURL"`
-	Version           string            `json:"version"`
-	GroupKey          string            `json:"groupKey"`
-	TruncatedAlerts   int               `json:"truncatedAlerts"`
-}
+type AlertmanagerWebhook = contract.AlertmanagerWebhook
 
 // ParseWebhook decodes the frozen Alertmanager webhook shape. The raw body is
 // preserved byte-for-byte by the caller (DATA-ALERT-001); this function only
 // derives the machine semantics Quoin needs for the intake transaction.
 func ParseWebhook(body []byte) (*AlertmanagerWebhook, error) {
-	var webhook AlertmanagerWebhook
-	if err := json.Unmarshal(body, &webhook); err != nil {
-		return nil, err
-	}
-	return &webhook, nil
+	return contract.ParseAlertmanagerWebhook(body)
 }
 
 // NormalizeStartsAt canonicalizes the source-declared startsAt to UTC

@@ -100,7 +100,7 @@ func (supervisor *Supervisor) runProbe(parent context.Context, sink *runtime.Fra
 	}
 	// 旧 revision 可能缺少预算元数据：在派发边界归一一次，让真实
 	// BeginModelCall 事实与 typed child 共享同一份有效固定预算。
-	probeConfig := modelprovider.NormalizeProbeConfig(modelprovider.Config{Type: config.Type, BaseURL: config.BaseURL, ChatModelID: config.ChatModelID, EmbeddingModelID: config.EmbeddingModelID, ContextBudgetTokens: config.ContextBudgetTokens, MaxOutputTokens: config.MaxOutputTokens})
+	probeConfig := modelprovider.NormalizeProbeConfig(config)
 	config.ContextBudgetTokens, config.MaxOutputTokens = probeConfig.ContextBudgetTokens, probeConfig.MaxOutputTokens
 	probeCtx := modelprovider.WithAttempt(ctx, attemptID)
 	ledger := &modelprovider.StreamLedger{Sink: sink, Channel: supervisor.Channel}
