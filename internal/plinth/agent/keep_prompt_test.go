@@ -71,8 +71,8 @@ func TestPreviousInitialAnalysisPromptStaysFrozen(t *testing.T) {
 }
 
 func TestBuildPreviousInitialMessagesMatchesFrozenShape(t *testing.T) {
-	// 旧代消息装配与当代逐字节同形，仅系统提示词绑定冻结的上一代文本。
-	current, err := BuildInitialMessages(mustParseInitialInput(t))
+	// 旧代消息装配与其上一代逐字节同形；新代才显示新增语义。
+	current, err := BuildPriorInitialMessages(mustParseInitialInput(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -91,9 +91,12 @@ var generationAccepts = map[string]map[string]bool{
 	"initial-analysis-v1":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 	"initial-analysis-v2":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 	"initial-analysis-v3":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"initial-analysis-v4":    {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 	"investigation-v3":       {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 	"investigation-v4":       {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
+	"investigation-v5":       {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 	"inspection-analysis-v4": {},
+	"inspection-analysis-v5": {},
 }
 
 // platformToolNames are the compiled tools no plugin owns (workspace and
@@ -326,11 +329,11 @@ func catalogSchemaVersionFor(agentVersion string) string {
 		// distinct from the initial-analysis one.
 		return "investigation-tools-v3"
 	}
-	if agentVersion == "investigation-v4" {
+	if agentVersion == "investigation-v4" || agentVersion == "investigation-v5" {
 		// 知识接入的调查目录代：沿用独立 provenance 标签，随代递增。
 		return "investigation-tools-v4"
 	}
-	if agentVersion == "inspection-analysis-v4" {
+	if agentVersion == "inspection-analysis-v4" || agentVersion == "inspection-analysis-v5" {
 		// 巡检分析首次按 attempt 冻结目录：拥有自己的 provenance 标签。
 		return "inspection-analysis-tools-v1"
 	}

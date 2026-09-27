@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Suknna/quoin/internal/agentcontext"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -98,42 +99,30 @@ func BuildLegacyInspectionMessages(input InspectionInput) ([]*schema.Message, er
 }
 
 // InspectionPlanContext 是 Run 冻结的分析语义（检查说明/单位/初始报告要求）。
-type InspectionPlanContext struct {
-	CheckDescription   *string `json:"checkDescription,omitempty"`
-	MetricUnit         *string `json:"metricUnit,omitempty"`
-	ReportInstructions *string `json:"reportInstructions,omitempty"`
-}
+type InspectionPlanContext = agentcontext.InspectionPlan
 
 // InspectionCheckItem 是冻结输入中的逐检查项结构化清单：身份、冻结语义、查询
 // 形状、真实执行窗口/步长、observedAt、warnings、缺口与 Evidence/Artifact 对应。
-type InspectionCheckItem struct {
-	CheckKey    string `json:"checkKey"`
-	DisplayName string `json:"displayName"`
-	Status      string `json:"status"`
-	EvidenceID  *int64 `json:"evidenceId,omitempty"`
-	ArtifactID  *int64 `json:"artifactId,omitempty"`
-	// 冻结的查询形状。
-	Expression   string `json:"expression,omitempty"`
-	RangeSeconds *int64 `json:"rangeSeconds,omitempty"`
-	StepSeconds  *int64 `json:"stepSeconds,omitempty"`
-	// 真实执行事实；缺口检查没有执行事实，只有 gapReason。
-	ObservedAt          string   `json:"observedAt,omitempty"`
-	WindowStartAt       string   `json:"windowStartAt,omitempty"`
-	WindowEndAt         string   `json:"windowEndAt,omitempty"`
-	ExecutedStepSeconds *int64   `json:"executedStepSeconds,omitempty"`
-	Warnings            []string `json:"warnings,omitempty"`
-	GapReason           *string  `json:"gapReason,omitempty"`
-}
+type InspectionCheckItem = agentcontext.InspectionCheck
 
 type InspectionInput struct {
-	SchemaKind      string  `json:"schemaKind"`
-	AttemptID       int64   `json:"attemptId"`
-	InspectionRunID int64   `json:"inspectionRunId"`
-	ArtifactIDs     []int64 `json:"artifactIds"`
-	EvidenceIDs     []int64 `json:"evidenceIds"`
-	ModelContract   struct {
-		ModelID string `json:"modelId"`
+	SchemaKind          string  `json:"schemaKind"`
+	AttemptID           int64   `json:"attemptId"`
+	InspectionRunID     int64   `json:"inspectionRunId"`
+	ReportVersion       int64   `json:"reportVersion"`
+	PlanKey             string  `json:"planKey"`
+	ConnectionName      string  `json:"connectionName,omitempty"`
+	TemplateID          string  `json:"templateId,omitempty"`
+	TemplateVersion     string  `json:"templateVersion,omitempty"`
+	ArtifactIDs         []int64 `json:"artifactIds"`
+	EvidenceIDs         []int64 `json:"evidenceIds"`
+	KnowledgeVersionIDs []int64 `json:"knowledgeVersionIds"`
+	ModelContract       struct {
+		ModelID             string `json:"modelId"`
+		ContextBudgetTokens int64  `json:"contextBudgetTokens"`
+		MaxOutputTokens     int64  `json:"maxOutputTokens"`
 	} `json:"modelContract"`
+	ToolCatalog json.RawMessage `json:"toolCatalog,omitempty"`
 	// 冻结的计划语义与逐检查项清单；旧快照不携带这些字段，解析保持向后兼容。
 	Plan   *InspectionPlanContext `json:"plan,omitempty"`
 	Checks []InspectionCheckItem  `json:"checks,omitempty"`
@@ -160,6 +149,17 @@ func (input InspectionInput) EffectiveReportInstructions() (text string, present
 
 func ParseInspectionInput(canonical []byte) (InspectionInput, error) {
 	var input InspectionInput
+	if err := decodeCurrentInput(canonical, &input); err != nil {
+		return input, fmt.Errorf("inspection_analysis_v1 input unparseable: %w", err)
+	}
+	if input.SchemaKind != "inspection_analysis_v1" || input.AttemptID < 1 || input.InspectionRunID < 1 || input.ModelContract.ModelID == "" {
+		return input, fmt.Errorf("inspection_analysis_v1 input missing identity or model contract")
+	}
+	return input, nil
+}
+
+func ParseLegacyInspectionInput(canonical []byte) (InspectionInput, error) {
+	var input InspectionInput
 	if err := json.Unmarshal(canonical, &input); err != nil {
 		return input, fmt.Errorf("inspection_analysis_v1 input unparseable: %w", err)
 	}
@@ -170,7 +170,44 @@ func ParseInspectionInput(canonical []byte) (InspectionInput, error) {
 }
 
 func BuildInspectionMessages(input InspectionInput) ([]*schema.Message, error) {
-	return BuildInspectionMessagesWithPrompt(input, InspectionSystemPrompt)
+	if len(input.ArtifactIDs) != len(input.EvidenceIDs) {
+		return nil, fmt.Errorf("inspection evidence/artifact locator count mismatch")
+	}
+	var body strings.Builder
+	body.WriteString("请读取以下按 Evidence 顺序冻结的 Artifact，然后基于其内容撰写巡检报告。\n")
+	for index, id := range input.ArtifactIDs {
+		fmt.Fprintf(&body, "evidenceId=%d artifactId=%d\n", input.EvidenceIDs[index], id)
+	}
+	if instructions, present := input.EffectiveReportInstructions(); present {
+		switch {
+		case instructions == "":
+			body.WriteString("\n【本次报告要求】\n（本次分析无附加报告要求。）\n")
+		case input.ReportInstructionsOverride != nil:
+			body.WriteString("\n【本次报告要求（仅本次分析生效）】\n" + instructions + "\n")
+		default:
+			body.WriteString("\n【本次报告要求】\n" + instructions + "\n")
+		}
+	}
+	// Render the shared, model-visible facts as a single structured document.
+	// New fields on the shared plan/check types automatically reach the model;
+	// execution metadata and the tool catalog remain outside this projection.
+	facts := struct {
+		ReportVersion   int64                  `json:"reportVersion"`
+		PlanKey         string                 `json:"planKey"`
+		ConnectionName  string                 `json:"connectionName,omitempty"`
+		TemplateID      string                 `json:"templateId,omitempty"`
+		TemplateVersion string                 `json:"templateVersion,omitempty"`
+		Plan            *InspectionPlanContext `json:"plan,omitempty"`
+		Checks          []InspectionCheckItem  `json:"checks"`
+	}{input.ReportVersion, input.PlanKey, input.ConnectionName, input.TemplateID,
+		input.TemplateVersion, input.Plan, input.Checks}
+	context, err := json.MarshalIndent(facts, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("render inspection context: %w", err)
+	}
+	body.WriteString("\n【本次巡检冻结上下文】\n" + string(context) + "\n")
+	body.WriteString("逐项给出可见结论或明确缺口；gap 没有数值、不是 0，未定义阈值的检查项不得判断健康。\n")
+	return []*schema.Message{schema.SystemMessage(InspectionSystemPrompt), schema.UserMessage(body.String())}, nil
 }
 
 // BuildInspectionMessagesWithPrompt preserves the same frozen user projection

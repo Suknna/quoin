@@ -137,7 +137,9 @@ func TestBuildMessagesBindEndpointSemanticsPrompt(t *testing.T) {
 		SchemaKind: "inspection_analysis_v1", AttemptID: 1, InspectionRunID: 1,
 		ArtifactIDs: []int64{10}, EvidenceIDs: []int64{20},
 		ModelContract: struct {
-			ModelID string `json:"modelId"`
+			ModelID             string `json:"modelId"`
+			ContextBudgetTokens int64  `json:"contextBudgetTokens"`
+			MaxOutputTokens     int64  `json:"maxOutputTokens"`
 		}{ModelID: "fixture-chat-1"},
 	})
 	if err != nil {

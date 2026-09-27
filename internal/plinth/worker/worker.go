@@ -76,6 +76,20 @@ var initialAnalysisMode = attemptMode{
 	},
 }
 
+// The previous executor generation retains its exact model-message shape;
+// changing only the new mode avoids reinterpreting already-frozen attempts.
+var priorContextInitialAnalysisMode = attemptMode{
+	schemaKind: "initial_analysis_v1", agentVersion: "initial-analysis-v3", outputSchemaKind: OutputSchemaKind,
+	prompt: agent.SystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseLegacyInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildPriorInitialMessages(input)
+	},
+}
+
 // keptInitialAnalysisMode renders the frozen initial-analysis-v2 (Keep) prompt
 // for attempts created before the 知识接入 generation; the message shape
 // is byte-identical and only the system prompt differs.
@@ -85,7 +99,7 @@ var keptInitialAnalysisMode = attemptMode{
 	outputSchemaKind: OutputSchemaKind,
 	prompt:           agent.KeptAnalysisSystemPrompt,
 	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
-		input, err := agent.ParseInput(canonical)
+		input, err := agent.ParseLegacyInput(canonical)
 		if err != nil {
 			return nil, err
 		}
@@ -102,7 +116,7 @@ var previousInitialAnalysisMode = attemptMode{
 	outputSchemaKind: OutputSchemaKind,
 	prompt:           agent.PreviousAnalysisSystemPrompt,
 	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
-		input, err := agent.ParseInput(canonical)
+		input, err := agent.ParseLegacyInput(canonical)
 		if err != nil {
 			return nil, err
 		}
@@ -122,6 +136,18 @@ var inspectionAnalysisMode = attemptMode{
 	},
 }
 
+var priorContextInspectionAnalysisMode = attemptMode{
+	schemaKind: "inspection_analysis_v1", agentVersion: "inspection-analysis-v4", outputSchemaKind: InspectionOutputSchemaKind,
+	prompt: agent.InspectionSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseLegacyInspectionInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildInspectionMessagesWithPrompt(input, agent.InspectionSystemPrompt)
+	},
+}
+
 // keptInspectionAnalysisMode renders the frozen inspection-analysis-v3 (Keep)
 // prompt for attempts created before the 知识接入 generation. These attempts
 // predate per-attempt catalog freezing for inspection analyses, so their
@@ -131,7 +157,7 @@ var keptInspectionAnalysisMode = attemptMode{
 	schemaKind: "inspection_analysis_v1", agentVersion: KeptInspectionAnalysisAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
 	prompt: agent.KeptInspectionSystemPrompt,
 	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
-		input, err := agent.ParseInspectionInput(canonical)
+		input, err := agent.ParseLegacyInspectionInput(canonical)
 		if err != nil {
 			return nil, err
 		}
@@ -143,7 +169,7 @@ var reportComplianceInspectionAnalysisMode = attemptMode{
 	schemaKind: "inspection_analysis_v1", agentVersion: ReportComplianceInspectionAnalysisAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
 	prompt: agent.ReportComplianceInspectionSystemPrompt,
 	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
-		input, err := agent.ParseInspectionInput(canonical)
+		input, err := agent.ParseLegacyInspectionInput(canonical)
 		if err != nil {
 			return nil, err
 		}
@@ -155,7 +181,7 @@ var previousInspectionAnalysisMode = attemptMode{
 	schemaKind: "inspection_analysis_v1", agentVersion: PreviousInspectionAnalysisAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
 	prompt: agent.PreviousInspectionSystemPrompt,
 	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
-		input, err := agent.ParseInspectionInput(canonical)
+		input, err := agent.ParseLegacyInspectionInput(canonical)
 		if err != nil {
 			return nil, err
 		}
@@ -173,7 +199,7 @@ var legacyInspectionAnalysisMode = attemptMode{
 	schemaKind: "inspection_analysis_v1", agentVersion: LegacyInitialAnalysisAgentVersion, outputSchemaKind: InspectionOutputSchemaKind,
 	prompt: agent.LegacyInspectionSystemPrompt,
 	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
-		input, err := agent.ParseInspectionInput(canonical)
+		input, err := agent.ParseLegacyInspectionInput(canonical)
 		if err != nil {
 			return nil, err
 		}
@@ -207,6 +233,18 @@ var investigationMode = attemptMode{
 	},
 }
 
+var priorContextInvestigationMode = attemptMode{
+	schemaKind: "investigation_v1", agentVersion: "investigation-v4", outputSchemaKind: InvestigationOutputSchemaKind,
+	prompt: agent.InvestigationSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseLegacyInvestigationInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildPriorInvestigationMessages(input)
+	},
+}
+
 // keptInvestigationMode renders the frozen investigation-v3 (Keep) prompt
 // under the identical renderer-v4 message shape for attempts created before
 // the 知识接入 generation.
@@ -216,7 +254,7 @@ var keptInvestigationMode = attemptMode{
 	outputSchemaKind: InvestigationOutputSchemaKind,
 	prompt:           agent.KeptInvestigationSystemPrompt,
 	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
-		input, err := agent.ParseInvestigationInput(canonical)
+		input, err := agent.ParseLegacyInvestigationInput(canonical)
 		if err != nil {
 			return nil, err
 		}
@@ -233,7 +271,7 @@ var previousInvestigationMode = attemptMode{
 	outputSchemaKind: InvestigationOutputSchemaKind,
 	prompt:           agent.PreviousInvestigationSystemPrompt,
 	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
-		input, err := agent.ParseInvestigationInput(canonical)
+		input, err := agent.ParseLegacyInvestigationInput(canonical)
 		if err != nil {
 			return nil, err
 		}
@@ -247,7 +285,7 @@ var legacyInvestigationMode = attemptMode{
 	outputSchemaKind: InvestigationOutputSchemaKind,
 	prompt:           agent.LegacyInvestigationSystemPrompt,
 	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
-		input, err := agent.ParseInvestigationInput(canonical)
+		input, err := agent.ParseLegacyInvestigationInput(canonical)
 		if err != nil {
 			return nil, err
 		}
@@ -326,6 +364,8 @@ func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
 		switch start.GetAgentVersion() {
 		case WorkerAgentVersion:
 			mode = initialAnalysisMode
+		case "initial-analysis-v3":
+			mode = priorContextInitialAnalysisMode
 		case PreviousAnalysisAgentVersion:
 			mode = keptInitialAnalysisMode
 		case LegacyInitialAnalysisAgentVersion:
@@ -337,6 +377,8 @@ func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
 		switch start.GetAgentVersion() {
 		case WorkerInvestigationAgentVersion:
 			mode = investigationMode
+		case "investigation-v4":
+			mode = priorContextInvestigationMode
 		case KeptInvestigationAgentVersion:
 			mode = keptInvestigationMode
 		case PreviousInvestigationAgentVersion:
@@ -353,6 +395,8 @@ func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
 		switch start.GetAgentVersion() {
 		case InspectionAnalysisAgentVersion:
 			mode = inspectionAnalysisMode
+		case "inspection-analysis-v4":
+			mode = priorContextInspectionAnalysisMode
 		case KeptInspectionAnalysisAgentVersion:
 			mode = keptInspectionAnalysisMode
 		case ReportComplianceInspectionAnalysisAgentVersion:

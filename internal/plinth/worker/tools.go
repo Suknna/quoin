@@ -27,7 +27,7 @@ import (
 // the analysis prompt to its own generation while every older identity stays
 // executable below; the 知识接入 generation bumps it again (knowledge
 // retrieval tools + usage rules).
-const WorkerAgentVersion = "initial-analysis-v3"
+const WorkerAgentVersion = "initial-analysis-v4"
 
 // PreviousAnalysisAgentVersion retains the Keep-adapted initial-analysis-v2
 // prompt generation for already-created attempts.
@@ -52,7 +52,7 @@ const KnowledgeExtractionAgentVersion = "initial-analysis-v1"
 // attempt from a different prompt generation can never be rendered with this
 // binary's frozen inspection prompt. The 知识接入 generation is also the first
 // to freeze a per-attempt tool catalog for inspection analyses.
-const InspectionAnalysisAgentVersion = "inspection-analysis-v4"
+const InspectionAnalysisAgentVersion = "inspection-analysis-v5"
 
 // KeptInspectionAnalysisAgentVersion retains the Keep-adapted
 // inspection-analysis-v3 prompt generation for already-created attempts.
@@ -69,7 +69,7 @@ const PreviousInspectionAnalysisAgentVersion = "inspection-analysis-v1"
 // WorkerInvestigationAgentVersion pins the investigation agent generation
 // (mirrors investigation.AgentVersion). The 知识接入 generation bumps it to v4
 // (knowledge retrieval tools + usage rules).
-const WorkerInvestigationAgentVersion = "investigation-v4"
+const WorkerInvestigationAgentVersion = "investigation-v5"
 
 // KeptInvestigationAgentVersion retains the Keep-adapted investigation-v3
 // prompt generation for already-created attempts.

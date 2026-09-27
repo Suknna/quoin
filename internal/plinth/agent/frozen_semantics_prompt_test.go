@@ -59,11 +59,11 @@ func TestEmpiricalAssemblyExposesFrozenSemantics(t *testing.T) {
 	}
 	user := messages[1].Content
 	for _, fragment := range []string{
-		"检查说明：检查本次采样中两个中间件是否可由各自 exporter 连接。预期各一条序列，1 表示连接成功，0 表示连接失败，缺失表示证据不足。不能等同于业务交易成功。",
-		"指标单位：1=连接成功，0=连接失败",
+		`"checkDescription": "检查本次采样中两个中间件是否可由各自 exporter 连接。预期各一条序列，1 表示连接成功，0 表示连接失败，缺失表示证据不足。不能等同于业务交易成功。"`,
+		`"metricUnit": "1=连接成功，0=连接失败"`,
 		"evidenceId=93 artifactId=7",
-		"表达式=middleware_up",
-		"observedAt=2026-09-21T16:27:58.81678522Z",
+		`"expression": "middleware_up`,
+		`"observedAt": "2026-09-21T16:27:58.81678522Z"`,
 		"本次报告要求",
 	} {
 		if !strings.Contains(user, fragment) {

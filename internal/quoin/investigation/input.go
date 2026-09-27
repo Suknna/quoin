@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Suknna/quoin/internal/agentcontext"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 )
 
@@ -47,22 +48,12 @@ type Input struct {
 // RenderedIntegration is one admin-enabled integration frozen into the
 // attempt input. Kind is "metrics" (Prometheus/Thanos) or "kubernetes";
 // credentials and endpoints never appear.
-type RenderedIntegration struct {
-	Kind string `json:"kind"`
-	Name string `json:"name"`
-}
+type RenderedIntegration = agentcontext.Integration
 
 // RenderedRecentOccurrence is one frozen history occurrence rendered into
 // the investigation prompt context (immutable facts only; ADR-0012 归一
 // 语义 severity/title 一并冻结渲染).
-type RenderedRecentOccurrence struct {
-	ID        string            `json:"id"`
-	Severity  string            `json:"severity"`
-	Title     string            `json:"title"`
-	SourceKey string            `json:"sourceKey"`
-	StartsAt  string            `json:"startsAt"`
-	Labels    map[string]string `json:"labels"`
-}
+type RenderedRecentOccurrence = agentcontext.RecentOccurrence
 
 // MessageInput is one active-branch message of the turn; user messages
 // may carry their ordered immutable attachment references (locator facts
@@ -159,10 +150,7 @@ type occurrenceSourceContext struct {
 }
 
 // RenderedCorrelation 是来源 occurrence 首观测冻结的视图关联快照。
-type RenderedCorrelation struct {
-	ViewKey     string `json:"viewKey"`
-	DisplayName string `json:"displayName"`
-}
+type RenderedCorrelation = agentcontext.Correlation
 
 type analysisSourceContext struct {
 	ID           string `json:"id"`

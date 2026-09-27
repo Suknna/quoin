@@ -14,15 +14,16 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func TestParseInputRequiresBusinessContextOrSources(t *testing.T) {
-	// ADR-0004: an attempt without a business declaration must carry the
-	// frozen integrations as its source-level authority; neither is invalid.
-	_, err := ParseInput([]byte(`{
+func TestParseInputAllowsAlertsWithoutMetricsIntegrations(t *testing.T) {
+	input, err := ParseInput([]byte(`{
 		"occurrence":{"id":"1","labels":{}},
 		"modelContract":{"modelId":"fixture"}
 	}`))
-	if err == nil || !strings.Contains(err.Error(), "integrations") {
-		t.Fatalf("ParseInput error = %v, want missing integrations", err)
+	if err != nil {
+		t.Fatalf("ParseInput without integrations: %v", err)
+	}
+	if _, err := BuildInitialMessages(input); err != nil {
+		t.Fatalf("BuildInitialMessages without integrations: %v", err)
 	}
 }
 

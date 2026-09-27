@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/Suknna/quoin/internal/agentcontext"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
@@ -27,7 +28,7 @@ const reportResultKind = "inspection_report_result_v1"
 // reportRendererVersion 是巡检分析输入快照的 renderer 代：v2（知识接入代）
 // 起在 canonical 输入内嵌冻结工具目录；旧 Attempt 的快照仍记录 v1，重建只读
 // 存储文档，不回填目录，字节保持不变。
-const reportRendererVersion = "v2"
+const reportRendererVersion = "v3"
 
 type reportModelContract struct {
 	ModelID             string `json:"modelId"`
@@ -38,25 +39,7 @@ type reportModelContract struct {
 // reportCheckItem 是分析输入携带的单检查项结构化清单：检查身份、冻结语义
 // （名称/说明/单位）、冻结查询形状（表达式与范围）、真实执行窗口与结果对应
 // 关系。gap 是显式事实：没有数据绝不当 0，没有阈值绝不判断健康。
-type reportCheckItem struct {
-	CheckKey    string `json:"checkKey"`
-	DisplayName string `json:"displayName"`
-	Status      string `json:"status"`
-	EvidenceID  *int64 `json:"evidenceId,omitempty"`
-	ArtifactID  *int64 `json:"artifactId,omitempty"`
-	// 冻结的查询形状（来自 Run 冻结参数）。
-	Expression   string `json:"expression,omitempty"`
-	RangeSeconds *int64 `json:"rangeSeconds,omitempty"`
-	StepSeconds  *int64 `json:"stepSeconds,omitempty"`
-	// 真实执行事实：observedAt 与（范围查询的）实际窗口/步长；缺口检查没有
-	// 执行事实，只携带 gapReason。
-	ObservedAt          string   `json:"observedAt,omitempty"`
-	WindowStartAt       string   `json:"windowStartAt,omitempty"`
-	WindowEndAt         string   `json:"windowEndAt,omitempty"`
-	ExecutedStepSeconds *int64   `json:"executedStepSeconds,omitempty"`
-	Warnings            []string `json:"warnings,omitempty"`
-	GapReason           *string  `json:"gapReason,omitempty"`
-}
+type reportCheckItem = agentcontext.InspectionCheck
 
 // checkItemQuerier 抽象冻结路径（执行器事务）与重建路径（只读池）共用的查询面。
 type checkItemQuerier interface {
@@ -209,15 +192,7 @@ type reportInput struct {
 
 // planReportContext 是模型可见的计划事实摘要（非秘密、非正文）。检查说明、
 // 单位与初始报告要求来自 Run 冻结列，不读计划当前定义。
-type planReportContext struct {
-	Key    string         `json:"key"`
-	Params map[string]any `json:"params"`
-	Scope  map[string]any `json:"scope"`
-	// Run 冻结的分析语义（可选；旧 Run 为 NULL 时保持缺失以维持重建字节）。
-	CheckDescription   *string `json:"checkDescription,omitempty"`
-	MetricUnit         *string `json:"metricUnit,omitempty"`
-	ReportInstructions *string `json:"reportInstructions,omitempty"`
-}
+type planReportContext = agentcontext.InspectionPlan
 
 // modelProviderSelection mirrors the single enabled model provider resolution
 // owned by internal/quoin/analysis (DATA-CONN-003): one enabled provider with

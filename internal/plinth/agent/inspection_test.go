@@ -77,22 +77,22 @@ func TestInspectionMessagesKeepInstructionsUserLevelAndExposeChecklist(t *testin
 	if !strings.Contains(user, "本次报告要求（仅本次分析生效）") || !strings.Contains(user, "只列异常项") {
 		t.Fatalf("override must surface as this-run-only: %q", user)
 	}
-	// 冻结语义与检查项清单完整可见。
+	// 冻结语义与检查项清单以结构化 JSON 完整可见。
 	for _, fragment := range []string{
-		"检查说明：检查 Prometheus 连通性", "指标单位：1=在线",
-		"checkKey=promql_instant", "名称=PromQL 即时查询",
-		"表达式=up", "实际窗口=", "实际步长=60s", "observedAt=2026-09-16T00:05:00Z",
-		"warnings=collection truncated", "evidenceId=5", "artifactId=11",
-		"checkKey=promql_range", "缺口原因=no_data（无数据，不是 0）",
-		"observedAt=2026-09-16T00:05:30Z", "warnings=collection truncated",
-		"范围=300s", "未定义阈值的检查项不得判断健康",
+		`"checkDescription": "检查 Prometheus 连通性"`, `"metricUnit": "1=在线"`,
+		`"key": "mall-plan"`, `"scope": {`, `"params": {`,
+		`"checkKey": "promql_instant"`, `"displayName": "PromQL 即时查询"`,
+		`"expression": "up"`, `"windowStartAt": "2026-09-16T00:00:00Z"`, `"executedStepSeconds": 60`,
+		`"observedAt": "2026-09-16T00:05:00Z"`, `"collection truncated"`, `"evidenceId": 5`, `"artifactId": 11`,
+		`"checkKey": "promql_range"`, `"gapReason": "no_data"`,
+		`"observedAt": "2026-09-16T00:05:30Z"`, `"rangeSeconds": 300`, "未定义阈值的检查项不得判断健康",
 	} {
 		if !strings.Contains(user, fragment) {
 			t.Fatalf("user message missing %q:\n%s", fragment, user)
 		}
 	}
 	// 缺口检查不得携带执行事实或证据 locator。
-	if strings.Contains(user, "checkKey=promql_range") && strings.Contains(strings.Split(user, "checkKey=promql_range")[1][:200], "evidenceId=") {
+	if strings.Contains(strings.Split(user, `"checkKey": "promql_range"`)[1], `"evidenceId":`) {
 		t.Fatalf("gap check must not fabricate evidence mapping")
 	}
 }
@@ -140,7 +140,7 @@ func TestInspectionMessagesFallBackToFrozenInstructionsAndStayLegacyCompatible(t
 	legacy.ModelContract.ModelID = "fixture-chat-1"
 	legacy.EvidenceIDs = []int64{5}
 	legacy.ArtifactIDs = []int64{11}
-	legacyMessages, err := BuildInspectionMessages(legacy)
+	legacyMessages, err := BuildInspectionMessagesWithPrompt(legacy, InspectionSystemPrompt)
 	if err != nil {
 		t.Fatal(err)
 	}

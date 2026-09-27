@@ -24,13 +24,16 @@ type KnowledgeExtractionInput struct {
 	SourceMaterialID int64  `json:"sourceMaterialId"`
 	Text             string `json:"text"`
 	ModelContract    struct {
-		ModelID string `json:"modelId"`
+		ModelID             string `json:"modelId"`
+		ContextBudgetTokens int64  `json:"contextBudgetTokens"`
+		MaxOutputTokens     int64  `json:"maxOutputTokens"`
 	} `json:"modelContract"`
+	ToolCatalog json.RawMessage `json:"toolCatalog,omitempty"`
 }
 
 func ParseKnowledgeExtractionInput(canonical []byte) (KnowledgeExtractionInput, error) {
 	var input KnowledgeExtractionInput
-	if err := json.Unmarshal(canonical, &input); err != nil {
+	if err := decodeCurrentInput(canonical, &input); err != nil {
 		return input, fmt.Errorf("knowledge_extraction_v1 input unparseable: %w", err)
 	}
 	if input.SchemaKind != "knowledge_extraction_v1" || input.AttemptID < 1 || input.BatchID < 1 || input.SourceMaterialID < 1 || input.Text == "" || input.ModelContract.ModelID == "" {

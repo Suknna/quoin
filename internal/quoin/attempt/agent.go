@@ -946,6 +946,8 @@ func (service *Service) HasSucceededChatCall(ctx context.Context, attemptID int6
 // the per-attempt tool catalog to inspection inputs (input shape v1 + catalog).
 func promptRendererVersionFor(agentVersion string) string {
 	switch agentVersion {
+	case "investigation-v5":
+		return "investigation-renderer-v7"
 	case "investigation-v4":
 		// 知识接入的调查 prompt 代：跳过 v5（ADR-0012 的输入形状 renderer
 		// 已占用该号），prompt 与输入 renderer 序列自 v6 起重新对齐。
@@ -954,9 +956,13 @@ func promptRendererVersionFor(agentVersion string) string {
 		return "investigation-renderer-v4"
 	case "inspection-analysis-v4":
 		return "inspection-analysis-renderer-v4"
+	case "inspection-analysis-v5":
+		return "inspection-analysis-renderer-v5"
 	case "inspection-analysis-v3":
 		return "inspection-analysis-renderer-v3"
 	case AgentVersion:
+		return "initial-analysis-renderer-v7"
+	case "initial-analysis-v3":
 		return "initial-analysis-renderer-v6"
 	case "initial-analysis-v2":
 		return "initial-analysis-renderer-v5"

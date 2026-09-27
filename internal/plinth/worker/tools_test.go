@@ -112,15 +112,15 @@ func TestAgentVersionIdentityPins(t *testing.T) {
 		"PreviousInvestigationAgentVersion":              PreviousInvestigationAgentVersion,
 	}
 	want := map[string]string{
-		"WorkerAgentVersion":                             "initial-analysis-v3",
+		"WorkerAgentVersion":                             "initial-analysis-v4",
 		"PreviousAnalysisAgentVersion":                   "initial-analysis-v2",
 		"LegacyInitialAnalysisAgentVersion":              "initial-analysis-v1",
 		"KnowledgeExtractionAgentVersion":                "initial-analysis-v1",
-		"InspectionAnalysisAgentVersion":                 "inspection-analysis-v4",
+		"InspectionAnalysisAgentVersion":                 "inspection-analysis-v5",
 		"KeptInspectionAnalysisAgentVersion":             "inspection-analysis-v3",
 		"ReportComplianceInspectionAnalysisAgentVersion": "inspection-analysis-v2",
 		"PreviousInspectionAnalysisAgentVersion":         "inspection-analysis-v1",
-		"WorkerInvestigationAgentVersion":                "investigation-v4",
+		"WorkerInvestigationAgentVersion":                "investigation-v5",
 		"KeptInvestigationAgentVersion":                  "investigation-v3",
 		"PreviousInvestigationAgentVersion":              "investigation-v2",
 	}

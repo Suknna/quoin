@@ -10,29 +10,38 @@ func TestInspectionAgentVersionHasItsOwnRendererGeneration(t *testing.T) {
 	if InspectionAgentVersion == AgentVersion {
 		t.Fatal("inspection analysis must not share the initial-analysis executor generation")
 	}
-	if got := promptRendererVersionFor(InspectionAgentVersion); got != "inspection-analysis-renderer-v4" {
+	if got := promptRendererVersionFor(InspectionAgentVersion); got != "inspection-analysis-renderer-v5" {
 		t.Fatalf("current inspection renderer version = %q", got)
 	}
 	// 旧代保持各自冻结身份，供在途/历史 Attempt 溯源解读。
 	if got := promptRendererVersionFor("inspection-analysis-v3"); got != "inspection-analysis-renderer-v3" {
 		t.Fatalf("kept inspection renderer version = %q", got)
 	}
+	if got := promptRendererVersionFor("inspection-analysis-v4"); got != "inspection-analysis-renderer-v4" {
+		t.Fatalf("prior inspection renderer version = %q", got)
+	}
 }
 
 func TestInitialAnalysisRendererGenerations(t *testing.T) {
 	// 知识接入代：prompt 纯文本变化即新渲染代次。
-	if got := promptRendererVersionFor(AgentVersion); got != "initial-analysis-renderer-v6" {
+	if got := promptRendererVersionFor(AgentVersion); got != "initial-analysis-renderer-v7" {
 		t.Fatalf("current initial analysis renderer version = %q", got)
 	}
 	if got := promptRendererVersionFor("initial-analysis-v2"); got != "initial-analysis-renderer-v5" {
 		t.Fatalf("kept initial analysis renderer version = %q", got)
 	}
+	if got := promptRendererVersionFor("initial-analysis-v3"); got != "initial-analysis-renderer-v6" {
+		t.Fatalf("prior initial analysis renderer version = %q", got)
+	}
 }
 
 func TestInvestigationRendererGenerations(t *testing.T) {
+	if got := promptRendererVersionFor("investigation-v5"); got != "investigation-renderer-v7" {
+		t.Fatalf("current investigation renderer version = %q", got)
+	}
 	// 知识接入调查代跳过 v5（ADR-0012 输入形状 renderer 已占用），自 v6 对齐。
 	if got := promptRendererVersionFor("investigation-v4"); got != "investigation-renderer-v6" {
-		t.Fatalf("current investigation renderer version = %q", got)
+		t.Fatalf("prior investigation renderer version = %q", got)
 	}
 	if got := promptRendererVersionFor("investigation-v3"); got != "investigation-renderer-v4" {
 		t.Fatalf("kept investigation renderer version = %q", got)

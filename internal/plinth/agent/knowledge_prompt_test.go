@@ -106,8 +106,8 @@ func TestKeptInspectionPromptStaysFrozen(t *testing.T) {
 }
 
 func TestBuildKeptMessagesBindFrozenPrompts(t *testing.T) {
-	// 各 kept 装配与当代消息逐字节同形，仅系统提示词绑定冻结文本。
-	current, err := BuildInitialMessages(mustParseInitialInput(t))
+	// kept 与 v3 的旧上下文形状一致，新代另行显示归一化语义。
+	current, err := BuildPriorInitialMessages(mustParseInitialInput(t))
 	if err != nil {
 		t.Fatal(err)
 	}

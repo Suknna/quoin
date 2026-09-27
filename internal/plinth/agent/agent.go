@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Suknna/quoin/internal/agentcontext"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -88,7 +89,7 @@ const PreviousAnalysisSystemPrompt = `你是 Quoin 的只读告警分析代理�
 // contract for audits; Quoin stores whatever the worker sends). The 知识接入
 // generation keeps the renderer-v4 input shape and only changes the fixed
 // system prompt (and the frozen catalog content).
-const RendererVersion = "initial-analysis-renderer-v6"
+const RendererVersion = "initial-analysis-renderer-v7"
 
 // SystemPromptDigest is the SHA-256 hex digest of the fixed system prompt.
 func SystemPromptDigest() string {
@@ -106,15 +107,7 @@ type resourcePromptScope struct {
 
 // Input is the worker's view of the frozen initial_analysis_v1 snapshot.
 type Input struct {
-	Occurrence struct {
-		ID              string            `json:"id"`
-		State           string            `json:"state"`
-		FirstSeenAt     string            `json:"firstSeenAt"`
-		LastStateChange string            `json:"lastStateChangeAt"`
-		ResolvedAt      *string           `json:"resolvedAt,omitempty"`
-		Labels          map[string]string `json:"labels"`
-		Annotations     map[string]string `json:"annotations,omitempty"`
-	} `json:"occurrence"`
+	Occurrence agentcontext.Occurrence `json:"occurrence"`
 	// BusinessContext exists only when the occurrence closes onto a published
 	// business declaration (the narrowing view); source-level attempts carry
 	// Integrations instead (ADR-0004).
@@ -129,10 +122,32 @@ type Input struct {
 		ContextBudgetTokens int    `json:"contextBudgetTokens"`
 		MaxOutputTokens     int    `json:"maxOutputTokens"`
 	} `json:"modelContract"`
+	// The tool catalog is consumed by the worker separately, not shown to the model.
+	ToolCatalog json.RawMessage `json:"toolCatalog,omitempty"`
 }
 
 // ParseInput decodes and validates the frozen initial_analysis_v1 input.
 func ParseInput(canonical []byte) (Input, error) {
+	var input Input
+	if err := decodeCurrentInput(canonical, &input); err != nil {
+		return Input{}, fmt.Errorf("initial_analysis_v1 input unparseable: %w", err)
+	}
+	if input.Occurrence.ID == "" || input.Occurrence.Labels == nil {
+		return Input{}, fmt.Errorf("initial_analysis_v1 input missing occurrence context")
+	}
+	// An alert is still analyzable without an enabled metrics integration.
+	if input.BusinessContext != nil && (input.BusinessContext.SystemKey == "" || input.BusinessContext.ConfigVersionID == "" || len(input.BusinessContext.Resources) == 0) {
+		return Input{}, fmt.Errorf("initial_analysis_v1 input carries an incomplete business context declaration")
+	}
+	if input.ModelContract.ModelID == "" {
+		return Input{}, fmt.Errorf("initial_analysis_v1 input missing model contract")
+	}
+	return input, nil
+}
+
+// ParseLegacyInput retains the earlier lenient decoding and source requirement
+// for attempts whose agent identity predates the complete context projection.
+func ParseLegacyInput(canonical []byte) (Input, error) {
 	var input Input
 	if err := json.Unmarshal(canonical, &input); err != nil {
 		return Input{}, fmt.Errorf("initial_analysis_v1 input unparseable: %w", err)
@@ -156,25 +171,46 @@ func ParseInput(canonical []byte) (Input, error) {
 // contract, the scope guidance (declaration view or source-level view) and
 // the rendered occurrence context (ARCH-CONTEXT-002).
 func BuildInitialMessages(input Input) ([]*schema.Message, error) {
-	return buildInitialMessages(input, SystemPrompt)
+	return buildInitialMessages(input, SystemPrompt, false)
+}
+
+// BuildPriorInitialMessages preserves the v3 prompt and its old projection.
+func BuildPriorInitialMessages(input Input) ([]*schema.Message, error) {
+	return buildInitialMessages(input, SystemPrompt, true)
 }
 
 // BuildKeptInitialMessages reproduces the frozen initial-analysis-v2 (Keep)
 // prompt bytes with the identical message shape, so an in-flight attempt from
 // before the 知识接入 generation still renders exactly its frozen prompt.
 func BuildKeptInitialMessages(input Input) ([]*schema.Message, error) {
-	return buildInitialMessages(input, KeptAnalysisSystemPrompt)
+	return buildInitialMessages(input, KeptAnalysisSystemPrompt, true)
 }
 
 // BuildPreviousInitialMessages reproduces the frozen initial-analysis-v1
 // prompt bytes with the identical message shape, so an in-flight attempt from
 // before the Keep-adapted generation still renders exactly its frozen input.
 func BuildPreviousInitialMessages(input Input) ([]*schema.Message, error) {
-	return buildInitialMessages(input, PreviousAnalysisSystemPrompt)
+	return buildInitialMessages(input, PreviousAnalysisSystemPrompt, true)
 }
 
-func buildInitialMessages(input Input, prompt string) ([]*schema.Message, error) {
-	context := map[string]any{"告警": input.Occurrence}
+func buildInitialMessages(input Input, prompt string, legacy bool) ([]*schema.Message, error) {
+	var occurrence any = input.Occurrence
+	if legacy {
+		// Previous agent identities omitted these facts even when they were in
+		// the snapshot. Preserve the old message bytes for in-flight attempts.
+		occurrence = struct {
+			ID              string            `json:"id"`
+			State           string            `json:"state"`
+			FirstSeenAt     string            `json:"firstSeenAt"`
+			LastStateChange string            `json:"lastStateChangeAt"`
+			ResolvedAt      *string           `json:"resolvedAt,omitempty"`
+			Labels          map[string]string `json:"labels"`
+			Annotations     map[string]string `json:"annotations,omitempty"`
+		}{input.Occurrence.ID, input.Occurrence.State, input.Occurrence.FirstSeenAt,
+			input.Occurrence.LastStateChange, input.Occurrence.ResolvedAt,
+			input.Occurrence.Labels, input.Occurrence.Annotations}
+	}
+	context := map[string]any{"告警": occurrence}
 	// The business view is descriptive context; the tool call shape is always
 	// the source-level one (ADR-0004). Scope guidance renders only when the
 	// attempt actually froze integrations.
@@ -190,6 +226,8 @@ func buildInitialMessages(input Input, prompt string) ([]*schema.Message, error)
 	messages := []*schema.Message{schema.SystemMessage(prompt)}
 	if len(input.Integrations) > 0 {
 		messages = append(messages, schema.SystemMessage(sourceScopeGuidance(input.Integrations)))
+	} else if !legacy && input.BusinessContext == nil {
+		messages = append(messages, schema.SystemMessage("本次未授权指标来源；不要假设可以查询监控数据，仅依据冻结告警上下文分析并明确证据限制。"))
 	}
 	return append(messages, schema.UserMessage("请分析以下告警：\n"+string(contextBody))), nil
 }
@@ -280,7 +318,7 @@ const KeptInvestigationSystemPrompt = `你是 Quoin 的只读运维调查代理�
 // Keep-adapted generation; v6 is the 知识接入 prompt generation (v5 is the
 // Quoin-side input-shape renderer of ADR-0012, so the prompt sequence skips
 // past it and re-aligns from v6).
-const InvestigationRendererVersion = "investigation-renderer-v6"
+const InvestigationRendererVersion = "investigation-renderer-v7"
 
 // InvestigationInput is the worker's view of the frozen investigation_v1
 // snapshot: the active-branch messages (user messages may carry their
@@ -313,17 +351,13 @@ type InvestigationInput struct {
 		ContextBudgetTokens int    `json:"contextBudgetTokens"`
 		MaxOutputTokens     int    `json:"maxOutputTokens"`
 	} `json:"modelContract"`
+	ToolCatalog json.RawMessage `json:"toolCatalog,omitempty"`
 }
 
 // recentOccurrence is one platform alert-history record rendered into the
 // investigation context (immutable occurrence facts only; labels carry the
 // alertname/severity the alert fired with).
-type recentOccurrence struct {
-	ID        string            `json:"id"`
-	SourceKey string            `json:"sourceKey"`
-	StartsAt  string            `json:"startsAt"`
-	Labels    map[string]string `json:"labels"`
-}
+type recentOccurrence = agentcontext.RecentOccurrence
 
 // InputAttachment is the frozen locator projection of one message
 // attachment (locator facts only; the body is read through the granted
@@ -338,7 +372,7 @@ type InputAttachment struct {
 // investigation_v1 input.
 func ParseInvestigationInput(canonical []byte) (InvestigationInput, error) {
 	var input InvestigationInput
-	if err := json.Unmarshal(canonical, &input); err != nil {
+	if err := decodeCurrentInput(canonical, &input); err != nil {
 		return InvestigationInput{}, fmt.Errorf("investigation_v1 input unparseable: %w", err)
 	}
 	if len(input.Messages) == 0 {
@@ -350,6 +384,17 @@ func ParseInvestigationInput(canonical []byte) (InvestigationInput, error) {
 	return input, nil
 }
 
+func ParseLegacyInvestigationInput(canonical []byte) (InvestigationInput, error) {
+	var input InvestigationInput
+	if err := json.Unmarshal(canonical, &input); err != nil {
+		return InvestigationInput{}, fmt.Errorf("investigation_v1 input unparseable: %w", err)
+	}
+	if len(input.Messages) == 0 || input.ModelContract.ModelID == "" {
+		return InvestigationInput{}, fmt.Errorf("investigation_v1 input missing messages or model contract")
+	}
+	return input, nil
+}
+
 // BuildInvestigationMessages assembles the first request: the fixed system
 // contract, the provenance references (references only — never bodies), the
 // active-branch messages in order and, for user messages with attachments,
@@ -357,7 +402,12 @@ func ParseInvestigationInput(canonical []byte) (InvestigationInput, error) {
 // granted artifact_read/artifact_grep tools can fetch (ARCH-WORKER-003:
 // the worker never materializes Quoin PV paths).
 func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, error) {
-	return buildInvestigationMessages(input, InvestigationSystemPrompt, true)
+	return buildInvestigationMessages(input, InvestigationSystemPrompt, true, false)
+}
+
+// BuildPriorInvestigationMessages preserves v4's history projection.
+func BuildPriorInvestigationMessages(input InvestigationInput) ([]*schema.Message, error) {
+	return buildInvestigationMessages(input, InvestigationSystemPrompt, true, true)
 }
 
 // BuildKeptInvestigationMessages reproduces the frozen investigation-v3 (Keep)
@@ -365,7 +415,7 @@ func BuildInvestigationMessages(input InvestigationInput) ([]*schema.Message, er
 // included), so in-flight v3 attempts still render exactly their frozen
 // prompt; only the system prompt differs from the current generation.
 func BuildKeptInvestigationMessages(input InvestigationInput) ([]*schema.Message, error) {
-	return buildInvestigationMessages(input, KeptInvestigationSystemPrompt, true)
+	return buildInvestigationMessages(input, KeptInvestigationSystemPrompt, true, true)
 }
 
 // BuildPreviousInvestigationMessages reproduces the frozen investigation-v2
@@ -373,16 +423,16 @@ func BuildKeptInvestigationMessages(input InvestigationInput) ([]*schema.Message
 // included), so in-flight v2 attempts still render exactly their frozen
 // input; only the system prompt differs from the current generation.
 func BuildPreviousInvestigationMessages(input InvestigationInput) ([]*schema.Message, error) {
-	return buildInvestigationMessages(input, PreviousInvestigationSystemPrompt, true)
+	return buildInvestigationMessages(input, PreviousInvestigationSystemPrompt, true, true)
 }
 
 // BuildLegacyInvestigationMessages reproduces investigation-v1 prompt bytes and
 // omits the renderer-v3-only alert-history block for historical v1/v2 attempts.
 func BuildLegacyInvestigationMessages(input InvestigationInput) ([]*schema.Message, error) {
-	return buildInvestigationMessages(input, LegacyInvestigationSystemPrompt, false)
+	return buildInvestigationMessages(input, LegacyInvestigationSystemPrompt, false, true)
 }
 
-func buildInvestigationMessages(input InvestigationInput, prompt string, includeHistory bool) ([]*schema.Message, error) {
+func buildInvestigationMessages(input InvestigationInput, prompt string, includeHistory, legacy bool) ([]*schema.Message, error) {
 	messages := []*schema.Message{schema.SystemMessage(prompt)}
 	if len(input.Sources) > 0 {
 		contextBody, err := json.MarshalIndent(map[string]any{"调查来源引用": input.Sources}, "", "  ")
@@ -395,7 +445,21 @@ func buildInvestigationMessages(input InvestigationInput, prompt string, include
 		messages = append(messages, schema.SystemMessage(sourceScopeGuidance(input.Integrations)))
 	}
 	if includeHistory && len(input.RecentOccurrences) > 0 {
-		contextBody, err := json.MarshalIndent(map[string]any{"近期告警记录": input.RecentOccurrences}, "", "  ")
+		var history any = input.RecentOccurrences
+		if legacy {
+			previous := make([]struct {
+				ID        string            `json:"id"`
+				SourceKey string            `json:"sourceKey"`
+				StartsAt  string            `json:"startsAt"`
+				Labels    map[string]string `json:"labels"`
+			}, len(input.RecentOccurrences))
+			for i, occurrence := range input.RecentOccurrences {
+				previous[i].ID, previous[i].SourceKey = occurrence.ID, occurrence.SourceKey
+				previous[i].StartsAt, previous[i].Labels = occurrence.StartsAt, occurrence.Labels
+			}
+			history = previous
+		}
+		contextBody, err := json.MarshalIndent(map[string]any{"近期告警记录": history}, "", "  ")
 		if err != nil {
 			return nil, err
 		}
@@ -419,10 +483,7 @@ func buildInvestigationMessages(input InvestigationInput, prompt string, include
 // integrationPromptScope is one authorized integration as rendered into the
 // prompt: kind ("metrics") plus the stable connection name the model passes
 // as sourceRef. No endpoint, credential or secret is included.
-type integrationPromptScope struct {
-	Kind string `json:"kind"`
-	Name string `json:"name"`
-}
+type integrationPromptScope = agentcontext.Integration
 
 // sourceScopeGuidance teaches the sourceRef call shape for attempts without
 // a business declaration (ADR-0004): the frozen integrations are the entire

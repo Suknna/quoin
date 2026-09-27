@@ -23,7 +23,7 @@ import (
 // carry it; the Keep 提示词迁入 advanced the analysis prompt to its own
 // generation while every older identity stays executable, and the 知识接入
 // generation advances it again (knowledge retrieval tools + usage rules).
-const AgentVersion = "initial-analysis-v3"
+const AgentVersion = "initial-analysis-v4"
 
 // KnowledgeAgentVersion pins knowledge extraction to its ORIGINAL shared
 // executor identity: the knowledge prompt never evolved with the analysis
@@ -39,7 +39,7 @@ const KnowledgeAgentVersion = "initial-analysis-v1"
 // creation) and the worker mode must agree on it exactly. The 知识接入
 // generation is also the first to freeze a per-attempt tool catalog for
 // inspection analyses.
-const InspectionAgentVersion = "inspection-analysis-v4"
+const InspectionAgentVersion = "inspection-analysis-v5"
 
 // ToolSchemaVersion names the fixed callable tool-schema generation of the
 // initial-analysis catalog. Quoin resolves tool names only against a frozen
