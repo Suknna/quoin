@@ -78,7 +78,7 @@ make web-typecheck web-lint web-test web-build
 make images
 ```
 
-`make images` builds `frontend`, `quoin`, `plinth`, and `stele` without starting services. Default image names are `quoin/<component>:v0.1.1`. See the [image build reference](docs/deployment.md#镜像构建) and [release guide](docs/releasing.md) for tags and offline packages.
+`make images` builds `frontend`, `quoin`, `plinth`, and `stele` without starting services. Default image names are `quoin/<component>:v0.1.2`. See the [image build reference](docs/deployment.md#镜像构建) and [release guide](docs/releasing.md) for tags and offline packages.
 
 ## Documentation
 

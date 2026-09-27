@@ -32,8 +32,8 @@ kubectl get namespace quoin
 从 [GitHub Releases](https://github.com/Suknna/quoin/releases) 下载与集群节点架构相符的镜像包及 `.sha256` 文件。所有节点必须使用相同架构的包：
 
 ```bash
-sha256sum -c quoin-v0.1.1-linux-amd64-images.tar.sha256
-docker load -i quoin-v0.1.1-linux-amd64-images.tar
+sha256sum -c quoin-v0.1.2-linux-amd64-images.tar.sha256
+docker load -i quoin-v0.1.2-linux-amd64-images.tar
 ```
 
 镜像包包含四个应用镜像：`quoin/frontend`、`quoin/quoin`、`quoin/plinth`、`quoin/stele`，以及 gateway 使用的 `caddy:2.10.2-alpine`。
@@ -43,8 +43,8 @@ docker load -i quoin-v0.1.1-linux-amd64-images.tar
 ```bash
 REGISTRY=registry.example.com/team
 for component in frontend quoin plinth stele; do
-  docker tag "quoin/$component:v0.1.1" "$REGISTRY/$component:v0.1.1"
-  docker push "$REGISTRY/$component:v0.1.1"
+  docker tag "quoin/$component:v0.1.2" "$REGISTRY/$component:v0.1.2"
+  docker push "$REGISTRY/$component:v0.1.2"
 done
 ```
 

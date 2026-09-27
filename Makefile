@@ -33,7 +33,7 @@ images:
 # 单组件热修镜像（docs/deployment.md「单组件热修升级」runbook）：
 #   make image COMPONENT=quoin VERSION=v1.0.2
 COMPONENT ?= quoin
-VERSION ?= v0.1.1
+VERSION ?= v0.1.2
 
 .PHONY: image
 image:

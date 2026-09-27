@@ -21,11 +21,11 @@
 从 [GitHub Releases](https://github.com/Suknna/quoin/releases) 下载与 Docker 主机架构相符的镜像包及其 `.sha256` 文件。x86-64 使用 `linux-amd64`，ARM 主机使用 `linux-arm64`：
 
 ```bash
-sha256sum -c quoin-v0.1.1-linux-amd64-images.tar.sha256
-docker load -i quoin-v0.1.1-linux-amd64-images.tar
+sha256sum -c quoin-v0.1.2-linux-amd64-images.tar.sha256
+docker load -i quoin-v0.1.2-linux-amd64-images.tar
 ```
 
-镜像包包含 `quoin/frontend`、`quoin/quoin`、`quoin/plinth`、`quoin/stele` 与固定的 `caddy:2.10.2-alpine`。本文统一使用 `v0.1.1`。如果不能使用离线包，可从发布的 GHCR 镜像拉取；只有需要修改源码时才运行 `bash deploy/images/build.sh` 自行构建。
+镜像包包含 `quoin/frontend`、`quoin/quoin`、`quoin/plinth`、`quoin/stele` 与固定的 `caddy:2.10.2-alpine`。本文统一使用 `v0.1.2`。如果不能使用离线包，可从发布的 GHCR 镜像拉取；只有需要修改源码时才运行 `bash deploy/images/build.sh` 自行构建。
 
 不要运行 `make e2e-real` 来代替安装：它建立隔离的开发验收环境，不是本次人工安装流程。
 
