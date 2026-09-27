@@ -1,0 +1,95 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Release type (fix increments Z, feature increments Y)"
+        type: choice
+        required: true
+        options: [fix, feature]
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+# A second operator cannot compute the same next tag while the first run is
+# preparing it. Unrelated main pushes still fail the normal fast-forward check.
+concurrency:
+  group: release-preparation
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - name: Check release source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          git fetch origin main --tags
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          test -z "$(git status --porcelain)"
+      - name: Prepare pinned defaults
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts -p test_release_version.py
+          version=$(python3 scripts/release_version.py "$BUMP")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          git diff --check
+      - run: pnpm install --frozen-lockfile
+      - run: go test ./... -count=1
+      - run: go vet ./...
+      - run: pnpm --dir web typecheck
+      - run: pnpm --dir web lint
+      - run: pnpm --dir web test
+      - run: pnpm --dir web build
+      - name: Commit and tag verified source
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Makefile README.md README.en.md \
+            deploy/compose.yaml deploy/e2e-real.compose.yaml deploy/images/build.sh \
+            deploy/images/plinth/Dockerfile deploy/images/quoin/Dockerfile deploy/images/stele/Dockerfile \
+            deploy/kubernetes/manifest_test.go deploy/kubernetes/quoin-nginx.yaml deploy/kubernetes/quoin.yaml \
+            docs/getting-started-kubernetes.md docs/getting-started.md
+          git diff --cached --check
+          git diff --exit-code
+          if git diff --cached --quiet; then
+            # Resume a run whose main push succeeded but tag push did not.
+            test "$(git log -1 --format=%s)" = "release: prepare $VERSION"
+          else
+            git commit -m "release: prepare $VERSION"
+          fi
+          git tag -a "$VERSION" -m "Quoin $VERSION"
+          git push origin HEAD:main
+          git push origin "refs/tags/$VERSION"
+      - name: Start release build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # GITHUB_TOKEN tag pushes do not trigger push workflows; dispatch is
+          # explicitly allowed and the existing workflow checks out this tag.
+          gh workflow run release-subjects.yml --ref main --field "version=$VERSION"
+          echo "Release workflow dispatched for $VERSION" >> "$GITHUB_STEP_SUMMARY"

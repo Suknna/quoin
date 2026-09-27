@@ -21,6 +21,8 @@ jobs:
         run: go test ./... -count=1
       - name: Vet
         run: go vet ./...
+      - name: Release version preparation tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_release_version.py
       - name: Authentication, execution and lifecycle races
         run: make auth-audit-race
   web:

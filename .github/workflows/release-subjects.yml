@@ -162,7 +162,7 @@ jobs:
           cat > release-intro.md <<EOF
           ## Quoin $VERSION
 
-          这是 Quoin 的首个公开版本。请下载与部署主机架构相符的离线镜像包，并在导入前校验 SHA-256 文件。
+          请下载与部署主机架构相符的离线镜像包，并在导入前校验 SHA-256 文件。
 
           包含 frontend、quoin、plinth、stele 四个应用镜像及部署所需的 Caddy 镜像。部署步骤见仓库的《部署参考》。
           EOF

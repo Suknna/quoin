@@ -1,6 +1,6 @@
 # 发布 Quoin
 
-Quoin 的发布以 Git tag 为准。创建并推送符合规则的 tag 后，GitHub Actions 会完成构建、发布镜像、打包离线镜像并创建 GitHub Release。
+Quoin 的发布以 Git tag 为准。推荐通过 **Prepare release** 工作流准备并发布；**Release Quoin** 工作流负责构建、发布镜像、打包离线镜像并创建 GitHub Release。
 
 ## 版本号
 
@@ -13,16 +13,21 @@ Tag 必须是 `vX.Y.Z`，例如 `v0.1.0`：
 
 ## 发布流程
 
-1. 在 `main` 合入已验证的变更，运行项目检查。
-2. 确认版本号并创建带注释 tag：
+1. 在 `main` 合入要发布的变更，且确保比上一个 release tag 多至少一个提交。
+2. 在 GitHub Actions 中运行 **Prepare release**，选择 `fix` 或 `feature`。也可用 `gh workflow run prepare-release.yml --ref main -f bump=fix`。工作流按最近的可达 SemVer tag 计算下一版（例如 `v0.1.2` + `fix` → `v0.1.3`，`feature` → `v0.2.0`），逐文件核对并更新镜像、部署和文档的固定版本引用，运行 Go/前端检查，提交到 `main` 并推送注释 tag。缺失或数量变化的版本引用会使其失败，不会静默跳过。
+3. 工作流显式调度 **Release Quoin**：GitHub 的 `GITHUB_TOKEN` 推送 tag 不会再触发 tag-push 工作流，不能只等 push 事件。它在原生 `linux/amd64` 与 `linux/arm64` runner 构建四个应用镜像，发布多架构 GHCR 镜像，并上传两个 Docker 离线镜像包和 SHA-256 校验文件。
+4. 等待 **Release Quoin** 成功；在 GitHub Release 页面确认下载文件、校验值和自动生成的变更说明。维护者可在发布页面补充面向用户的迁移说明。若准备提交已推送但 tag 未推送，重跑 **Prepare release** 会核对已提交版本并续推 tag；若 tag 已推送而调度失败，可通过现有 **Release Quoin** 的 `workflow_dispatch`，以该 tag 为 `version` 重新启动。不要移动或复用 tag。
+
+**权限前提**：仓库 Actions 需要允许 `GITHUB_TOKEN` 写入内容并调度工作流，`main` 的保护规则须允许该发布身份推送。权限不足时准备工作流会失败；不得靠重写历史或强制推送绕过。若组织不允许机器人直推 `main`，应改为生成发布准备 PR，由维护者合并后再创建 tag。
+
+手工恢复路径（准备工作流不可用时）：在 `main` 合入已验证的版本引用变更后，确认目标版本号，再创建并推送注释 tag：
 
    ```bash
-   git tag -a v0.1.0 -m "Quoin v0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.1.3 -m "Quoin v0.1.3"
+   git push origin v0.1.3
    ```
 
-3. 等待 **Release Quoin** workflow 成功。它在原生 `linux/amd64` 与 `linux/arm64` runner 构建四个应用镜像，发布多架构 GHCR 镜像，并上传两个 Docker 离线镜像包和 SHA-256 校验文件。
-4. 在 GitHub Release 页面确认下载文件、校验值和自动生成的变更说明。说明以简洁的中文开头；GitHub 会在后续版本自动补充本次 tag 与上一个 tag 之间的提交/PR 列表。维护者可在发布页面补充面向用户的迁移说明。
+手工推送的 tag 会直接触发 **Release Quoin**；它仍会验证 tag 内容并完成全部发布检查。
 
 ## 离线安装包
 
