@@ -20,7 +20,6 @@ import { ModelProviderPage } from "../platform/model-providers/ModelProviderModu
 import { Users } from "../platform/users/Users";
 import { AuthConfigPage } from "../platform/auth-config/AuthConfig";
 import { Profile } from "../profile/Profile";
-import { Security } from "../security/Security";
 
 /** Settings consolidates the personal account and the former /admin module.
  * Per docs/audit-design.md §6 the personal account keeps no audit entry — the
@@ -43,17 +42,8 @@ export function useSettingsModule(
 		content: React.ReactNode,
 		title: string,
 	): WorkspaceModuleView => ({ title, list, content });
-	if (pathname.startsWith("/settings/security")) {
-		return {
-			title: "安全",
-			list,
-			content: (
-				<Security suspended={props.suspended} onUserChanged={setUpdatedUser} />
-			),
-		};
-	}
 	if (pathname.startsWith("/settings/platform/users")) {
-		return platform(<Users suspended={props.suspended} />, "用户");
+		return platform(<Users suspended={props.suspended} />, "用户管理");
 	}
 	if (pathname.startsWith("/settings/platform/enrichment-rules")) {
 		return platform(
@@ -89,19 +79,28 @@ export function useSettingsModule(
 			content: <ModelProviderPage {...props} />,
 		};
 	}
-	const unknown = pathname !== "/settings" && pathname !== "/settings/profile";
+	// 旧路径 /settings/security 合并进账户与安全，照常渲染而不是 404。
+	const known =
+		pathname === "/settings" ||
+		pathname === "/settings/profile" ||
+		pathname.startsWith("/settings/security");
 	return {
-		title: "个人资料",
+		title: "账户与安全",
 		list,
-		content: unknown ? (
+		content: known ? (
+			<Profile
+				user={user}
+				suspended={props.suspended}
+				onUserChanged={setUpdatedUser}
+				onLogout={props.logout}
+			/>
+		) : (
 			<Empty>
 				<EmptyHeader>
 					<EmptyTitle>找不到此页面</EmptyTitle>
 					<EmptyDescription>该链接无效或页面已被移动。</EmptyDescription>
 				</EmptyHeader>
 			</Empty>
-		) : (
-			<Profile user={user} />
 		),
 	};
 }

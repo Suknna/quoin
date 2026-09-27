@@ -11,7 +11,7 @@ import {
 import { TableCell, TableRow } from "@/components/ui/table";
 import { DataTable } from "@/components/workbench/DataTable";
 import { ErrorRetry } from "@/components/workbench/ErrorRetry";
-import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { CursorPagination } from "@/components/workbench/CursorPagination";
 import {
 	api,
 	type CandidateSourceType,
@@ -110,7 +110,7 @@ export function CandidatesPage({
 				onRetry={
 					suspended || !list.error || list.items.length > 0
 						? undefined
-						: () => void list.load()
+						: () => list.refresh()
 				}
 				emptyTitle={
 					state === "AwaitingConfirmation"
@@ -160,13 +160,16 @@ export function CandidatesPage({
 				) : (
 					<ErrorRetry
 						message={list.error}
-						onRetry={() => void list.load(list.nextCursor)}
+						onRetry={list.retry}
 					/>
 				))}
-			<LoadMoreButton
-				loading={list.loadingMore}
-				hasMore={!suspended && Boolean(list.nextCursor)}
-				onLoadMore={() => void list.load(list.nextCursor)}
+			<CursorPagination
+				page={list.page}
+				hasPrev={list.hasPrev}
+				hasNext={!suspended && list.hasNext}
+				loading={list.navigating}
+				onPrev={list.goPrev}
+				onNext={list.goNext}
 			/>
 		</section>
 	);

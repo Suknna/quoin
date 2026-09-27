@@ -1,8 +1,6 @@
-/* eslint-disable react-hooks/exhaustive-deps -- 分页/检索读取刻意只跟随挂载与显式条件;fetch 经 ref 或闭包取最新。 */
-
+import { useCursorPages } from '@/hooks/use-cursor-pages';
 import { Search, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { messageOf } from "@/app/shared";
+import { useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { TableCell, TableRow } from "@/components/ui/table";
 import { DataTable } from "@/components/workbench/DataTable";
 import { ErrorRetry } from "@/components/workbench/ErrorRetry";
-import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { CursorPagination } from "@/components/workbench/CursorPagination";
 import { api, indexStateLabels, type KnowledgeSearchHit } from "../api";
 import { usePagedList } from "./shared";
 
@@ -118,7 +116,7 @@ function BrowseTable({
 				onRetry={
 					suspended || !list.error || list.items.length > 0
 						? undefined
-						: () => void list.load()
+						: () => list.refresh()
 				}
 				emptyTitle="知识库还是空的"
 				emptyDescription="在告警分析、调查对话或巡检报告中使用“整理为知识”,经确认后就会出现在这里。"
@@ -150,13 +148,16 @@ function BrowseTable({
 				) : (
 					<ErrorRetry
 						message={list.error}
-						onRetry={() => void list.load(list.nextCursor)}
+						onRetry={list.retry}
 					/>
 				))}
-			<LoadMoreButton
-				loading={list.loadingMore}
-				hasMore={!suspended && Boolean(list.nextCursor)}
-				onLoadMore={() => void list.load(list.nextCursor)}
+			<CursorPagination
+				page={list.page}
+				hasPrev={list.hasPrev}
+				hasNext={!suspended && list.hasNext}
+				loading={list.navigating}
+				onPrev={list.goPrev}
+				onNext={list.goNext}
 			/>
 		</div>
 	);
@@ -172,52 +173,28 @@ function SearchResults({
 	suspended: boolean;
 	onOpen: (knowledgeId: string) => void;
 }) {
-	const [exact, setExact] = useState<KnowledgeSearchHit[]>([]);
-	const [semantic, setSemantic] = useState<KnowledgeSearchHit[]>([]);
-	const [nextCursor, setNextCursor] = useState<string>();
-	const [loading, setLoading] = useState(true);
-	const [loadingMore, setLoadingMore] = useState(false);
-	const [error, setError] = useState("");
-	const generationRef = useRef(0);
-
-	async function load(cursor?: string) {
-		const generation = generationRef.current + 1;
-		generationRef.current = generation;
-		setError("");
-		if (cursor) setLoadingMore(true);
-		else setLoading(true);
-		try {
-			const result = await api.search(query, cursor);
-			if (generation !== generationRef.current) return;
-			setExact((current) =>
-				cursor
-					? [...current, ...result.exactTextMatches]
-					: result.exactTextMatches,
-			);
-			setSemantic((current) =>
-				cursor
-					? [...current, ...result.semanticMatches]
-					: result.semanticMatches,
-			);
-			setNextCursor(result.nextCursor);
-		} catch (reason) {
-			if (generation !== generationRef.current) return;
-			setError(messageOf(reason, "搜索暂时不可用,请重试。"));
-		} finally {
-			if (generation === generationRef.current) {
-				setLoading(false);
-				setLoadingMore(false);
-			}
-		}
-	}
-	// 仅挂载时读取一次;换查询词通过 key 重挂组件。
-	useEffect(() => {
-		void load();
-		// 卸载后迟到响应不落地。
-		return () => {
-			generationRef.current += 1;
-		};
-	}, []);
+	// 一次查询的两通道结果装进一个页面包；翻页替换而非追加。
+	const list = useCursorPages<{
+		exact: KnowledgeSearchHit[];
+		semantic: KnowledgeSearchHit[];
+	}>(
+		(cursor) =>
+			api.search(query, cursor).then((result) => ({
+				items: [
+					{
+						exact: result.exactTextMatches ?? [],
+						semantic: result.semanticMatches ?? [],
+					},
+				],
+				nextCursor: result.nextCursor,
+			})),
+		{ suspended, fallbackError: "搜索暂时不可用,请重试。" },
+	);
+	const exact = list.items[0]?.exact ?? [];
+	const semantic = list.items[0]?.semantic ?? [];
+	const loading = list.loading;
+	const error = list.error;
+	const retryPage = list.retry;
 
 	const exactIds = new Set(exact.map((hit) => hit.knowledge.id));
 	const semanticOnly = semantic.filter(
@@ -235,7 +212,7 @@ function SearchResults({
 						<AlertDescription>{error}</AlertDescription>
 					</Alert>
 				) : (
-					<ErrorRetry message={error} onRetry={() => void load()} />
+					<ErrorRetry message={error} onRetry={retryPage} />
 				)
 			) : (
 				<>
@@ -269,15 +246,16 @@ function SearchResults({
 						<AlertDescription>{error}</AlertDescription>
 					</Alert>
 				) : (
-					<ErrorRetry message={error} onRetry={() => void load(nextCursor)} />
+					<ErrorRetry message={error} onRetry={retryPage} />
 				))}
-			<LoadMoreButton
-				loading={loadingMore}
-				hasMore={!suspended && Boolean(nextCursor)}
-				onLoadMore={() => void load(nextCursor)}
-			>
-				加载更多结果
-			</LoadMoreButton>
+			<CursorPagination
+				page={list.page}
+				hasPrev={list.hasPrev}
+				hasNext={!suspended && list.hasNext}
+				loading={list.navigating}
+				onPrev={list.goPrev}
+				onNext={list.goNext}
+			/>
 		</div>
 	);
 }

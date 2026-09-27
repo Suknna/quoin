@@ -639,7 +639,7 @@ describe("integration workbench", () => {
 		);
 		await waitFor(() =>
 			expect(props.navigate).toHaveBeenCalledWith(
-				"/settings/platform/integrations/instances?platform=prometheus&instance=mall-prometheus",
+				"/settings/platform/integrations?platform=prometheus&instance=mall-prometheus",
 			),
 		);
 		expect(props.navigate).not.toHaveBeenCalledWith(
@@ -729,11 +729,10 @@ describe("integration workbench", () => {
 		fetchMock.mockRestore();
 	});
 
-	// 回归：抽屉内的启用/停用/轮换只刷新抽屉自身，背后的实例列表行徽标
-	// 停留在旧状态，且关抽屉不会重挂载列表（同 query 页内路由）。
-	it("refreshes the instances list behind the drawer after enabling a connection", async () => {
+	// 回归：详情视图的启用/停用/轮换只刷新详情自身；列表与详情是同一抽屉的
+	// 两个互斥视图，返回列表时重挂载并重新拉取，徽标不会停留在旧状态。
+	it("refreshes the connection status in the drawer detail after enabling", async () => {
 		let enabled = false;
-		let listLoads = 0;
 		const projection = () => ({
 			id: "1",
 			name: "mall-prometheus",
@@ -748,10 +747,8 @@ describe("integration workbench", () => {
 				const url = String(input);
 				if (url.startsWith("/api/v1/alert-sources"))
 					return Response.json({ items: [] });
-				if (url === "/api/v1/connections?limit=100") {
-					listLoads += 1;
+				if (url === "/api/v1/connections?limit=100")
 					return Response.json({ items: [projection()] });
-				}
 				if (url === "/api/v1/connections/mall-prometheus")
 					return Response.json(projection());
 				if (
@@ -783,15 +780,15 @@ describe("integration workbench", () => {
 				);
 			});
 		render(
-			<IntegrationView route="/settings/platform/integrations/instances?platform=prometheus&instance=mall-prometheus" />,
+			<IntegrationView route="/settings/platform/integrations?platform=prometheus&instance=mall-prometheus" />,
 		);
-		// 列表行徽标与抽屉徽标初始一致为“已停用”。
-		expect(await screen.findAllByText("已停用")).toHaveLength(2);
+		// 详情视图初始为“已停用”，启用成功后抽屉内翻转为“已启用”。
+		expect(await screen.findByText("已停用")).toBeInTheDocument();
 		fireEvent.click(screen.getByRole("button", { name: "验证并启用" }));
-		// 启用成功后两处都必须翻转为“已启用”：抽屉自刷新，列表经失效重拉。
-		await waitFor(() => expect(screen.getAllByText("已启用")).toHaveLength(2));
+		await waitFor(() =>
+			expect(screen.getByText("已启用")).toBeInTheDocument(),
+		);
 		expect(screen.queryByText("已停用")).not.toBeInTheDocument();
-		expect(listLoads).toBeGreaterThanOrEqual(2);
 		fetchMock.mockRestore();
 	});
 });

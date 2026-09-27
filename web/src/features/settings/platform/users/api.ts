@@ -41,11 +41,16 @@ export interface SessionInfo {
 
 export interface AuditEventInfo {
   id: string
+  correlationId?: string
   actorType: 'user' | 'service' | 'system'
   actorId: string
   action: string
   outcome: 'success' | 'failure' | 'rejected' | 'unknown'
+  phase?: string
   clientCommandId?: string
+  requestId?: string
+  taskId?: string
+  attemptId?: string
   domainRefType?: string
   domainRefId?: string
   createdAt: string
@@ -78,6 +83,22 @@ async function problem(response: Response): Promise<AdminApiError> {
 export function newClientCommandId(): string {
   const raw = crypto.getRandomValues(new Uint8Array(18))
   return Array.from(raw, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+export interface AdminContact {
+  id: string
+  channel: 'email' | 'sms'
+  maskedTarget: string
+  verified: boolean
+}
+
+/** Admin read of a user's display contacts; the server returns the same
+ * masked projection users see — plaintext targets never leave the server. */
+export async function listUserContacts(id: string): Promise<AdminContact[]> {
+  const response = await fetch(`/api/v1/admin/users/${id}/contacts`, { credentials: 'include' })
+  if (!response.ok) throw await problem(response)
+  const page = (await response.json()) as { items: AdminContact[] }
+  return page.items ?? []
 }
 
 export async function listUsers(): Promise<AdminUser[]> {

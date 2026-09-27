@@ -21,10 +21,7 @@ export type SettingsNavGroup = {
 
 export const personalGroup: SettingsNavGroup = {
 	label: "个人",
-	entries: [
-		{ key: "profile", label: "个人资料", route: profileRoute },
-		{ key: "security", label: "安全", route: "/settings/security" },
-	],
+	entries: [{ key: "profile", label: "账户与安全", route: profileRoute }],
 };
 
 export const platformGroup: SettingsNavGroup = {
@@ -50,7 +47,7 @@ export const platformGroup: SettingsNavGroup = {
 		},
 		{
 			key: "users",
-			label: "用户",
+			label: "用户管理",
 			route: "/settings/platform/users",
 			adminOnly: true,
 		},
@@ -110,7 +107,10 @@ export function SettingsNavigation({
 			{visible.map((entry) => {
 				const active =
 					pathname === entry.route ||
-					(entry.route === profileRoute && pathname === "/settings") ||
+					// /settings 根路径与合并前的 /settings/security 都落在账户与安全。
+					(entry.route === profileRoute &&
+						(pathname === "/settings" ||
+							pathname.startsWith("/settings/security"))) ||
 					(entry.route !== "/settings" &&
 						pathname.startsWith(`${entry.route}/`));
 				return (

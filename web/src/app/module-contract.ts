@@ -8,6 +8,8 @@ export interface WorkspaceModuleProps {
 	/** True while platform maintenance blocks mutations; session expiry unmounts the workspace instead. */
 	suspended: boolean;
 	maintenanceActive?: boolean;
+	/** 外壳的退出登录路径（与右上角菜单同一条）；账户与安全页的当前设备行复用它。 */
+	logout?: () => Promise<void> | void;
 	openEvidence: (id: string) => void;
 }
 

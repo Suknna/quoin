@@ -1,6 +1,7 @@
-import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
 /* eslint-disable react-refresh/only-export-components -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
 
+import { CursorPagination } from '@/components/workbench/CursorPagination';
+import { useCursorPages } from '@/hooks/use-cursor-pages';
 import {
 	BellPlus,
 	Bot,
@@ -106,32 +107,27 @@ export function useInvestigationsModule(
 ): WorkspaceModuleView {
 	const route = parseRoute(props.route);
 	const id = route.pathname.match(/^\/investigations\/([^/]+)$/)?.[1];
-	const [items, setItems] = useState<InvestigationSummary[]>([]);
- const [nextCursor,setNextCursor]=useState<string>();
- const [loadingMore,setLoadingMore]=useState(false);
-	const [error, setError] = useState("");
-	const load = useCallback(async () => {
-		if (props.suspended) return;
-		try {
-			const page = await api.list();
- setItems(page.items); setNextCursor(page.nextCursor);
-			setError("");
-		} catch (reason) {
-			setError(messageOf(reason, "无法加载调查。"));
-		}
-	}, [props.suspended]);
+	const pages = useCursorPages<InvestigationSummary>(
+		(cursor) =>
+			api.list(cursor).then((page) => ({
+				items: page.items ?? [],
+				nextCursor: page.nextCursor,
+			})),
+		{ suspended: props.suspended, fallbackError: "无法加载调查。" },
+	);
+	const items = pages.items;
+	const error = pages.error;
+	const { refresh } = pages;
+	// 焦点回归与新对话创建时回第一页重读。
 	useEffect(() => {
-		const refresh = () => void load();
-		window.addEventListener("focus", refresh);
-		window.addEventListener("investigation-created", refresh);
+		const onRefresh = () => void refresh();
+		window.addEventListener("focus", onRefresh);
+		window.addEventListener("investigation-created", onRefresh);
 		return () => {
-			window.removeEventListener("focus", refresh);
-			window.removeEventListener("investigation-created", refresh);
+			window.removeEventListener("focus", onRefresh);
+			window.removeEventListener("investigation-created", onRefresh);
 		};
-	}, [load]);
-	useEffect(() => {
-		void Promise.resolve().then(load);
-	}, [load]);
+	}, [refresh]);
 	const list = (
 		<aside className="space-y-3 p-3">
 			<Button
@@ -159,9 +155,14 @@ export function useInvestigationsModule(
 				}
 				emptyTitle="尚无对话。"
 			/>
- <LoadMoreButton hasMore={!!nextCursor} loading={loadingMore} onLoadMore={() => {
- setLoadingMore(true); void api.list(nextCursor).then(page => {setItems(current => [...current,...page.items]);setNextCursor(page.nextCursor);}).catch(reason => setError(messageOf(reason,"无法加载调查。"))).finally(() => setLoadingMore(false));
- }} />
+			<CursorPagination
+				page={pages.page}
+				hasPrev={pages.hasPrev}
+				hasNext={pages.hasNext}
+				loading={pages.navigating}
+				onPrev={pages.goPrev}
+				onNext={pages.goNext}
+			/>
 		</aside>
 	);
 	// The AI SRE landing route is a draft-only conversation workspace: it must not

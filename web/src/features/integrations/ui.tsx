@@ -1,9 +1,11 @@
 import { ConfirmAction } from "@/features/settings/platform/controls";
+import { useCursorPages } from '@/hooks/use-cursor-pages';
 import { formatDateTime } from "@/lib/format";
 import { parseRoute } from "@/lib/parse-route";
 /* eslint-disable react-refresh/only-export-components -- This route module intentionally colocates its view factory with route components. */
 
 import {
+	ChevronLeft,
 	ChevronRight,
 	Copy,
 	LoaderCircle,
@@ -73,7 +75,7 @@ import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { DetailSheet } from "@/components/workbench/DetailSheet";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
-import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { CursorPagination } from "@/components/workbench/CursorPagination";
 import { PropertyList } from "@/components/workbench/PropertyList";
 import {
 	acknowledgeIntakeIssue,
@@ -127,9 +129,10 @@ function integrationRoute(
 ) {
 	return [INTEGRATIONS_BASE, platform, instanceId].filter(Boolean).join("/");
 }
-/** Instance details are a right-hand drawer over the instances list, not routes. */
+/** 已接入实例列表与实例详情都是接入管理页上的右侧抽屉（与告警一致），
+ * 由 URL query 标志驱动、可深链，不再是独立页面路由。 */
 function instanceSheetRoute(platform: IntegrationPlatform, name: string) {
-	return `${INTEGRATIONS_BASE}/instances?platform=${encodeURIComponent(platform)}&instance=${encodeURIComponent(name)}`;
+	return `${INTEGRATIONS_BASE}?platform=${encodeURIComponent(platform)}&instance=${encodeURIComponent(name)}`;
 }
 
 function CatalogCard({
@@ -200,12 +203,12 @@ function IntegrationCatalog({ navigate }: { navigate: (to: string) => void }) {
 				<div>
 					<h1 className="text-2xl font-semibold tracking-tight">接入管理</h1>
 					<p className="mt-1 text-sm text-muted-foreground">
-						配置已启用的平台能力。验证启用后自动观测，无需先定义业务系统。
+						配置已启用的平台能力。
 					</p>
 				</div>
 				<Button
 					variant="outline"
-					onClick={() => navigate(`${INTEGRATIONS_BASE}/instances`)}
+					onClick={() => navigate(`${INTEGRATIONS_BASE}?instances`)}
 				>
 					查看已接入实例
 					<ChevronRight data-icon="inline-end" />
@@ -264,53 +267,25 @@ function IntegrationCatalog({ navigate }: { navigate: (to: string) => void }) {
 function Instances({
 	navigate,
 	suspended,
-	revision,
-}: Pick<WorkspaceModuleProps, "navigate" | "suspended"> & {
-		/** 抽屉内启用/停用/轮换成功后递增，让背后的列表行重新拉取，避免徽标停留在旧状态。 */
-		revision: number;
-	}) {
-	const [items, setItems] = useState<
-		(AlertmanagerInstance | MetricsInstance)[]
-	>([]);
-	const [cursor, setCursor] = useState<string>();
+}: Pick<WorkspaceModuleProps, "navigate" | "suspended">) {
 	const [query, setQuery] = useState("");
-	const [loading, setLoading] = useState(true);
-	const [loadingMore, setLoadingMore] = useState(false);
-	const [error, setError] = useState("");
-	const loadFirstPage = useCallback(async () => {
-		if (suspended) return;
-		setLoading(true);
-		setError("");
-		try {
+	// 指标连接不分页、告警源分页：第一页 = 全部指标连接 + 告警源第一页，
+	// 后续页只有告警源（指标连接已在第一页完整展示）。
+	const list = useCursorPages<AlertmanagerInstance | MetricsInstance>(
+		async (cursor) => {
+			if (cursor) return listAlertmanagerInstances(cursor);
 			const [alerts, metrics] = await Promise.all([
 				listAlertmanagerInstances(),
 				listMetricsInstances(),
 			]);
-			setItems([...alerts.items, ...metrics]);
-			setCursor(alerts.nextCursor);
-		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
-		} finally {
-			setLoading(false);
-		}
-	}, [suspended]);
-	const loadMore = async () => {
-		if (!cursor || suspended) return;
-		setLoadingMore(true);
-		setError("");
-		try {
-			const page = await listAlertmanagerInstances(cursor);
-			setItems((current) => [...current, ...page.items]);
-			setCursor(page.nextCursor);
-		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
-		} finally {
-			setLoadingMore(false);
-		}
-	};
-	useEffect(() => {
-		void loadFirstPage();
-	}, [loadFirstPage, revision]);
+			return {
+				items: [...(alerts.items ?? []), ...metrics],
+				nextCursor: alerts.nextCursor,
+			};
+		},
+		{ suspended, fallbackError: "暂时无法完成操作，请重试。" },
+	);
+	const { items, loading } = list;
 	const filtered = items.filter((item) =>
 		item.displayName
 			.toLocaleLowerCase()
@@ -329,15 +304,23 @@ function Instances({
 				? "需要重新验证"
 				: "已停用";
 	return (
-		<section className="flex flex-col gap-5">
-			<div className="flex flex-wrap items-end justify-between gap-3">
-				<div>
-					<h1 className="text-2xl font-semibold tracking-tight">已接入实例</h1>
-					<p className="mt-1 text-sm text-muted-foreground">
-						Alertmanager、Prometheus 与 Thanos 接入实例。
-					</p>
+		<section className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+			<div className="flex items-center gap-2">
+				<div className="relative flex-1">
+					<Search
+						className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted-foreground"
+						aria-hidden="true"
+					/>
+					<Input
+						className="pl-9"
+						value={query}
+						onChange={(event) => setQuery(event.target.value)}
+						placeholder="搜索已加载实例"
+						aria-label="搜索已加载实例"
+					/>
 				</div>
 				<Button
+					size="sm"
 					onClick={() => navigate(integrationRoute("prometheus"))}
 					disabled={suspended}
 				>
@@ -365,43 +348,28 @@ function Instances({
 				}))}
 				columns={["title", "subtitle", "status"]}
 				onSelect={(row) =>
-					// 详情抽屉按稳定连接名寻址，与服务端 name-keyed 读取契约一致。
+					// 详情是同一抽屉内的视图，按稳定连接名寻址，与服务端 name-keyed 读取契约一致。
 					navigate(instanceSheetRoute(row.item.platform, row.item.displayName))
 				}
 				loading={loading}
 				loadingLabel="正在加载实例"
-				error={error}
-				onRetry={() => void loadFirstPage()}
+				error={list.error}
+				onRetry={list.retry}
 				emptyTitle={query ? "没有匹配的已加载实例" : "尚未接入实例"}
 				emptyDescription={
 					query
 						? "请使用其他名称搜索。"
 						: "创建接入后，在此管理探测、启用、停用与轮换。"
 				}
-				controls={
-					<div className="relative max-w-md">
-						<Search
-							className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted-foreground"
-							aria-hidden="true"
-						/>
-						<Input
-							className="pl-9"
-							value={query}
-							onChange={(event) => setQuery(event.target.value)}
-							placeholder="搜索已加载实例"
-							aria-label="搜索已加载实例"
-						/>
-					</div>
-				}
 			/>
-			<LoadMoreButton
-				loading={loadingMore}
-				hasMore={Boolean(cursor)}
-				onLoadMore={() => void loadMore()}
-				className="self-start"
-			>
-				加载更多 Alertmanager 实例
-			</LoadMoreButton>
+			<CursorPagination
+				page={list.page}
+				hasPrev={list.hasPrev}
+				hasNext={list.hasNext}
+				loading={list.navigating}
+				onPrev={list.goPrev}
+				onNext={list.goNext}
+			/>
 		</section>
 	);
 }
@@ -818,13 +786,10 @@ function MetricsDetail({
 	id,
 	navigate,
 	suspended,
-	onMutated,
 }: {
 	id: string;
 	navigate: (to: string) => void;
 	suspended: boolean;
-	/** 状态变更（启用/停用）成功后通知宿主失效实例列表。 */
-	onMutated?: () => void;
 }) {
 	const [item, setItem] = useState<MetricsInstance>();
 	const [loading, setLoading] = useState(true);
@@ -864,8 +829,6 @@ function MetricsDetail({
 			else if (kind === "disable") notify.success("接入已停用");
 			else notify.success("验证通过");
 			await load();
-			// 抽屉背后的列表行还带着旧徽标；探测不改变状态，无需失效。
-			if (kind === "enable" || kind === "disable") onMutated?.();
 		} catch (reason) {
 			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
@@ -1345,11 +1308,11 @@ function AlertmanagerForm({
 				open={!suspended && Boolean(secret)}
 				secret={secret}
 				receiverUrl={receiverUrl}
-				onClose={() => {
-					setSecret("");
-					setReceiverUrl("");
-					navigate(`${INTEGRATIONS_BASE}/instances`);
-				}}
+					onClose={() => {
+						setSecret("");
+						setReceiverUrl("");
+						navigate(`${INTEGRATIONS_BASE}?instances`);
+					}}
 			/>
 		</section>
 	);
@@ -1472,12 +1435,9 @@ const credentialStateLabels: Record<string, string> = {
 function AlertmanagerDetail({
 	id,
 	suspended,
-	onMutated,
 }: {
 	id: string;
 	suspended: boolean;
-	/** 状态变更（停用/轮换）成功后通知宿主失效实例列表。 */
-	onMutated?: () => void;
 }) {
 	const [source, setSource] = useState<AlertmanagerInstance>();
 	const [credentials, setCredentials] = useState<AlertmanagerCredential[]>([]);
@@ -1528,7 +1488,6 @@ function AlertmanagerDetail({
 				setReceiverUrl(endpoint.publicReceiverUrl);
 			}
 			await load();
-			onMutated?.();
 		} catch (reason) {
 			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
@@ -1542,7 +1501,6 @@ function AlertmanagerDetail({
 			await disableAlertmanagerInstance(source);
 			notify.success("已停用");
 			await load();
-			onMutated?.();
 		} catch (reason) {
 			notify.error(reason, "暂时无法完成操作，请重试。");
 		} finally {
@@ -1737,11 +1695,8 @@ function AlertmanagerDetail({
 export function useIntegrationsModule(
 	props: WorkspaceModuleProps,
 ): WorkspaceModuleView {
-	// 实例列表与右侧详情抽屉是两棵独立数据流：抽屉里的启用/停用/轮换只刷新
-	// 抽屉自身，列表行徽标会停留在旧状态（关抽屉也不重挂载）。用递增的
-	// revision 让详情在变更成功后主动失效父列表。
-	const [instancesRevision, setInstancesRevision] = useState(0);
-	const bumpInstances = () => setInstancesRevision((value) => value + 1);
+	// 实例列表与详情在同一抽屉内切换：详情视图卸载列表，返回时列表重挂载并
+	// 重新拉取，徽标自然不会停留在旧状态。
 	if (props.user.role !== "admin")
 		return {
 			title: "接入管理",
@@ -1755,41 +1710,66 @@ export function useIntegrationsModule(
 		};
 	const [platform, id] = routeParts(props.route);
 	const routeQuery = parseRoute(props.route).searchParams;
-	// 实例详情是实例列表页上的右侧抽屉（与告警一致），由 query 标志驱动。
+	// 实例列表与实例详情是接入管理页上同一个右侧抽屉内的两个视图（与告警一致），
+	// 由 query 标志驱动、可深链；旧 /instances 路径照常渲染目录页并打开抽屉。
 	const sheetPlatform = routeQuery.get(
 		"platform",
 	) as IntegrationPlatform | null;
 	const sheetInstance = routeQuery.get("instance");
-	const instanceSheet =
-		platform === "instances" && sheetPlatform && sheetInstance ? (
+	const detailRef =
+		sheetPlatform && sheetInstance
+			? { platform: sheetPlatform, name: sheetInstance }
+			: null;
+	const isCatalogRoute = !platform || platform === "instances";
+	const instancesDrawer =
+		isCatalogRoute &&
+		(detailRef || platform === "instances" || routeQuery.has("instances")) ? (
 			<DetailSheet
 				open
-				onClose={() => props.navigate(`${INTEGRATIONS_BASE}/instances`)}
-				title={sheetInstance}
+				onClose={() => props.navigate(INTEGRATIONS_BASE)}
+				title={detailRef ? decodeURIComponent(detailRef.name) : "已接入实例"}
 				description={
-					sheetPlatform === "alertmanager"
-						? "Alertmanager 告警来源。"
-						: `${sheetPlatform === "prometheus" ? "Prometheus" : "Thanos"} 指标接入。`
+					detailRef
+						? detailRef.platform === "alertmanager"
+							? "Alertmanager 告警来源。"
+							: `${detailRef.platform === "prometheus" ? "Prometheus" : "Thanos"} 指标接入。`
+						: "Alertmanager、Prometheus 与 Thanos 接入实例。"
 				}
 			>
-				<div className="min-h-0 flex-1 overflow-y-auto">
-					<div className="p-4 sm:p-6">
-						{sheetPlatform === "alertmanager" ? (
-							<AlertmanagerDetail
-								id={decodeURIComponent(sheetInstance)}
-								suspended={props.suspended}
-								onMutated={bumpInstances}
-							/>
-						) : (
-							<MetricsDetail
-								id={decodeURIComponent(sheetInstance)}
-								navigate={props.navigate}
-								suspended={props.suspended}
-								onMutated={bumpInstances}
-							/>
-						)}
+				{detailRef ? (
+					<div className="min-h-0 flex-1 overflow-y-auto">
+						<div className="flex flex-col gap-4 p-4 sm:p-6">
+							<Button
+								variant="ghost"
+								size="sm"
+								className="self-start"
+								onClick={() =>
+									props.navigate(`${INTEGRATIONS_BASE}?instances`)
+								}
+							>
+								<ChevronLeft data-icon="inline-start" aria-hidden="true" />
+								返回实例列表
+							</Button>
+							{detailRef.platform === "alertmanager" ? (
+								<AlertmanagerDetail
+									id={decodeURIComponent(detailRef.name)}
+									suspended={props.suspended}
+								/>
+							) : (
+								<MetricsDetail
+									id={decodeURIComponent(detailRef.name)}
+									navigate={props.navigate}
+									suspended={props.suspended}
+								/>
+							)}
+						</div>
 					</div>
-				</div>
+				) : (
+					<Instances
+						navigate={props.navigate}
+						suspended={props.suspended}
+					/>
+				)}
 			</DetailSheet>
 		) : null;
 	const content =
@@ -1812,16 +1792,7 @@ export function useIntegrationsModule(
 					suspended={props.suspended}
 				/>
 			)
-		) : platform === "instances" ? (
-			<>
-				<Instances
-					navigate={props.navigate}
-					suspended={props.suspended}
-					revision={instancesRevision}
-				/>
-				{instanceSheet}
-			</>
-		) : platform ? (
+		) : platform && platform !== "instances" ? (
 			// Unknown platform segments are ordinary unknown routes and render the
 			// shared not-found view; only the bare /integrations
 			// root shows the catalog.
@@ -1832,7 +1803,10 @@ export function useIntegrationsModule(
 				</EmptyHeader>
 			</Empty>
 		) : (
-			<IntegrationCatalog navigate={props.navigate} />
+			<>
+				<IntegrationCatalog navigate={props.navigate} />
+				{instancesDrawer}
+			</>
 		);
 	return {
 		title: "接入管理",
@@ -1856,10 +1830,9 @@ function integrationCrumbs(route: string) {
 	const catalog = { label: "接入管理", to: INTEGRATIONS_BASE };
 	const instances = {
 		label: "已接入实例",
-		to: `${INTEGRATIONS_BASE}/instances`,
+		to: `${INTEGRATIONS_BASE}?instances`,
 	};
-	if (!platform) return undefined;
-	if (platform === "instances") return [catalog, { label: "已接入实例" }];
+	if (!platform || platform === "instances") return undefined;
 	if (platform === "alertmanager" && id === "issues")
 		return [
 			catalog,

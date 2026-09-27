@@ -8,7 +8,18 @@ import {
 	within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Security } from "./Security";
+import { Sessions } from "./Security";
+
+/** 会话分节（原 Security 页面已并入账户与安全；改密走设置模块测试）。 */
+function Security({
+	suspended,
+	onLogout,
+}: {
+	suspended: boolean;
+	onLogout?: () => void;
+}) {
+	return <Sessions suspended={suspended} onLogout={onLogout} />;
+}
 
 afterEach(() => {
 	cleanup();
@@ -66,15 +77,16 @@ function stubSecurityFetch(revokeResponse?: unknown) {
 }
 
 const rowOf = (label: string) =>
-	screen.getByText(label).closest("tr") as HTMLTableRowElement;
+	screen.getByText(label).closest('[data-slot="item"]') as HTMLElement;
 
 describe("Security sessions", () => {
-	it("never offers revoking the current session; logout is the only path", async () => {
+	it("offers logout on the current session and revoke only on others", async () => {
 		stubSecurityFetch();
-		render(<Security suspended={false} onUserChanged={vi.fn()} />);
+		const onLogout = vi.fn();
+		render(<Security suspended={false} onLogout={onLogout} />);
 
 		// HTTP-AUTH-004：revokeOwnSession MUST NOT 撤销当前请求所用会话，
-		// 后端确定性拒绝（active_conflict）。界面不得提供必然失败的按钮。
+		// 后端确定性拒绝（active_conflict）；结束当前会话走外壳同一条 logout 路径。
 		const currentRow = await waitFor(() => {
 			const row = rowOf("Chrome on Linux");
 			expect(within(row).getByText("当前")).toBeInTheDocument();
@@ -83,9 +95,10 @@ describe("Security sessions", () => {
 		expect(
 			within(currentRow).queryByRole("button", { name: "撤销" }),
 		).not.toBeInTheDocument();
-		expect(
-			within(currentRow).getByText(/退出登录/),
-		).toBeInTheDocument();
+		fireEvent.click(
+			within(currentRow).getByRole("button", { name: "退出登录" }),
+		);
+		expect(onLogout).toHaveBeenCalledTimes(1);
 
 		const otherRow = rowOf("Firefox on macOS");
 		expect(
@@ -95,7 +108,7 @@ describe("Security sessions", () => {
 
 	it("revokes another session after confirmation and closes the dialog", async () => {
 		const fetchMock = stubSecurityFetch();
-		render(<Security suspended={false} onUserChanged={vi.fn()} />);
+		render(<Security suspended={false} />);
 
 		await screen.findByText("Firefox on macOS");
 		fireEvent.click(
@@ -129,7 +142,7 @@ describe("Security sessions", () => {
 				message: "请求字段不满足要求，请检查后重试。",
 			}),
 		});
-		render(<Security suspended={false} onUserChanged={vi.fn()} />);
+		render(<Security suspended={false} />);
 
 		await screen.findByText("Firefox on macOS");
 		fireEvent.click(

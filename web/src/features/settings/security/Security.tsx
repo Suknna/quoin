@@ -1,5 +1,6 @@
-import { LoaderCircle } from "lucide-react";
-import { type FormEvent, useEffect, useState } from "react";
+import { useCursorPages } from '@/hooks/use-cursor-pages';
+import { LoaderCircle, Monitor } from "lucide-react";
+import { type FormEvent, useState } from "react";
 import type { UserSummary } from "@/api/generated/types";
 import {
 	newClientCommandId,
@@ -20,11 +21,27 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
+import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { TableCell, TableRow } from "@/components/ui/table";
-import { DataTable } from "@/components/workbench/DataTable";
-import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import {
+	Item,
+	ItemActions,
+	ItemContent,
+	ItemDescription,
+	ItemGroup,
+	ItemMedia,
+	ItemTitle,
+} from "@/components/ui/item";
+import { Skeleton } from "@/components/ui/skeleton";
+import { CursorPagination } from "@/components/workbench/CursorPagination";
 import { formatDateTime } from "@/lib/format";
 
 type Session = {
@@ -70,21 +87,60 @@ async function securityRequest<T>(
 	return (await response.json()) as T;
 }
 
-function PasswordForm({
+export function PasswordSection({
 	onChanged,
 }: {
 	onChanged: (user: UserSummary) => void;
+}) {
+	const [changing, setChanging] = useState(false);
+	return (
+		<section className="space-y-3">
+			<h3 className="text-sm font-medium">密码</h3>
+			<ItemGroup>
+				<Item size="sm" className="px-0">
+					<ItemContent>
+						<ItemTitle>登录密码</ItemTitle>
+					</ItemContent>
+					<ItemActions>
+						<Button
+							variant="outline"
+							size="sm"
+							onClick={() => setChanging(true)}
+						>
+							修改密码
+						</Button>
+					</ItemActions>
+				</Item>
+			</ItemGroup>
+			{changing && (
+				<PasswordDialog
+					onChanged={onChanged}
+					onClose={() => setChanging(false)}
+				/>
+			)}
+		</section>
+	);
+}
+
+/**
+ * 修改密码是对话框内的低频操作：不再在页面上常驻三个等待输入的密码框。
+ * 成功后关闭对话框并 toast 确认；失败只 toast，输入立即清除。
+ */
+function PasswordDialog({
+	onChanged,
+	onClose,
+}: {
+	onChanged: (user: UserSummary) => void;
+	onClose: () => void;
 }) {
 	const [currentPassword, setCurrentPassword] = useState("");
 	const [newPassword, setNewPassword] = useState("");
 	const [confirmation, setConfirmation] = useState("");
 	const [error, setError] = useState("");
-	const [success, setSuccess] = useState("");
 	const [saving, setSaving] = useState(false);
 	async function submit(event: FormEvent) {
 		event.preventDefault();
 		setError("");
-		setSuccess("");
 		if (newPassword !== confirmation) {
 			setError("两次输入的新密码不一致。");
 			return;
@@ -94,10 +150,10 @@ function PasswordForm({
 			await workbenchApi.changePassword({ currentPassword, newPassword });
 			// The server is authoritative for the cleared password-change requirement and auth revision.
 			onChanged(await workbenchApi.currentUser());
-			setSuccess("密码已更新。其他已登录设备不会自动退出。");
+			notify.success("密码已更新。其他已登录设备不会自动退出。");
+			onClose();
 		} catch (reason) {
 			notify.error(reason, "暂时无法完成操作，请重试。");
-		} finally {
 			setSaving(false);
 			setCurrentPassword("");
 			setNewPassword("");
@@ -105,114 +161,113 @@ function PasswordForm({
 		}
 	}
 	return (
-		<form className="space-y-4" onSubmit={submit}>
-			<div>
-				<h2 className="text-xl font-semibold">修改密码</h2>
-				<p className="text-sm text-muted-foreground">
-					修改密码不会撤销其他登录设备。
-				</p>
-			</div>
-			{error && (
-				<Alert variant="destructive">
-					<AlertDescription>{error}</AlertDescription>
-				</Alert>
-			)}
-			{success && (
-				<Alert>
-					<AlertDescription>{success}</AlertDescription>
-				</Alert>
-			)}
-			<Field>
-				<FieldLabel htmlFor="settings-current-password">当前密码</FieldLabel>
-				<Input
-					id="settings-current-password"
-					type="password"
-					autoComplete="current-password"
-					value={currentPassword}
-					onChange={(event) => setCurrentPassword(event.target.value)}
-					minLength={15}
-					maxLength={128}
-					required
-				/>
-			</Field>
-			<Field>
-				<FieldLabel htmlFor="settings-new-password">新密码</FieldLabel>
-				<Input
-					id="settings-new-password"
-					type="password"
-					autoComplete="new-password"
-					value={newPassword}
-					onChange={(event) => setNewPassword(event.target.value)}
-					minLength={15}
-					maxLength={128}
-					required
-				/>
-			</Field>
-			<Field>
-				<FieldLabel htmlFor="settings-confirm-password">
-					再次输入新密码
-				</FieldLabel>
-				<Input
-					id="settings-confirm-password"
-					type="password"
-					autoComplete="new-password"
-					value={confirmation}
-					onChange={(event) => setConfirmation(event.target.value)}
-					minLength={15}
-					maxLength={128}
-					required
-				/>
-			</Field>
-			<FieldDescription>
-				使用 15–128 个字符。密码只保存在本次输入中，提交后立即清除。
-			</FieldDescription>
-			<Button type="submit" disabled={saving}>
-				{saving ? (
-					<>
-						<LoaderCircle
-							className="animate-spin"
-							data-icon="inline-start"
-							aria-hidden="true"
+		<Dialog
+			open
+			onOpenChange={(open) => {
+				if (!open && !saving) onClose();
+			}}
+		>
+			<DialogContent>
+				<DialogHeader>
+					<DialogTitle>修改密码</DialogTitle>
+					<DialogDescription>
+						密码只保存在本次输入中，提交后立即清除。
+					</DialogDescription>
+				</DialogHeader>
+				<form className="flex flex-col gap-4" onSubmit={submit}>
+					{error && (
+						<Alert variant="destructive">
+							<AlertDescription>{error}</AlertDescription>
+						</Alert>
+					)}
+					<Field>
+						<FieldLabel htmlFor="settings-current-password">
+							当前密码
+						</FieldLabel>
+						<Input
+							id="settings-current-password"
+							type="password"
+							autoComplete="current-password"
+							value={currentPassword}
+							onChange={(event) => setCurrentPassword(event.target.value)}
+							minLength={15}
+							maxLength={128}
+							required
 						/>
-						保存中…
-					</>
-				) : (
-					"更新密码"
-				)}
-			</Button>
-		</form>
+					</Field>
+					<Field>
+						<FieldLabel htmlFor="settings-new-password">新密码</FieldLabel>
+						<Input
+							id="settings-new-password"
+							type="password"
+							autoComplete="new-password"
+							value={newPassword}
+							onChange={(event) => setNewPassword(event.target.value)}
+							minLength={15}
+							maxLength={128}
+							required
+						/>
+					</Field>
+					<Field>
+						<FieldLabel htmlFor="settings-confirm-password">
+							再次输入新密码
+						</FieldLabel>
+						<Input
+							id="settings-confirm-password"
+							type="password"
+							autoComplete="new-password"
+							value={confirmation}
+							onChange={(event) => setConfirmation(event.target.value)}
+							minLength={15}
+							maxLength={128}
+							required
+						/>
+					</Field>
+					<DialogFooter>
+						<Button type="submit" disabled={saving}>
+							{saving ? (
+								<>
+									<LoaderCircle
+										className="animate-spin"
+										data-icon="inline-start"
+										aria-hidden="true"
+									/>
+									保存中…
+								</>
+							) : (
+								"更新密码"
+							)}
+						</Button>
+					</DialogFooter>
+				</form>
+			</DialogContent>
+		</Dialog>
 	);
 }
 
-function Sessions({ suspended }: { suspended: boolean }) {
-	const [sessions, setSessions] = useState<Session[]>([]);
-	const [cursor, setCursor] = useState<string>();
-	const [error, setError] = useState("");
-	/** 撤销失败保持在确认框内的持久反馈；仅靠 toast 极易被错过。 */
+export function Sessions({
+	suspended,
+	onLogout,
+}: {
+	suspended: boolean;
+	/** 外壳的退出登录路径；提供时当前设备行直接给出「退出登录」按钮。 */
+	onLogout?: () => Promise<void> | void;
+}) {
+	const list = useCursorPages<Session>(
+		(cursor) =>
+			securityRequest<Page<Session>>(
+				`/api/v1/auth/sessions?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+			).then((page) => ({
+				items: page.items ?? [],
+				nextCursor: page.nextCursor,
+			})),
+		{ fallbackError: "暂时无法完成操作，请重试。" },
+	);
+	const sessions = list.items;
+	const sessionsLoading = list.loading;
 	const [revokeError, setRevokeError] = useState("");
 	const [pending, setPending] = useState<Session>();
 	const [busy, setBusy] = useState(false);
-	const [sessionsLoading, setSessionsLoading] = useState(true);
-	async function load(nextCursor?: string, append = false) {
-		setError("");
-		setSessionsLoading(true);
-		try {
-			const page = await securityRequest<Page<Session>>(
-				`/api/v1/auth/sessions?limit=50${nextCursor ? `&cursor=${encodeURIComponent(nextCursor)}` : ""}`,
-			);
-			setSessions((previous) =>
-				append ? [...previous, ...(page.items ?? [])] : (page.items ?? []),
-			);
-			setCursor(page.nextCursor);
-		} catch (reason) {
-			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
-		} finally {
-			setSessionsLoading(false);
-		}
-	}
-	useEffect(() => {
-		void load();
-	}, []);
 	async function revoke() {
 		if (!pending) return;
 		setBusy(true);
@@ -227,7 +282,7 @@ function Sessions({ suspended }: { suspended: boolean }) {
 			);
 			notify.success("已撤销会话");
 			setPending(undefined);
-			await load();
+			list.refresh();
 		} catch (reason) {
 			// 失败时确认框保持打开并把原因钉在框内，可重试或取消。
 			setRevokeError(messageOf(reason, "暂时无法完成操作，请重试。"));
@@ -236,79 +291,98 @@ function Sessions({ suspended }: { suspended: boolean }) {
 		}
 	}
 	return (
-		<section className="space-y-4">
+		<section className="space-y-3">
 			<div>
-				<h2 className="text-xl font-semibold">我的会话</h2>
+				<h3 className="text-sm font-medium">登录设备</h3>
 				<p className="text-sm text-muted-foreground">
-					显示仍有效的登录设备及其服务端记录的活动时间。
+					仍有效的登录设备及其服务端记录的活动时间。
 				</p>
 			</div>
-			{error && (
+			{list.error && (
 				<Alert variant="destructive">
-					<AlertDescription>{error}</AlertDescription>
+					<AlertDescription>{list.error}</AlertDescription>
 				</Alert>
 			)}
-			<DataTable
-				columns={[
-					{ label: "客户端" },
-					{ label: "创建时间" },
-					{ label: "最后活动" },
-					{ label: "过期时间" },
-					{ label: <span className="sr-only">操作</span> },
-				]}
-				loading={sessionsLoading}
-				loadingLabel="正在读取登录设备"
-				emptyTitle="没有登录设备记录。"
-			>
-				{sessions.map((session) => (
-					<TableRow key={session.id}>
-						<TableCell>
-							{session.clientLabel}{" "}
-							{session.current && (
-								<Badge className="ml-2" variant="secondary">
-									当前
-								</Badge>
-							)}
-						</TableCell>
-						<TableCell className="text-xs tabular-nums text-muted-foreground">
-							{formatTime(session.createdAt)}
-						</TableCell>
-						<TableCell className="text-xs tabular-nums text-muted-foreground">
-							{formatTime(session.lastActiveAt)}
-						</TableCell>
-						<TableCell className="text-xs tabular-nums text-muted-foreground">
-							{formatTime(session.idleExpiresAt)}
-						</TableCell>
-						<TableCell>
-							{/* HTTP-AUTH-004：revokeOwnSession 只能撤销其他会话；当前
-							 * 请求所用会话必须走外壳的退出登录，后端对前者确定性
-							 * 拒绝（active_conflict），因此当前行不提供必然失败的按钮。
-							 */}
-							{session.current ? (
-								<span className="text-xs text-muted-foreground">
-									本设备请用右上角「退出登录」
-								</span>
-							) : (
-								<Button
-									variant="outline"
-									size="sm"
-									disabled={suspended}
-									onClick={() => {
-										setRevokeError("");
-										setPending(session);
-									}}
-								>
-									撤销
-								</Button>
-							)}
-						</TableCell>
-					</TableRow>
-				))}
-			</DataTable>
-			<LoadMoreButton
-				loading={sessionsLoading}
-				hasMore={Boolean(cursor)}
-				onLoadMore={() => void load(cursor, true)}
+			{sessionsLoading && sessions.length === 0 ? (
+				<div
+					className="flex flex-col gap-2"
+					role="status"
+					aria-label="正在读取登录设备"
+				>
+					<Skeleton className="h-12 w-full" />
+					<Skeleton className="h-12 w-full" />
+				</div>
+			) : sessions.length === 0 ? (
+				<p className="text-sm text-muted-foreground">没有登录设备记录。</p>
+			) : (
+				<ItemGroup>
+					{sessions.map((session) => (
+						<Item key={session.id} size="sm" className="px-0">
+							<ItemMedia variant="icon">
+								<Monitor aria-hidden="true" />
+							</ItemMedia>
+							<ItemContent>
+								<ItemTitle>
+									{session.clientLabel}
+									{session.current && (
+										<Badge className="ml-2" variant="secondary">
+											当前
+										</Badge>
+									)}
+								</ItemTitle>
+								<ItemDescription>
+									最后活动 {formatTime(session.lastActiveAt)} · 空闲至{" "}
+									{formatTime(session.idleExpiresAt)}
+								</ItemDescription>
+							</ItemContent>
+							<ItemActions>
+								{/* HTTP-AUTH-004：revokeOwnSession 只能撤销其他会话；当前
+								 * 会话的正确结束路径是 logout（与外壳右上角菜单同一条），
+								 * 因此当前行给出真实的退出登录按钮而不是必然失败的撤销。
+								 */}
+								{session.current ? (
+									onLogout ? (
+										<Button
+											variant="ghost"
+											size="sm"
+											onClick={() => {
+												Promise.resolve(onLogout()).catch((reason) =>
+													notify.error(reason, "退出登录失败，请重试。"),
+												);
+											}}
+										>
+											退出登录
+										</Button>
+									) : (
+										<span className="text-xs text-muted-foreground">
+											本设备请用「退出登录」
+										</span>
+									)
+								) : (
+									<Button
+										variant="outline"
+										size="sm"
+										disabled={suspended}
+										onClick={() => {
+											setRevokeError("");
+											setPending(session);
+										}}
+									>
+										撤销
+									</Button>
+								)}
+							</ItemActions>
+						</Item>
+					))}
+				</ItemGroup>
+			)}
+			<CursorPagination
+				page={list.page}
+				hasPrev={list.hasPrev}
+				hasNext={list.hasNext}
+				loading={list.navigating}
+				onPrev={list.goPrev}
+				onNext={list.goNext}
 			/>
 			<AlertDialog
 				open={Boolean(pending)}
@@ -346,18 +420,5 @@ function Sessions({ suspended }: { suspended: boolean }) {
 	);
 }
 
-/** Security owns the personal password and session surfaces; logout remains solely in the shell. */
-export function Security({
-	suspended,
-	onUserChanged,
-}: {
-	suspended: boolean;
-	onUserChanged: (user: UserSummary) => void;
-}) {
-	return (
-		<div className="space-y-8">
-			<PasswordForm onChanged={onUserChanged} />
-			<Sessions suspended={suspended} />
-		</div>
-	);
-}
+/** 原独立「安全」页已并入「账户与安全」（settings/profile/Profile.tsx）——
+ * PasswordForm 与 Sessions 作为分节被组合复用。 */

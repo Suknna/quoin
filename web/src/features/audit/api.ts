@@ -129,6 +129,62 @@ export function phaseLabel(phase: string | undefined): string {
 export const actorLabels: Record<AuditActorType, string> = { user: "用户", service: "服务", system: "系统" };
 export const outcomeLabels: Record<AuditOutcome, string> = { success: "成功", failure: "失败", rejected: "已拒绝", unknown: "未知" };
 
+/**
+ * Human-readable labels for the registered audit actions (the backend's
+ * execution.Operation names, e.g. internal/quoin/auth/ops.go). Unknown or
+ * historical actions fall back to the raw dotted name — never hidden.
+ */
+const actionLabels: Record<string, string> = {
+	"auth.login.local": "本地应急登录",
+	"auth.login.oidc": "统一身份登录（OIDC）",
+	"auth.oidc.jit": "外部身份自动建档",
+	"auth.recovery.begin": "管理员离线恢复",
+	"auth.session.activity": "会话活动续期",
+	"user.create": "创建用户",
+	"user.update": "更新用户",
+	"user.reset_password": "重置用户密码",
+	"user.set_contacts": "配置用户联系方式",
+	"user.revoke_sessions": "撤销用户全部会话",
+	"user.change_own_password": "修改本人密码",
+	"session.logout": "退出登录",
+	"session.revoke_own": "撤销本人会话",
+	"connection.create": "创建连接",
+	"connection.probe.bind": "绑定探测任务",
+	"connection.probe.accept": "接受探测结果",
+	"connection.probe.cancel_ack": "确认探测取消",
+	"connection.probe.interrupt": "中断探测任务",
+	"backup.trigger": "触发备份",
+	"alert.update": "更新告警",
+	"alert_source.credential.reveal": "读取告警源凭据",
+	"inspection.run.create": "触发巡检运行",
+	"inspection.report.read": "查看巡检报告",
+	"audit_settings.update": "调整审计保留期",
+	"maintenance.restore.enter": "进入恢复维护",
+	"admin.bootstrap": "初始化管理员",
+	"auth.bootstrap.seed": "部署引导初始化",
+};
+
+export function actionLabel(action: string): string {
+	return actionLabels[action] ?? action;
+}
+
+/** Object-type labels for the 对象 column; unknown types stay raw. */
+const domainRefTypeLabels: Record<string, string> = {
+	user: "用户",
+	session: "会话",
+	connection: "连接",
+	backup: "备份",
+	deployment: "部署",
+	inspection_run: "巡检运行",
+	alert_source: "告警源",
+	audit_settings: "审计设置",
+	maintenance: "维护",
+};
+
+export function domainRefTypeLabel(type: string): string {
+	return domainRefTypeLabels[type] ?? type;
+}
+
 export function formatTimestamp(value: string | null | undefined): string {
 	if (!value) return "—";
 	const date = new Date(value);

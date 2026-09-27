@@ -206,7 +206,7 @@ describe("Users", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 
-	it("shows initialization status and refuses to disable, re-channel, or reset the unique admin", async () => {
+	it("shows initialization status and gates admin actions behind the detail drawer", async () => {
 		stubUserFetch();
 		render(<Users suspended={false} />);
 		const adminRowElement = (await screen.findByText("Root")).closest(
@@ -214,21 +214,32 @@ describe("Users", () => {
 		) as HTMLTableRowElement;
 		expect(within(adminRowElement).getByText("管理员")).toBeInTheDocument();
 		expect(within(adminRowElement).getByText(/已初始化/)).toBeInTheDocument();
+
+		// 管理员抽屉：不提供必然被后端拒绝的停用/配置渠道/重置密码。
+		fireEvent.click(adminRowElement);
+		let sheet = await screen.findByRole("dialog", { name: "Root" });
 		expect(
-			within(adminRowElement).queryByRole("button", { name: "停用" }),
+			within(sheet).queryByRole("button", { name: "停用" }),
 		).not.toBeInTheDocument();
 		expect(
-			within(adminRowElement).queryByRole("button", { name: "配置渠道" }),
+			within(sheet).queryByRole("button", { name: "配置渠道" }),
 		).not.toBeInTheDocument();
 		// The backend rejects admin password reset (account self-service or CLI
-		// only); the row must not offer an inevitably rejected action.
+		// only); the drawer must not offer an inevitably rejected action.
 		expect(
-			within(adminRowElement).queryByRole("button", { name: "重置密码" }),
+			within(sheet).queryByRole("button", { name: "重置密码" }),
 		).not.toBeInTheDocument();
 		expect(
-			within(adminRowElement).getByText(/设置 → 个人资料/),
+			within(sheet).getByText(/设置 → 账户与安全/),
 		).toBeInTheDocument();
+		fireEvent.click(within(sheet).getByRole("button", { name: "Close" }));
+		await waitFor(() =>
+			expect(
+				screen.queryByRole("dialog", { name: "Root" }),
+			).not.toBeInTheDocument(),
+		);
 
+		// 操作员抽屉：停用、配置渠道、重置密码都可用。
 		const operatorRowElement = screen
 			.getByText("Operator")
 			.closest("tr") as HTMLTableRowElement;
@@ -236,25 +247,54 @@ describe("Users", () => {
 		expect(
 			within(operatorRowElement).getByText(/未初始化/),
 		).toBeInTheDocument();
+		fireEvent.click(operatorRowElement);
+		sheet = await screen.findByRole("dialog", { name: "Operator" });
 		expect(
-			within(operatorRowElement).getByRole("button", { name: "停用" }),
+			within(sheet).getByRole("button", { name: "停用" }),
 		).toBeInTheDocument();
 		expect(
-			within(operatorRowElement).getByRole("button", { name: "配置渠道" }),
+			within(sheet).getByRole("button", { name: "配置渠道" }),
 		).toBeInTheDocument();
 		expect(
-			within(operatorRowElement).getByRole("button", { name: "重置密码" }),
+			within(sheet).getByRole("button", { name: "重置密码" }),
 		).toBeInTheDocument();
+	});
+
+	it("shows the user's masked contacts inside the detail drawer", async () => {
+		stubUserFetch({
+			contacts: {
+				items: [
+					{
+						id: "c-1",
+						channel: "email",
+						maskedTarget: "o***@example.test",
+						verified: true,
+					},
+				],
+			},
+		});
+		render(<Users suspended={false} />);
+		fireEvent.click(
+			(await screen.findByText("Operator")).closest("tr") as HTMLTableRowElement,
+		);
+		const sheet = await screen.findByRole("dialog", { name: "Operator" });
+		// 管理员可读任意用户的同一掩码投影；明文不出服务器。
+		expect(
+			await within(sheet).findByText("o***@example.test"),
+		).toBeInTheDocument();
+		expect(within(sheet).getByText("已验证")).toBeInTheDocument();
+		expect(within(sheet).getByText("邮箱")).toBeInTheDocument();
 	});
 
 	it("replaces targets through the contacts command and allows clearing all channels", async () => {
 		const fetchMock = stubUserFetch();
 		render(<Users suspended={false} />);
-		const operatorRowElement = (await screen.findByText("Operator")).closest(
-			"tr",
-		) as HTMLTableRowElement;
 		fireEvent.click(
-			within(operatorRowElement).getByRole("button", { name: "配置渠道" }),
+			(await screen.findByText("Operator")).closest("tr") as HTMLTableRowElement,
+		);
+		const sheet = await screen.findByRole("dialog", { name: "Operator" });
+		fireEvent.click(
+			within(sheet).getByRole("button", { name: "配置渠道" }),
 		);
 
 		// Display-only contacts (ADR-0010): an empty set is a valid save —
@@ -262,7 +302,9 @@ describe("Users", () => {
 		const save = screen.getByRole("button", { name: "保存渠道" });
 		expect(save).toBeDisabled();
 		fireEvent.submit(save.closest("form") as HTMLFormElement);
-		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(
+			fetchMock.mock.calls.filter(([, init]) => init?.method === "PUT"),
+		).toHaveLength(0);
 		fireEvent.click(
 			screen.getByRole("checkbox", {
 				name: "我确认以本表单替换全部现有联系方式",
@@ -270,10 +312,15 @@ describe("Users", () => {
 		);
 		expect(save).toBeEnabled();
 		fireEvent.click(save);
-		await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-		expect(fetchMock.mock.calls[1][0]).toBe("/api/v1/admin/users/u1/contacts");
-		expect(fetchMock.mock.calls[1][1]?.method).toBe("PUT");
-		expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
+		await waitFor(() =>
+			expect(
+				fetchMock.mock.calls.filter(([, init]) => init?.method === "PUT"),
+			).toHaveLength(1),
+		);
+		const puts = () =>
+			fetchMock.mock.calls.filter(([, init]) => init?.method === "PUT");
+		expect(puts()[0][0]).toBe("/api/v1/admin/users/u1/contacts");
+		expect(JSON.parse(String(puts()[0][1]?.body))).toMatchObject({
 			clientCommandId: expect.any(String),
 			expectedRowVersion: 7,
 			contacts: [],
@@ -281,7 +328,9 @@ describe("Users", () => {
 
 		// A filled target rides the same command with its structured channel.
 		fireEvent.click(
-			within(operatorRowElement).getByRole("button", { name: "配置渠道" }),
+			within(
+				await screen.findByRole("dialog", { name: "Operator" }),
+			).getByRole("button", { name: "配置渠道" }),
 		);
 		fireEvent.change(screen.getByLabelText("邮箱联系方式"), {
 			target: { value: "new@example.com" },
@@ -293,8 +342,8 @@ describe("Users", () => {
 			}),
 		);
 		fireEvent.click(screen.getByRole("button", { name: "保存渠道" }));
-		await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
-		expect(JSON.parse(String(fetchMock.mock.calls[3][1]?.body))).toMatchObject({
+		await waitFor(() => expect(puts()).toHaveLength(2));
+		expect(JSON.parse(String(puts()[1][1]?.body))).toMatchObject({
 			clientCommandId: expect.any(String),
 			expectedRowVersion: 7,
 			contacts: [{ channel: "email", target: "new@example.com" }],
@@ -304,18 +353,25 @@ describe("Users", () => {
 	it("sends the enabled toggle with the row-version fence and no role field", async () => {
 		const fetchMock = stubUserFetch();
 		render(<Users suspended={false} />);
-		const operatorRowElement = (await screen.findByText("Operator")).closest(
-			"tr",
-		) as HTMLTableRowElement;
 		fireEvent.click(
-			within(operatorRowElement).getByRole("button", { name: "停用" }),
+			(await screen.findByText("Operator")).closest("tr") as HTMLTableRowElement,
+		);
+		fireEvent.click(
+			within(
+				await screen.findByRole("dialog", { name: "Operator" }),
+			).getByRole("button", { name: "停用" }),
 		);
 		// 停用现在经过确认弹框；确认后才发送更新命令。
 		fireEvent.click(await screen.findByRole("button", { name: "确认" }));
 
-		await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-		expect(fetchMock.mock.calls[1][0]).toBe("/api/v1/admin/users/u1");
-		const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+		const patchCalls = () =>
+			fetchMock.mock.calls.filter(
+				([input, init]) =>
+					String(input) === "/api/v1/admin/users/u1" &&
+					init?.method === "PATCH",
+			);
+		await waitFor(() => expect(patchCalls()).toHaveLength(1));
+		const body = JSON.parse(String(patchCalls()[0][1]?.body));
 		expect(body).toMatchObject({
 			enabled: false,
 			expectedRowVersion: 7,

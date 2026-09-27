@@ -334,8 +334,10 @@ describe("candidates page", () => {
 			sourceType: undefined,
 		});
 		expect(vi.mocked(api.listCandidates).mock.calls[0]?.[1]).toBeUndefined();
-		fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+		fireEvent.click(screen.getByRole("button", { name: "下一页" }));
 		expect(await screen.findByText("候选二")).toBeInTheDocument();
+		// 翻页替换：第二页不再保留第一页的行。
+		expect(screen.queryByText("候选一")).not.toBeInTheDocument();
 		expect(vi.mocked(api.listCandidates).mock.calls[1]?.[1]).toBe("cand-2");
 		fireEvent.click(screen.getByText("候选二"));
 		expect(navigate).toHaveBeenCalledWith("/knowledge/candidates/c2");
@@ -356,7 +358,7 @@ describe("candidates page", () => {
 		});
 	});
 
-	it("keeps loaded rows when a load-more fails and retries the same cursor", async () => {
+	it("keeps the current page when a page turn fails and retries the same cursor", async () => {
 		const { api } = await import("@/features/knowledge/api");
 		vi.mocked(api.listCandidates)
 			.mockResolvedValueOnce({
@@ -367,15 +369,16 @@ describe("candidates page", () => {
 			.mockResolvedValueOnce({ items: [candidate("c2", "候选二")] });
 		renderView({ route: "/knowledge/candidates" });
 		expect(await screen.findByText("候选一")).toBeInTheDocument();
-		fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+		fireEvent.click(screen.getByRole("button", { name: "下一页" }));
 		expect(await screen.findByText("无法读取知识候选。")).toBeInTheDocument();
+		// 失败的翻页不丢失当前页，重试原样重跑同一游标。
 		expect(screen.getByText("候选一")).toBeInTheDocument();
 		fireEvent.click(screen.getByRole("button", { name: "重试" }));
 		expect(await screen.findByText("候选二")).toBeInTheDocument();
 		expect(vi.mocked(api.listCandidates).mock.calls[2]?.[1]).toBe("cand-2");
 	});
 
-	it("deduplicates appended pages by id so cursor overlap renders one row", async () => {
+	it("replaces the page even when the cursor window overlaps", async () => {
 		const { api } = await import("@/features/knowledge/api");
 		vi.mocked(api.listCandidates)
 			.mockResolvedValueOnce({
@@ -387,8 +390,9 @@ describe("candidates page", () => {
 			});
 		renderView({ route: "/knowledge/candidates" });
 		expect(await screen.findByText("候选一")).toBeInTheDocument();
-		fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+		fireEvent.click(screen.getByRole("button", { name: "下一页" }));
 		expect(await screen.findByText("候选二")).toBeInTheDocument();
+		// 游标窗口重叠由翻页替换天然消化：第二页只呈现本页内容。
 		expect(screen.getAllByText("候选一")).toHaveLength(1);
 	});
 

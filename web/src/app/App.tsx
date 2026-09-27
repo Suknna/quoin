@@ -181,6 +181,7 @@ function Workspace({
 		navigate,
 		suspended: maintenanceActive,
 		maintenanceActive,
+		logout: onLogout,
 		openEvidence: (id) => {
 			returnFocus.current =
 				document.activeElement instanceof HTMLElement

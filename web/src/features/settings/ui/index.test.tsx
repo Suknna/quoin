@@ -49,6 +49,7 @@ function View({
 		route,
 		navigate: vi.fn(),
 		suspended: false,
+		logout: vi.fn(),
 		openEvidence: vi.fn(),
 	});
 	return (
@@ -108,7 +109,10 @@ describe("settings module", () => {
 			],
 		});
 		render(<View />);
-		expect(screen.getByDisplayValue("alice")).toHaveAttribute("readonly");
+		// 身份信息直接展示为文本，不再使用暗示可编辑的 readOnly 输入框。
+		expect(screen.getByText("Alice")).toBeInTheDocument();
+		expect(screen.getByText(/@alice/)).toBeInTheDocument();
+		expect(screen.queryByDisplayValue("alice")).not.toBeInTheDocument();
 		expect(screen.getByText("管理员")).toBeInTheDocument();
 		expect(screen.queryByText("退出登录")).not.toBeInTheDocument();
 		expect(await screen.findByText("a***@example.test")).toBeInTheDocument();
@@ -121,7 +125,7 @@ describe("settings module", () => {
 			screen.getByText(/联系方式仅作展示，不用于验证或登录；由管理员在用户管理页维护/),
 		).toBeInTheDocument();
 		// The unified navigation highlights the active page.
-		expect(screen.getByRole("button", { name: "个人资料" })).toHaveAttribute(
+		expect(screen.getByRole("button", { name: "账户与安全" })).toHaveAttribute(
 			"aria-current",
 			"page",
 		);
@@ -156,6 +160,8 @@ describe("settings module", () => {
 		vi.mocked(workbenchApi.currentUser).mockResolvedValue(changed);
 		stubFetch({});
 		render(<View route="/settings/security" />);
+		// 低频操作收进对话框：页面上没有常驻密码框，先打开「修改密码」。
+		fireEvent.click(screen.getByRole("button", { name: "修改密码" }));
 		fireEvent.change(screen.getByLabelText("当前密码"), {
 			target: { value: "current password long enough" },
 		});
@@ -182,9 +188,10 @@ describe("settings module", () => {
 			}),
 		);
 		expect(workbenchApi.currentUser).toHaveBeenCalled();
-		expect(screen.getByLabelText("当前密码")).toHaveValue("");
-		expect(screen.getByLabelText("新密码")).toHaveValue("");
-		expect(screen.getByLabelText("再次输入新密码")).toHaveValue("");
+		// 成功后对话框关闭，凭据随对话框卸载，不再残留在页面中。
+		await waitFor(() =>
+			expect(screen.queryByLabelText("当前密码")).not.toBeInTheDocument(),
+		);
 	});
 
 	it("paginates sessions; the current session is logout-only, others confirm then revoke", async () => {
@@ -224,20 +231,33 @@ describe("settings module", () => {
 		vi.stubGlobal("fetch", fetchMock);
 		render(<View route="/settings/security" />);
 		expect(await screen.findByText("Chrome")).toBeInTheDocument();
-		fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+		// 游标翻页：下一页替换当前页，上一页沿游标栈返回。
+		fireEvent.click(screen.getByRole("button", { name: "下一页" }));
 		expect(await screen.findByText("Firefox")).toBeInTheDocument();
-		expect(fetchMock.mock.calls[1][0]).toContain("cursor=next");
-		// HTTP-AUTH-004：当前请求所用会话只能经外壳「退出登录」撤销，后端
-		// 对 revokeOwnSession 撤销当前会话确定性拒绝，当前行不提供撤销按钮。
-		const currentRow = screen.getByText("Chrome").closest("tr") as HTMLTableRowElement;
-		expect(
-			within(currentRow).queryByRole("button", { name: "撤销" }),
-		).not.toBeInTheDocument();
-		expect(within(currentRow).getByText(/退出登录/)).toBeInTheDocument();
+		expect(screen.queryByText("Chrome")).not.toBeInTheDocument();
+		const pagedCall = fetchMock.mock.calls.find(([input]) =>
+			String(input).includes("cursor="),
+		);
+		expect(pagedCall?.[0]).toContain("cursor=next");
+		// 其他设备的会话行提供撤销；确认框说明后果。
 		fireEvent.click(screen.getByRole("button", { name: "撤销" }));
 		expect(await screen.findByText("撤销此会话？")).toBeInTheDocument();
 		expect(
 			screen.getByText("该设备将需要重新登录；其他设备保持不变。"),
+		).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "取消" }));
+		fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+		expect(await screen.findByText("Chrome")).toBeInTheDocument();
+		// HTTP-AUTH-004：当前请求所用会话不能走 revokeOwnSession（后端确定性
+		// 拒绝）；本页为当前设备提供与外壳同一条的「退出登录」按钮。
+		const currentRow = screen
+			.getByText("Chrome")
+			.closest('[data-slot="item"]') as HTMLElement;
+		expect(
+			within(currentRow).queryByRole("button", { name: "撤销" }),
+		).not.toBeInTheDocument();
+		expect(
+			within(currentRow).getByRole("button", { name: "退出登录" }),
 		).toBeInTheDocument();
 	});
 });

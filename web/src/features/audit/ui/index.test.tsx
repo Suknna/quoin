@@ -120,30 +120,41 @@ describe("audit admin screen", () => {
 		);
 		render(<AuditPage suspended={false} />);
 		expect(await screen.findByText(/user\.created/)).toBeInTheDocument();
-		// 无关联的历史事件在关联列显示占位符。
-		expect(screen.getAllByText("—").length).toBeGreaterThan(0);
 
-		fireEvent.click(screen.getAllByRole("button", { name: "查看关联" })[0]);
-		const dialog = await screen.findByRole("dialog");
+		// 无关联的历史事件在详情抽屉中如实标注，且不提供关联链路 Tab。
+		fireEvent.click(screen.getByText("legacy.action").closest("tr")!);
+		let sheet = await screen.findByRole("dialog");
+		expect(within(sheet).getByText(/历史无关联/)).toBeInTheDocument();
+		expect(within(sheet).queryByRole("tab")).toBeNull();
+		fireEvent.click(within(sheet).getByRole("button", { name: "Close" }));
+		await waitFor(() =>
+			expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+		);
+
+		// 行 → 详情抽屉 → 「关联链路」Tab，同一切面内按时间正序呈现。
+		fireEvent.click(screen.getByText("user.created").closest("tr")!);
+		sheet = await screen.findByRole("dialog");
+		fireEvent.mouseDown(within(sheet).getByRole("tab", { name: "关联链路" }));
 		expect(
 			fetchMock.mock.calls.some(([input]) =>
 				String(input).includes("correlationId=corr-1"),
 			),
 		).toBe(true);
-		const timeline = within(dialog).getAllByText(
+		const panel = await within(sheet).findByRole("tabpanel");
+		const timeline = await within(panel).findAllByText(
 			/user\.created|command\.attempt/,
 		);
 		expect(timeline[0]).toHaveTextContent("command.attempt");
 		expect(timeline[1]).toHaveTextContent("user.created");
-		expect(within(dialog).getByText("执行尝试")).toBeInTheDocument();
+		expect(within(panel).getByText("执行尝试")).toBeInTheDocument();
 
-		fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+		fireEvent.click(within(sheet).getByRole("button", { name: "Close" }));
 		await waitFor(() =>
 			expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
 		);
 	});
 
-	it("passes filters as query parameters and pages by opaque cursor", async () => {
+	it("passes column-header filters as query parameters and pages by opaque cursor", async () => {
 		const recent = {
 			id: "e2",
 			actorType: "user",
@@ -168,20 +179,32 @@ describe("audit admin screen", () => {
 		render(<AuditPage suspended={false} />);
 		expect(await screen.findByText(/user\.created/)).toBeInTheDocument();
 
-		fireEvent.change(screen.getByLabelText("开始时间"), {
+		// 时间列表头漏斗 → 范围筛选。
+		fireEvent.click(screen.getByRole("button", { name: "筛选时间" }));
+		fireEvent.change(await screen.findByLabelText("开始时间"), {
 			target: { value: "2026-09-01T00:00" },
 		});
-		fireEvent.change(screen.getByLabelText("操作"), {
+		fireEvent.click(screen.getByRole("button", { name: "应用" }));
+		await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+		// 操作列表头漏斗 → 文本筛选。
+		fireEvent.click(screen.getByRole("button", { name: "筛选操作" }));
+		fireEvent.change(await screen.findByLabelText("操作"), {
 			target: { value: "user.created" },
 		});
-		fireEvent.change(screen.getByLabelText("关联 ID"), {
+		fireEvent.click(screen.getByRole("button", { name: "应用" }));
+		await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+
+		// 关联列表头漏斗 → 关联 ID 筛选。
+		fireEvent.click(screen.getByRole("button", { name: "筛选关联" }));
+		fireEvent.change(await screen.findByLabelText("关联 ID"), {
 			target: { value: "corr-9" },
 		});
-		fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
+		fireEvent.click(screen.getByRole("button", { name: "应用" }));
+		await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
 
-		await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
 		const filtered = new URL(
-			String(fetchMock.mock.calls[2][0]),
+			String(fetchMock.mock.calls[4][0]),
 			"https://quoin.invalid",
 		).searchParams;
 		expect(new Date(filtered.get("since")!).getTime()).toBe(
@@ -193,14 +216,34 @@ describe("audit admin screen", () => {
 		expect(filtered.has("actorType")).toBe(false);
 		expect(filtered.has("outcome")).toBe(false);
 
-		fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+		// 游标翻页：下一页用 nextCursor 取数并替换当前页。
+		fireEvent.click(screen.getByRole("button", { name: "下一页" }));
 		expect(await screen.findByText(/user\.disabled/)).toBeInTheDocument();
+		expect(screen.queryByText(/user\.created/)).not.toBeInTheDocument();
 		const paged = new URL(
-			String(fetchMock.mock.calls[3][0]),
+			String(fetchMock.mock.calls[5][0]),
 			"https://quoin.invalid",
 		).searchParams;
 		expect(paged.get("cursor")).toBe("page-2");
 		expect(paged.get("action")).toBe("user.created");
+	});
+
+	it("filters by outcome from the 结果 column header", async () => {
+		const fetchMock = stubAuditFetch(() => ({ items: [] }));
+		render(<AuditPage suspended={false} />);
+		expect(
+			await screen.findByText("没有匹配的审计事件"),
+		).toBeInTheDocument();
+
+		fireEvent.click(screen.getByRole("button", { name: "筛选结果" }));
+		fireEvent.click(await screen.findByRole("button", { name: "失败" }));
+		await waitFor(() => {
+			const last = new URL(
+				String(fetchMock.mock.calls.at(-1)?.[0]),
+				"https://quoin.invalid",
+			);
+			expect(last.searchParams.get("outcome")).toBe("failure");
+		});
 	});
 
 	it("previews the retention impact, requires confirmation, and applies the change", async () => {
@@ -243,7 +286,7 @@ describe("audit admin screen", () => {
 		await waitFor(() =>
 			expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
 		);
-		expect(document.body.textContent).toContain("当前保留期：12 个自然月");
+		expect(document.body.textContent).toContain("保留 12 个月");
 	});
 
 	it("reports a settings conflict instead of pretending the change succeeded", async () => {
@@ -267,6 +310,42 @@ describe("audit admin screen", () => {
 			await within(dialog).findByText(/已被其他管理员修改/),
 		).toBeInTheDocument();
 		expect(screen.getByRole("dialog")).toBeInTheDocument();
+	});
+
+	it("summarises outcomes and opens the event detail drawer with the full record", async () => {
+		stubAuditFetch(() => ({
+			items: [
+				{
+					id: "e10",
+					correlationId: "corr-1",
+					actorType: "user",
+					actorId: "u1",
+					action: "user.create",
+					outcome: "success",
+					phase: "outcome",
+					domainRefType: "user",
+					domainRefId: "u9",
+					clientCommandId: "cmd-1",
+					requestId: "req-1",
+					createdAt: "2026-09-01T08:00:00Z",
+				},
+			],
+		}));
+		render(<AuditPage suspended={false} />);
+		// Known actions render a human label with the raw name beside it.
+		expect(await screen.findByText("创建用户")).toBeInTheDocument();
+		expect(screen.getByText(/当前页 1 条/)).toBeInTheDocument();
+
+		fireEvent.click(screen.getByText("创建用户").closest("tr")!);
+		const sheet = await screen.findByRole("dialog");
+		expect(within(sheet).getByText("访问对象")).toBeInTheDocument();
+		expect(within(sheet).getByText("用户 · u9")).toBeInTheDocument();
+		expect(within(sheet).getByText("cmd-1")).toBeInTheDocument();
+		expect(within(sheet).getByText("req-1")).toBeInTheDocument();
+
+		fireEvent.mouseDown(within(sheet).getByRole("tab", { name: "关联链路" }));
+		const panel = await within(sheet).findByRole("tabpanel");
+		expect(await within(panel).findByText("corr-1")).toBeInTheDocument();
 	});
 
 	it("surfaces server problems instead of rendering invented events", async () => {

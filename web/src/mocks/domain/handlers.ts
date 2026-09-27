@@ -1581,9 +1581,105 @@ export const domainHandlers = [
 		const denied = required();
 		return denied ?? page(getMockState().users);
 	}),
-	http.get("*/api/v1/audit-events", () => {
-		const denied = required();
-		return denied ?? page(getMockState().auditEvents);
+	http.get("*/api/v1/admin/users/:id/contacts", ({ params }) => {
+		const denied = adminRequired();
+		if (denied) return denied;
+		// 与真实后端一致：管理员读到的是同一掩码投影，明文不出服务器。
+		return json({ items: getMockState().contacts[String(params.id)] ?? [] });
+	}),
+	http.get("*/api/v1/audit-events", ({ request }) => {
+		const denied = adminRequired();
+		if (denied) return denied;
+		const url = new URL(request.url);
+		const correlationId = url.searchParams.get("correlationId");
+		const actorType = url.searchParams.get("actorType");
+		const action = url.searchParams.get("action");
+		const outcome = url.searchParams.get("outcome");
+		const since = url.searchParams.get("since");
+		const until = url.searchParams.get("until");
+		const limit = Number(url.searchParams.get("limit") ?? 50);
+		const offset = Number(url.searchParams.get("cursor") ?? 0);
+		// Newest-first, matching the backend's stable ordering contract.
+		const filtered = getMockState()
+			.auditEvents.filter(
+				(event) =>
+					(!correlationId || event.correlationId === correlationId) &&
+					(!actorType || event.actorType === actorType) &&
+					(!action || event.action === action) &&
+					(!outcome || event.outcome === outcome) &&
+					(!since || event.createdAt >= since) &&
+					(!until || event.createdAt < until),
+			)
+			.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+		const items = filtered.slice(offset, offset + limit);
+		const nextOffset = offset + limit;
+		return json({
+			items,
+			nextCursor:
+				nextOffset < filtered.length ? String(nextOffset) : undefined,
+		});
+	}),
+	// Retention settings mirror docs/audit-design.md §7: preview before
+	// shortening, rowVersion fencing, and the six-month floor.
+	http.get("*/api/v1/admin/audit-settings", () => {
+		const denied = adminRequired();
+		return denied ?? json(getMockState().auditSettings);
+	}),
+	http.post("*/api/v1/admin/audit-settings/preview", async ({ request }) => {
+		const denied = adminRequired();
+		if (denied) return denied;
+		const input = await body<{ retentionMonths: number }>(request);
+		const settings = getMockState().auditSettings;
+		if (
+			!Number.isInteger(input.retentionMonths) ||
+			input.retentionMonths < settings.minRetentionMonths
+		)
+			return problem(
+				422,
+				`保留期不能低于 ${settings.minRetentionMonths} 个自然月。`,
+				"validation_failed",
+			);
+		const cutoff = new Date("2026-09-09T09:30:00.000Z");
+		cutoff.setUTCMonth(cutoff.getUTCMonth() - input.retentionMonths);
+		const cutoffAt = cutoff.toISOString();
+		const expirable = getMockState().auditEvents.filter(
+			(event) => event.createdAt < cutoffAt,
+		);
+		return json({
+			retentionMonths: input.retentionMonths,
+			currentRetentionMonths: settings.retentionMonths,
+			shortening: input.retentionMonths < settings.retentionMonths,
+			cutoffAt,
+			estimatedExpirableEvents: expirable.length,
+			estimatedExpirableCorrelations: new Set(
+				expirable.map((event) => event.correlationId ?? event.id),
+			).size,
+		});
+	}),
+	http.patch("*/api/v1/admin/audit-settings", async ({ request }) => {
+		const denied = adminRequired();
+		if (denied) return denied;
+		const input = await body<{
+			retentionMonths: number;
+			expectedRowVersion: number;
+		}>(request);
+		const settings = getMockState().auditSettings;
+		if (
+			!Number.isInteger(input.retentionMonths) ||
+			input.retentionMonths < settings.minRetentionMonths
+		)
+			return problem(
+				422,
+				`保留期不能低于 ${settings.minRetentionMonths} 个自然月。`,
+				"validation_failed",
+			);
+		const stale = conflict(input.expectedRowVersion, settings.rowVersion);
+		if (stale) return stale;
+		settings.retentionMonths = input.retentionMonths;
+		settings.rowVersion += 1;
+		settings.updatedAt = "2026-09-09T09:30:00.000Z";
+		settings.updatedBy = getMockState().currentUser?.id ?? null;
+		return json(settings);
 	}),
 	http.get("*/api/v1/admin/about", () => {
 		const scenario = getMockScenario();

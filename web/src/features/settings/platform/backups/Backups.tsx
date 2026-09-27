@@ -1,5 +1,6 @@
 /* eslint-disable react-hooks/exhaustive-deps -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
 
+import { useCursorPages } from '@/hooks/use-cursor-pages';
 import { useEffect, useState } from "react";
 import {
 	newClientCommandId,
@@ -16,7 +17,7 @@ import { Switch } from "@/components/ui/switch";
 import { TableCell, TableRow } from "@/components/ui/table";
 import { DataTable } from "@/components/workbench/DataTable";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
-import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { CursorPagination } from "@/components/workbench/CursorPagination";
 import { usePolling } from "@/hooks/use-polling";
 import { formatDateTime } from "@/lib/format";
 
@@ -55,33 +56,38 @@ const formatBytes = (value: number) => {
 
 /** Backups are asynchronous server tasks; this view never invents restore or cancellation commands. */
 export function Backups({ suspended }: { suspended: boolean }) {
-	const [items, setItems] = useState<Backup[]>([]);
-	const [cursor, setCursor] = useState<string>();
 	const [settings, setSettings] = useState<BackupSettings>();
 	const [retention, setRetention] = useState<ArtifactRetention>();
 	const [error, setError] = useState("");
 	const [saving, setSaving] = useState(false);
 	const [loading, setLoading] = useState(true);
 	const [triggering, setTriggering] = useState(false);
-	const load = async (more = false) => {
+	// 备份记录走统一游标翻页；读取全部由下方 load() 驱动（挂载/轮询/触发后
+	// 刷新共用同一入口，且保持“先备份页、后设置”的原顺序约定）。
+	const list = useCursorPages<Backup>(
+		(cursor) =>
+			request<BackupPage>(
+				`/api/v1/backups?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+			).then((page) => {
+				// 清理失败健康信号只在首页响应里上报（原语义）。
+				if (!cursor && page.retentionHealth?.lastFailureAt)
+					setError(
+						`旧备份清理失败，将自动重试：${page.retentionHealth.errorDetail ?? "无详情"}`,
+					);
+				return { items: page.items ?? [], nextCursor: page.nextCursor };
+			}),
+		{ suspended, fallbackError: "暂时无法完成操作，请重试。", autoLoad: false },
+	);
+	const items = list.items;
+	const load = async () => {
 		try {
-			const page = await request<BackupPage>(
-				`/api/v1/backups?limit=50${more && cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
-			);
-			setItems((current) =>
-				more ? [...current, ...(page.items ?? [])] : (page.items ?? []),
-			);
-			setCursor(page.nextCursor);
+			await list.refresh();
 			const [nextSettings, nextRetention] = await Promise.all([
 				request<BackupSettings>("/api/v1/backups/settings"),
 				request<ArtifactRetention>("/api/v1/artifacts/retention-settings"),
 			]);
 			setSettings(nextSettings);
 			setRetention(nextRetention);
-			if (page.retentionHealth?.lastFailureAt)
-				setError(
-					`旧备份清理失败，将自动重试：${page.retentionHealth.errorDetail ?? "无详情"}`,
-				);
 		} catch (reason) {
 			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
 		} finally {
@@ -341,10 +347,13 @@ export function Backups({ suspended }: { suspended: boolean }) {
 						</TableRow>
 					))}
 				</DataTable>
-				<LoadMoreButton
-					loading={loading}
-					hasMore={Boolean(cursor)}
-					onLoadMore={() => void load(true)}
+				<CursorPagination
+					page={list.page}
+					hasPrev={list.hasPrev}
+					hasNext={list.hasNext}
+					loading={list.navigating}
+					onPrev={list.goPrev}
+					onNext={list.goNext}
 				/>
 			</section>
 		</section>

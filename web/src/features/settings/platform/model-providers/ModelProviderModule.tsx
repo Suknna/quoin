@@ -1,6 +1,7 @@
 /* eslint-disable react-hooks/exhaustive-deps -- Polling and abort seams intentionally key on the selected connection name only. */
 
-import { Plus } from "lucide-react";
+import { Badge } from '@/components/ui/badge';
+import { LoaderCircle, Play, Plus, Power, RotateCw } from "lucide-react";
 import {
 	type ComponentProps,
 	type FormEvent,
@@ -35,9 +36,34 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
+import {
+	Empty,
+	EmptyDescription,
+	EmptyHeader,
+	EmptyTitle,
+} from "@/components/ui/empty";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import {
+	Item,
+	ItemActions,
+	ItemContent,
+	ItemDescription,
+	ItemGroup,
+	ItemMedia,
+	ItemTitle,
+} from "@/components/ui/item";
+import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { DetailSheet } from "@/components/workbench/DetailSheet";
 import { PropertyList } from "@/components/workbench/PropertyList";
@@ -56,6 +82,13 @@ const probeStateLabels: Record<string, string> = {
 	Failed: "失败",
 	Cancelled: "已取消",
 	Interrupted: "已中断",
+};
+
+const probeOutcomeLabels: Record<string, string> = {
+	passed: "通过",
+	failed: "未通过",
+	cancelled: "已取消",
+	interrupted: "已中断",
 };
 
 type EditableConnectionType = ConnectionType;
@@ -192,7 +225,10 @@ function ConfigFacts({ config }: { config: Record<string, unknown> }) {
 		(key) => config[key] !== undefined && config[key] !== "",
 	);
 	const rest = Object.fromEntries(
-		Object.entries(config).filter(([key]) => !configFieldLabels[key]),
+		// type 已由抽屉标题表达，不再作为原始 JSON 回显。
+		Object.entries(config).filter(
+			([key]) => !configFieldLabels[key] && key !== "type",
+		),
 	);
 	return (
 		<>
@@ -437,50 +473,207 @@ function ConnectionDetail({
 		}
 	}
 	const mutationDisabled = readOnly || busy || suspended;
+	const probing = Boolean(attempt && !terminalStates.includes(attempt.state));
 	return (
-		<section className="grid gap-4">
+		<section className="flex flex-col gap-4">
 			{/* 抽屉头部（DetailSheet）负责名称、类型与版本标题。 */}
 			{error && <ErrorMessage>{error}</ErrorMessage>}
-			<div className="rounded-md border p-3 text-sm">
-				<strong>当前配置（非秘密）</strong>
-				<ConfigFacts config={selected.config} />
-			</div>
-			<div className="flex flex-wrap gap-2">
-				<Button
-					onClick={() => void probe()}
-					disabled={
-						mutationDisabled ||
-						Boolean(attempt && !terminalStates.includes(attempt.state))
-					}
-				>
-					{busy ? "处理中…" : "探测连接"}
-				</Button>
-				{attempt && !terminalStates.includes(attempt.state) && (
-					<Button
-						variant="outline"
-						onClick={() => void cancelProbe()}
-						disabled={mutationDisabled}
-					>
-						取消探测
-					</Button>
-				)}
-				<Button
-					variant="secondary"
-					onClick={() =>
-						setConfirmation(selected.enabled ? "disable" : "enable")
-					}
-					disabled={mutationDisabled}
-				>
-					{selected.enabled ? "停用连接" : "启用连接"}
-				</Button>
-				<Button
-					variant="outline"
-					onClick={() => setRotating((current) => !current)}
-					disabled={mutationDisabled}
-				>
-					轮换凭据
-				</Button>
-			</div>
+			<Tabs defaultValue="overview">
+				<TabsList variant="line" className="w-full">
+					<TabsTrigger value="overview">概览</TabsTrigger>
+					<TabsTrigger value="history">历史</TabsTrigger>
+				</TabsList>
+				<TabsContent value="overview" className="flex flex-col gap-6 pt-4">
+					<section className="flex flex-col gap-3">
+						<h3 className="text-sm font-medium">当前配置</h3>
+						<ConfigFacts config={selected.config} />
+					</section>
+					{attempt && (
+						<div className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm">
+							{probing && (
+								<LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+							)}
+							<span>
+								最近一次探测：{probeStateLabels[attempt.state] ?? attempt.state}
+								{attempt.terminationReason
+									? `（${attempt.terminationReason}）`
+									: ""}
+							</span>
+							{probing && (
+								<Button
+									className="ml-auto"
+									variant="ghost"
+									size="sm"
+									onClick={() => void cancelProbe()}
+									disabled={mutationDisabled}
+								>
+									取消探测
+								</Button>
+							)}
+						</div>
+					)}
+					<Separator />
+					<section className="flex flex-col gap-3">
+						<h3 className="text-sm font-medium">操作</h3>
+						<ItemGroup>
+							<Item size="sm" className="px-0">
+								<ItemMedia variant="icon">
+									<Play aria-hidden="true" />
+								</ItemMedia>
+								<ItemContent>
+									<ItemTitle>探测连接</ItemTitle>
+									<ItemDescription>
+										启用前需一次通过的探测。
+									</ItemDescription>
+								</ItemContent>
+								<ItemActions>
+									<Button
+										size="sm"
+										variant="outline"
+										onClick={() => void probe()}
+										disabled={mutationDisabled || probing}
+									>
+										探测连接
+									</Button>
+								</ItemActions>
+							</Item>
+							<Item size="sm" className="px-0">
+								<ItemMedia variant="icon">
+									<Power aria-hidden="true" />
+								</ItemMedia>
+								<ItemContent>
+									<ItemTitle>
+										{selected.enabled ? "停用连接" : "启用连接"}
+									</ItemTitle>
+									{!selected.enabled && (
+										<ItemDescription>
+											需当前配置与凭据代次的已通过探测。
+										</ItemDescription>
+									)}
+								</ItemContent>
+								<ItemActions>
+									<Button
+										size="sm"
+										variant="outline"
+										onClick={() =>
+											setConfirmation(selected.enabled ? "disable" : "enable")
+										}
+										disabled={mutationDisabled}
+									>
+										{selected.enabled ? "停用连接" : "启用连接"}
+									</Button>
+								</ItemActions>
+							</Item>
+							<Item size="sm" className="px-0">
+								<ItemMedia variant="icon">
+									<RotateCw aria-hidden="true" />
+								</ItemMedia>
+								<ItemContent>
+									<ItemTitle>轮换凭据</ItemTitle>
+								</ItemContent>
+								<ItemActions>
+									<Button
+										size="sm"
+										variant="outline"
+										onClick={() => setRotating(true)}
+										disabled={mutationDisabled}
+									>
+										轮换凭据
+									</Button>
+								</ItemActions>
+							</Item>
+						</ItemGroup>
+					</section>
+				</TabsContent>
+				<TabsContent value="history" className="flex flex-col gap-6 pt-4">
+					<section className="flex flex-col gap-3">
+						<h3 className="text-sm font-medium">探测历史</h3>
+						{results.length === 0 ? (
+							<p className="text-sm text-muted-foreground">尚无探测记录。</p>
+						) : (
+							<ItemGroup>
+								{results.map((result) => (
+									<Item key={result.id} size="sm" className="px-0">
+										<ItemContent>
+											<ItemTitle className="flex items-center gap-2">
+												<Badge
+													variant={
+														result.outcome === "passed"
+															? "secondary"
+															: "destructive"
+													}
+												>
+													{probeOutcomeLabels[result.outcome] ?? result.outcome}
+												</Badge>
+												<span className="text-xs tabular-nums text-muted-foreground">
+													{formatDateTime(result.finishedAt)}
+												</span>
+											</ItemTitle>
+											<ItemDescription>
+												revision {result.connectionRevisionId} · generation{" "}
+												{result.credentialGenerationId}
+											</ItemDescription>
+											{Object.keys(result.details).length > 0 && (
+												<PropertyList
+													mono
+													className="mt-1"
+													entries={Object.entries(result.details).map(
+														([key, value]) => ({
+															label: key,
+															value:
+																typeof value === "string"
+																	? value
+																	: JSON.stringify(value),
+														}),
+													)}
+												/>
+											)}
+										</ItemContent>
+									</Item>
+								))}
+							</ItemGroup>
+						)}
+					</section>
+					<Separator />
+					<section className="flex flex-col gap-3">
+						<h3 className="text-sm font-medium">
+							配置版本（{selected.revisionCount}）
+						</h3>
+						{revisions.map((revision) => (
+							<div
+								key={revision.id}
+								className="rounded-lg border px-3 py-2 text-sm"
+							>
+								<div className="flex items-center gap-2">
+									<span className="font-medium">#{revision.revisionSeq}</span>
+									<span className="text-xs tabular-nums text-muted-foreground">
+										{formatDateTime(revision.createdAt)}
+									</span>
+								</div>
+								<ConfigFacts config={revision.config} />
+							</div>
+						))}
+					</section>
+					<section className="flex flex-col gap-3">
+						<h3 className="text-sm font-medium">
+							凭据代次（{selected.generationCount}）
+						</h3>
+						{generations.map((generation) => (
+							<div key={generation.id} className="flex items-center gap-2 text-sm">
+								<span className="font-medium">#{generation.generationSeq}</span>
+								<span className="text-xs tabular-nums text-muted-foreground">
+									{formatDateTime(generation.createdAt)}
+								</span>
+								{generation.createdBy && (
+									<span className="text-xs text-muted-foreground">
+										· 创建者 {generation.createdBy}
+									</span>
+								)}
+							</div>
+						))}
+					</section>
+				</TabsContent>
+			</Tabs>
 			<AlertDialog
 				open={Boolean(confirmation)}
 				onOpenChange={(open) => {
@@ -507,89 +700,32 @@ function ConnectionDetail({
 					</AlertDialogFooter>
 				</AlertDialogContent>
 			</AlertDialog>
-			{rotating && (
-				<form className="grid gap-4 rounded-md border p-4" onSubmit={rotate}>
-					<div>
-						<h3 className="font-medium">轮换凭据</h3>
-						<p className="text-sm text-muted-foreground">
+			{/* 低频表单收进对话框（与修改密码一致），不再内嵌可折叠表单块。 */}
+			<Dialog open={rotating} onOpenChange={setRotating}>
+				<DialogContent>
+					<DialogHeader>
+						<DialogTitle>轮换凭据</DialogTitle>
+						<DialogDescription>
 							字段名称和创建时相同；秘密不会回显，必须重新提供。
-						</p>
-					</div>
-					<ConnectionFields
-						type={editableType}
-						value={rotationFields}
-						onChange={(field, next) =>
-							setRotationFields((current) => ({ ...current, [field]: next }))
-						}
-						disabled={mutationDisabled}
-					/>
-					<Button type="submit" disabled={mutationDisabled}>
-						确认轮换
-					</Button>
-				</form>
-			)}
-			{attempt && (
-				<div className="rounded-md bg-muted p-3 text-sm">
-					探测 {attempt.id.slice(0, 8)}：
-					{probeStateLabels[attempt.state] ?? attempt.state}
-					{attempt.terminationReason ? `（${attempt.terminationReason}）` : ""}
-				</div>
-			)}
-			<div className="grid gap-3 md:grid-cols-2">
-				<div className="rounded-md border p-3 text-sm">
-					<strong>配置 Revisions（{selected.revisionCount}）</strong>
-					{revisions.map((revision) => (
-						<div key={revision.id} className="mt-2 border-t pt-2">
-							#{revision.revisionSeq} · {formatDateTime(revision.createdAt)}
-							<ConfigFacts config={revision.config} />
-						</div>
-					))}
-				</div>
-				<div className="rounded-md border p-3 text-sm">
-					<strong>凭据 Generations（{selected.generationCount}）</strong>
-					{generations.map((generation) => (
-						<div key={generation.id} className="mt-2 border-t pt-2">
-							#{generation.generationSeq} ·{" "}
-							{formatDateTime(generation.createdAt)}
-							{generation.createdBy ? ` · 创建者 ${generation.createdBy}` : ""}
-						</div>
-					))}
-				</div>
-			</div>
-			{results.length > 0 && (
-				<div className="rounded-md border p-3 text-sm">
-					<strong>探测历史</strong>
-					{results.map((result) => (
-						<div key={result.id} className="mt-2 border-t pt-2">
-							<div>
-								{result.outcome} · {result.id}
-							</div>
-							<div className="text-muted-foreground">
-								完成于 {result.finishedAt} · revision{" "}
-								{result.connectionRevisionId} · generation{" "}
-								{result.credentialGenerationId} · digest {result.resultDigest}
-							</div>
-							{Object.keys(result.details).length > 0 ? (
-								<PropertyList
-									mono
-									className="mt-1"
-									entries={Object.entries(result.details).map(
-										([key, value]) => ({
-											label: key,
-											value:
-												typeof value === "string"
-													? value
-													: JSON.stringify(value),
-										}),
-									)}
-								/>
-							) : (
-								<p className="mt-1 text-muted-foreground">无详细信息</p>
-							)}
-						</div>
-					))}
-				</div>
-			)}
+						</DialogDescription>
+					</DialogHeader>
+					<form className="flex flex-col gap-4" onSubmit={rotate}>
+						<ConnectionFields
+							type={editableType}
+							value={rotationFields}
+							onChange={(field, next) =>
+								setRotationFields((current) => ({ ...current, [field]: next }))
+							}
+							disabled={mutationDisabled}
+						/>
+						<DialogFooter>
+							<Button type="submit" disabled={mutationDisabled}>
+								确认轮换
+							</Button>
+						</DialogFooter>
+					</form>
+				</DialogContent>
+			</Dialog>
 		</section>
 	);
 }
@@ -605,11 +741,13 @@ export function ModelProviderPage({
 }: WorkspaceModuleProps) {
 	const [connections, setConnections] = useState<ConnectionSummaryView[]>([]);
 	const [selected, setSelected] = useState<ConnectionDetailView>();
+	const [primaryDetail, setPrimaryDetail] = useState<ConnectionDetailView>();
 	const [maintenance, setMaintenance] = useState(false);
 	const [error, setError] = useState("");
 	const [loading, setLoading] = useState(true);
 	const [detailLoading, setDetailLoading] = useState(false);
 	const detailController = useRef<AbortController | undefined>(undefined);
+	const primaryController = useRef<AbortController | undefined>(undefined);
 	const refreshing = useRef(false);
 	const readOnly = user.role !== "admin" || maintenance || suspended;
 	const suffix = "/settings/platform/model-providers";
@@ -617,6 +755,12 @@ export function ModelProviderPage({
 		? route.slice(suffix.length + 1)
 		: undefined;
 	const isNew = route === `${suffix}/new` || route.startsWith(`${suffix}/new?`);
+	// 运行时（inspection/analysis/investigation/embedding）永远只消费最近启用
+	// 的一个提供方（LIMIT 1），页面语义与之一致：主面板即当前提供方。
+	const primary =
+		connections.find((item) => item.enabled && !item.revalidationRequired) ??
+		connections[0];
+	const others = connections.filter((item) => item.name !== primary?.name);
 	async function load() {
 		if (refreshing.current) return;
 		refreshing.current = true;
@@ -654,9 +798,34 @@ export function ModelProviderPage({
 			if (detailController.current === controller) setDetailLoading(false);
 		}
 	}
+	async function loadPrimaryDetail(name: string) {
+		primaryController.current?.abort();
+		const controller = new AbortController();
+		primaryController.current = controller;
+		try {
+			const next = await workbenchApi.fetchConnection(name, controller.signal);
+			if (!controller.signal.aborted) setPrimaryDetail(next);
+		} catch (reason) {
+			if (reason instanceof DOMException && reason.name === "AbortError")
+				return;
+			if (!controller.signal.aborted)
+				setError(messageOf(reason, "无法读取连接详情。"));
+		}
+	}
 	useEffect(() => {
 		void load();
 	}, []);
+	// 当前提供方的详情直接上页；名称变化才重取，操作内的状态流转由
+	// ConnectionDetail 的 onUpdate 负责同步。
+	const primaryName = primary?.name;
+	useEffect(() => {
+		if (!primaryName) {
+			primaryController.current?.abort();
+			setPrimaryDetail(undefined);
+			return;
+		}
+		void loadPrimaryDetail(primaryName);
+	}, [primaryName]);
 	useEffect(() => {
 		if (!selectedName || isNew) {
 			detailController.current?.abort();
@@ -665,20 +834,35 @@ export function ModelProviderPage({
 			return;
 		}
 		try {
-			void chooseByName(decodeURIComponent(selectedName));
+			const name = decodeURIComponent(selectedName);
+			// 当前提供方已在主面板内联展示，深链不再起抽屉、也不重复取详情。
+			if (name === primaryName) {
+				detailController.current?.abort();
+				setSelected(undefined);
+				setDetailLoading(false);
+				return;
+			}
+			void chooseByName(name);
 		} catch {
 			setError("连接地址无效。");
 		}
-	}, [route]);
+	}, [route, primaryName]);
 	usePolling(() => void load(), 15_000, !suspended);
-	useEffect(() => () => detailController.current?.abort(), []);
+	useEffect(
+		() => () => {
+			detailController.current?.abort();
+			primaryController.current?.abort();
+		},
+		[],
+	);
 	const choose = (connection: ConnectionSummaryView) =>
 		navigate(`${suffix}/${encodeURIComponent(connection.name)}`);
 	const update = (connection: ConnectionSummaryView) => {
 		setConnections((items) =>
 			items.map((item) => (item.name === connection.name ? connection : item)),
 		);
-		void chooseByName(connection.name);
+		if (connection.name === primaryName) void loadPrimaryDetail(connection.name);
+		else void chooseByName(connection.name);
 	};
 	return (
 		<section className="space-y-4">
@@ -686,7 +870,7 @@ export function ModelProviderPage({
 				<div>
 					<h2 className="text-xl font-semibold">模型提供方</h2>
 					<p className="text-sm text-muted-foreground">
-						管理 AI 对话与知识库使用的模型接入、探测验证与凭据轮换。
+						管理 AI 对话与知识库使用的模型接入与凭据。
 					</p>
 				</div>
 				<Button
@@ -720,46 +904,110 @@ export function ModelProviderPage({
 				<ModelProviderEditor
 					onCreated={(connection) => {
 						setConnections((items) => [...items, connection]);
+						// 新建的提供方尚未启用：已有生效提供方时进“其他”抽屉，
+						// 首个提供方则直接成为主面板。
 						choose(connection);
 					}}
 					readOnly={readOnly}
 					suspended={suspended}
 				/>
+			) : !primary ? (
+				<Empty>
+					<EmptyHeader>
+						<EmptyTitle>尚未配置模型提供方</EmptyTitle>
+						<EmptyDescription>
+							创建后需探测通过并启用，AI 对话与知识库才能使用。
+						</EmptyDescription>
+					</EmptyHeader>
+					<Button
+						variant="outline"
+						size="sm"
+						onClick={() => navigate(`${suffix}/new`)}
+						disabled={readOnly}
+					>
+						<Plus /> 新建模型提供方
+					</Button>
+				</Empty>
 			) : (
 				<>
-					<EntityList
-						items={connections.map((connection) => ({
-							id: connection.name,
-							title: connection.name,
-							badge: connection.revalidationRequired
-								? { text: "需要重新验证", variant: "destructive" as const }
-								: connection.enabled
-									? undefined
-									: { text: "未启用", variant: "secondary" as const },
-						}))}
-						columns={["title", "status"]}
-						selectedId={selected?.name}
-						onSelect={(row) => {
-							const connection = connections.find(
-								(item) => item.name === row.id,
-							);
-							if (connection) choose(connection);
-						}}
-						loading={loading}
-						loadingLabel="正在读取模型提供方"
-						emptyTitle="尚无可管理模型提供方。"
-					/>
-					{/* 详情是右侧抽屉（与告警一致）；新建保留为面包屑页。 */}
-					{selected && (
+					{/* 当前提供方：详情直接上页，不经列表 + 抽屉两跳。 */}
+					{primaryDetail ? (
+						<>
+							<div className="flex flex-wrap items-center gap-2">
+								<h3 className="text-base font-semibold">
+									{primaryDetail.name}
+								</h3>
+								<Badge
+									variant={primaryDetail.enabled ? "secondary" : "outline"}
+								>
+									{primaryDetail.enabled ? "已启用" : "未启用"}
+								</Badge>
+								{primaryDetail.revalidationRequired && (
+									<Badge variant="destructive">需要重新验证</Badge>
+								)}
+								<span className="text-xs tabular-nums text-muted-foreground">
+									版本 {primaryDetail.rowVersion}
+								</span>
+							</div>
+							<ConnectionDetail
+								key={primaryDetail.name}
+								selected={primaryDetail}
+								onUpdate={update}
+								onRefresh={() => void loadPrimaryDetail(primaryDetail.name)}
+								readOnly={readOnly}
+								suspended={suspended}
+							/>
+						</>
+					) : (
+						<div
+							className="flex flex-col gap-3"
+							role="status"
+							aria-label="正在读取模型提供方详情"
+						>
+							<Skeleton className="h-24 w-full" />
+						</div>
+					)}
+					{others.length > 0 && (
+						<>
+							<Separator />
+							<section className="flex flex-col gap-3">
+								<h3 className="text-sm font-medium">
+									其他提供方（不生效，仅用于切换与回滚）
+								</h3>
+								<EntityList
+									items={others.map((connection) => ({
+										id: connection.name,
+										title: connection.name,
+										subtitle: connection.lastProbe
+											? `最近探测 ${probeOutcomeLabels[connection.lastProbe.outcome] ?? connection.lastProbe.outcome} · ${formatDateTime(connection.lastProbe.finishedAt)}`
+											: "尚未探测",
+										badge: connection.revalidationRequired
+											? { text: "需要重新验证", variant: "destructive" as const }
+											: connection.enabled
+												? undefined
+												: { text: "未启用", variant: "secondary" as const },
+									}))}
+									columns={["title", "subtitle", "status"]}
+									onSelect={(row) => {
+										const connection = connections.find(
+											(item) => item.name === row.id,
+										);
+										if (connection) choose(connection);
+									}}
+									loading={false}
+									loadingLabel="正在读取模型提供方"
+									emptyTitle=""
+								/>
+							</section>
+						</>
+					)}
+					{/* 非当前提供方的详情仍是右侧抽屉；当前提供方已在页面上。 */}
+					{selected && selected.name !== primary?.name && (
 						<DetailSheet
 							open
 							onClose={() => navigate(suffix)}
 							title={selected.name}
-							description={`${
-								selected.type === "model_provider"
-									? "模型提供方"
-									: "Thanos"
-							} · ${selected.enabled ? "已启用" : "未启用"} · 版本 ${selected.rowVersion}`}
+							description={`模型提供方 · ${selected.enabled ? "已启用" : "未启用"} · 版本 ${selected.rowVersion}`}
 						>
 							<div className="min-h-0 flex-1 overflow-y-auto">
 								<div className="p-4 sm:p-6">

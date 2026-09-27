@@ -11,7 +11,7 @@ import {
 import { TableCell, TableRow } from "@/components/ui/table";
 import { DataTable } from "@/components/workbench/DataTable";
 import { ErrorRetry } from "@/components/workbench/ErrorRetry";
-import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { CursorPagination } from "@/components/workbench/CursorPagination";
 import { api, batchStateLabels, type ImportBatchSummary } from "../api";
 import { formatDateTime, usePagedList } from "./shared";
 
@@ -77,7 +77,7 @@ export function ImportsPage({
 				onRetry={
 					suspended || !list.error || list.items.length > 0
 						? undefined
-						: () => void list.load()
+						: () => list.refresh()
 				}
 				emptyTitle="还没有导入批次"
 				emptyDescription="点击右上角“导入原文”,把现有文档批量搬进知识库。"
@@ -105,13 +105,16 @@ export function ImportsPage({
 				) : (
 					<ErrorRetry
 						message={list.error}
-						onRetry={() => void list.load(list.nextCursor)}
+						onRetry={list.retry}
 					/>
 				))}
-			<LoadMoreButton
-				loading={list.loadingMore}
-				hasMore={!suspended && Boolean(list.nextCursor)}
-				onLoadMore={() => void list.load(list.nextCursor)}
+			<CursorPagination
+				page={list.page}
+				hasPrev={list.hasPrev}
+				hasNext={!suspended && list.hasNext}
+				loading={list.navigating}
+				onPrev={list.goPrev}
+				onNext={list.goNext}
 			/>
 		</section>
 	);

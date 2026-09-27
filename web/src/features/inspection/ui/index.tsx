@@ -1,6 +1,7 @@
-import { LoadMoreButton } from "@/components/workbench/LoadMoreButton";
+import { CursorPagination } from "@/components/workbench/CursorPagination";
 /* eslint-disable react-refresh/only-export-components -- Domain view factories intentionally colocate lifecycle helpers with their route component. */
 
+import { useCursorPages } from '@/hooks/use-cursor-pages';
 import { LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
@@ -226,30 +227,32 @@ export function useInspectionsModule(
 	const editorPrefill: PlanEditorPrefill | undefined =
 		creatingPlan || editPlanKey ? hintPrefill : undefined;
 	const [plans, setPlans] = useState<InspectionPlan[]>([]);
-	const [runs, setRuns] = useState<InspectionRunSummary[]>([]);
- const [nextCursor,setNextCursor]=useState<string>();
- const [loadingMore,setLoadingMore]=useState(false);
 	const [planFilter, setPlanFilter] = useState("all");
 	const [loaded, setLoaded] = useState(false);
-	const [runsLoaded, setRunsLoaded] = useState(false);
 	const [chooserOpen, setChooserOpen] = useState(false);
 	const [chooserPlan, setChooserPlan] = useState("");
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [hintApplied, setHintApplied] = useState(false);
+	// 巡检记录走统一游标翻页；读取全部由下方 load() 驱动（路径返回、活跃
+	// 轮询、保存后刷新共用同一入口），故关掉 hook 的自动挂载加载。
+	const runsList = useCursorPages<InspectionRunSummary>(
+		(cursor) =>
+			listInspectionRuns({
+				cursor,
+				...(planFilter === "all" ? {} : { planKey: planFilter }),
+			}),
+		{
+			suspended: props.suspended,
+			fallbackError: "无法读取巡检记录。",
+			autoLoad: false,
+		},
+	);
+	const runs = runsList.items;
+	const { refresh: refreshRuns } = runsList;
 	// Runs and plans are independent reads: each settles and updates the UI on its
-	// own, so one hung or failing endpoint can never starve the other, and each
-	// loaded flag reflects its own read (a hung read must not masquerade as an
-	// authoritative empty range).
+	// own, so one hung or failing endpoint can never starve the other.
 	const load = useCallback(async () => {
-		const filter = planFilter === "all" ? {} : { planKey: planFilter };
-		const runsRead = listInspectionRuns(filter).then(
-			(page) => {
-				setRuns(page.items); setNextCursor(page.nextCursor);
-				setRunsLoaded(true);
-			},
-			(reason: unknown) => setError(messageOf(reason, "无法读取巡检记录。")),
-		);
 		const plansRead = listInspectionPlans().then(
 			(items) => {
 				setPlans(items);
@@ -258,13 +261,13 @@ export function useInspectionsModule(
 			(reason: unknown) => setError(messageOf(reason, "无法读取巡检计划。")),
 		);
 		// The wrapped reads never reject; awaiting them keeps save-reload callers in step.
-		await Promise.allSettled([runsRead, plansRead]);
-	}, [planFilter]);
+		await Promise.allSettled([refreshRuns(), plansRead]);
+	}, [refreshRuns]);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: path 是有意依赖——从编辑器或 Run 页返回概览时必须重新拉取计划与记录。
 	useEffect(() => {
 		const timer = window.setTimeout(() => void load(), 0);
 		return () => clearTimeout(timer);
-	}, [load, path]);
+	}, [load, path, planFilter]);
 	useEffect(() => {
 		if (props.suspended || !runs.some((run) => inspectionActive(run.state)))
 			return;
@@ -467,7 +470,7 @@ export function useInspectionsModule(
 					</Select>
 				</div>
 				<p className="text-sm text-muted-foreground">
-					每次运行生成一份不可修改的报告；点击记录查看详情。
+					每次运行生成一份不可修改的报告。
 				</p>
 				<EntityList
 					items={runs.map((run) => ({
@@ -487,13 +490,23 @@ export function useInspectionsModule(
 					columns={["title", "subtitle", "status", "time"]}
 					selectedId={runId}
 					onSelect={(item) => props.navigate(runRoute(item.run.id))}
-					loading={!runsLoaded}
+					loading={runsList.loading}
 					loadingLabel="正在读取巡检记录"
 					emptyTitle="没有巡检记录"
 				/>
- <LoadMoreButton hasMore={!!nextCursor} loading={loadingMore} onLoadMore={() => {
- setLoadingMore(true); void listInspectionRuns({cursor:nextCursor,...(planFilter === "all" ? {} : {planKey:planFilter})}).then(page => {setRuns(current => [...current,...page.items]);setNextCursor(page.nextCursor);}).catch(reason => setError(messageOf(reason,"无法读取巡检记录。"))).finally(() => setLoadingMore(false));
- }} />
+				{runsList.error && (
+					<Alert variant="destructive">
+						<AlertDescription>{runsList.error}</AlertDescription>
+					</Alert>
+				)}
+				<CursorPagination
+					page={runsList.page}
+					hasPrev={runsList.hasPrev}
+					hasNext={runsList.hasNext}
+					loading={runsList.navigating}
+					onPrev={runsList.goPrev}
+					onNext={runsList.goNext}
+				/>
 			</section>
 		</div>
 	);
@@ -544,7 +557,7 @@ export function useInspectionsModule(
 					? `${planName(runSummary.planKey)} · Run ${runSummary.id}`
 					: `Run ${runId}`
 			}
-			description="报告版本不可修改；关闭抽屉返回巡检概览。"
+			description="报告版本不可修改。"
 		>
 			<div className="min-h-0 flex-1 overflow-y-auto">
 				<div className="space-y-6 p-4 sm:p-6">
