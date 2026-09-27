@@ -4,6 +4,8 @@
 !go.mod
 !go.sum
 !cmd/
+!plugins/
+
 !internal/
 !deploy/
 !web/package.json
