@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -152,9 +153,31 @@ func TestHTTPListOwnContactsReturnsMaskedProjection(t *testing.T) {
 		t.Fatalf("unexpected masked contact %#v", item)
 	}
 
+	// The admin user-management surface reads the same masked projection for
+	// any user; plaintext targets never leave the server here either.
+	adminContacts := call("GET", "/api/v1/admin/users/"+fmt.Sprint(seedSession.User.ID)+"/contacts", nil, 200)
+	adminItems, ok := adminContacts["items"].([]any)
+	if !ok || len(adminItems) != 1 || adminItems[0].(map[string]any)["maskedTarget"] != "a***@example.test" {
+		t.Fatalf("unexpected admin contacts projection %#v", adminContacts)
+	}
+	if strings.Contains(mustJSON(t, adminContacts), "admin@example.test") {
+		t.Fatal("raw contact target leaked in admin contacts response")
+	}
+
+	// Operator sessions stop at the admin gate and never read contacts.
+	call("POST", "/api/v1/admin/users", map[string]any{
+		"clientCommandId": "cmd-operator-01", "username": "op-read", "displayName": "Op Read",
+		"password": "operator read passphrase 2026!",
+	}, 201)
+	call("POST", "/api/v1/auth/logout", nil, 204)
+	call("POST", "/api/v1/auth/login", map[string]any{"username": "op-read", "password": "operator read passphrase 2026!"}, 200)
+	call("PUT", "/api/v1/auth/password", map[string]any{"currentPassword": "operator read passphrase 2026!", "newPassword": "operator formal passphrase 2027!"}, 204)
+	call("GET", "/api/v1/admin/users/"+fmt.Sprint(seedSession.User.ID)+"/contacts", nil, 403)
+
 	// After logout the session is gone: anonymous reads are rejected with 401.
 	call("POST", "/api/v1/auth/logout", nil, 204)
 	call("GET", "/api/v1/auth/contacts", nil, 401)
+	call("GET", "/api/v1/admin/users/"+fmt.Sprint(seedSession.User.ID)+"/contacts", nil, 401)
 }
 
 func mustJSON(t *testing.T, value any) string {

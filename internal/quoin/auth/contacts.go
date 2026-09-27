@@ -153,6 +153,13 @@ func (service *Service) ListOwnContacts(ctx context.Context, session Session) ([
 	return listMaskedContacts(ctx, service.read(), session.User.ID)
 }
 
+// ListUserContacts returns the masked projection of any user's contacts for
+// the admin user-management surface (listUserContacts). Administrators see
+// the same masked shape users do; plaintext targets never leave the server.
+func (service *Service) ListUserContacts(ctx context.Context, userID int64) ([]MaskedContact, error) {
+	return listMaskedContacts(ctx, service.read(), userID)
+}
+
 // upsertContact assigns or re-activates one channel inside the caller's
 // transaction. A changed target clears verification and bumps the version so
 // every outstanding challenge for the old target stops verifying; a retired

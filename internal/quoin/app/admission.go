@@ -72,6 +72,7 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("resetUserPassword", http.MethodPost, "/api/v1/admin/users/{userId}/reset-password", operations.LevelAdmin, operations.KindCommand, "user"),
 		declaration("revokeUserSessions", http.MethodPost, "/api/v1/admin/users/{userId}/revoke-sessions", operations.LevelAdmin, operations.KindCommand, "user"),
 		declaration("setUserContacts", http.MethodPut, "/api/v1/admin/users/{userId}/contacts", operations.LevelAdmin, operations.KindCommand, "user"),
+		declaration("listUserContacts", http.MethodGet, "/api/v1/admin/users/{userId}/contacts", operations.LevelAdmin, operations.KindQuery, "user"),
 		declaration("listAuditEvents", http.MethodGet, "/api/v1/audit-events", operations.LevelAdmin, operations.KindQuery, "audit_event"),
 		declaration("getAuditSettings", http.MethodGet, "/api/v1/admin/audit-settings", operations.LevelAdmin, operations.KindQuery, "audit_settings"),
 		declaration("updateAuditSettings", http.MethodPatch, "/api/v1/admin/audit-settings", operations.LevelAdmin, operations.KindCommand, "audit_settings"),
