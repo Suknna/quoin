@@ -79,7 +79,7 @@ make web-typecheck web-lint web-test web-build
 make images
 ```
 
-`make images` 构建 `frontend`、`quoin`、`plinth`、`stele`，不启动服务。默认镜像名为 `quoin/<component>:v0.1.0`；镜像标签与构建参数见[镜像构建说明](docs/deployment.md#镜像构建)。发布、离线镜像和版本规则见[发布指南](docs/releasing.md)。
+`make images` 构建 `frontend`、`quoin`、`plinth`、`stele`，不启动服务。默认镜像名为 `quoin/<component>:v0.1.1`；镜像标签与构建参数见[镜像构建说明](docs/deployment.md#镜像构建)。发布、离线镜像和版本规则见[发布指南](docs/releasing.md)。
 
 ## 文档
 
