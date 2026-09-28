@@ -193,6 +193,9 @@ func resolveSourceThanosCall(t *testing.T, db *sql.DB, service *Service, attempt
 func newTestConnectionsService(t *testing.T, db *sql.DB) *connections.Service {
 	t.Helper()
 	service := connections.NewService(db, func() ([]byte, error) { return []byte(strings.Repeat("k", 32)), nil })
+	service.SetConnectionKinds(connections.NewStaticConnectionKinds(map[string][]string{
+		connections.TypePrometheus: nil, connections.TypeThanos: nil,
+	}))
 	reader, err := execution.OpenReadOnly(fixtureDBPath)
 	if err != nil {
 		t.Fatal(err)

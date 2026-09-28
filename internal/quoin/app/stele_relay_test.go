@@ -249,6 +249,9 @@ func newRelayHarness(t *testing.T) *relayTestHarness {
 	if err := connectionsService.SetReader(database.Reader); err != nil {
 		t.Fatal(err)
 	}
+	// ADR-0014: the relay harness resolves connection kinds through the same
+	// registry view the boot wiring installs (legacy metrics kinds enabled).
+	connectionsService.SetConnectionKinds(fixtureConnectionKinds())
 	// 探测契约源与生产装配一致（app.go 同款接线）。
 	connections.ProbeContractSource = func() string { return string(gencontracts.ConnectionProbesYAML) }
 	return &relayTestHarness{database: database, alerts: alertsService, connection: connectionsService}

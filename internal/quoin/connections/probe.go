@@ -122,6 +122,13 @@ func (service *Service) StartProbe(ctx context.Context, name string) (int64, err
 		if summary.Type == TypeModelProvider {
 			purposes = []string{"model_probe_chat", "model_probe_embedding"}
 		}
+		// The type's frozen probe action set must exist before the attempt is
+		// created (ADR-0014 fail-closed): a kind whose plugin declares no probe
+		// contract can never close a probe attempt, so starting one would strand
+		// the attempt outside every terminal write path.
+		if _, _, err := ActionSet(summary.Type); err != nil {
+			return probeStartResult{}, rejectionOf(ErrValidation, codeValidation, fmt.Sprintf("connection type %q has no frozen probe contract", summary.Type), 0)
+		}
 		for _, purpose := range purposes {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,created_at) VALUES(?,?,?,?,?,?)`, attemptID, purpose, summary.ID, summary.CurrentRevisionID, summary.CurrentGenerationID, now); err != nil {
 				return probeStartResult{}, err

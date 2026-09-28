@@ -168,6 +168,9 @@ func wireConnectionsReader(t *testing.T, db *sql.DB, service *connections.Servic
 func seedMetricsConnection(t *testing.T, db *sql.DB) {
 	t.Helper()
 	service := connections.NewService(db, func() ([]byte, error) { return make([]byte, 32), nil })
+	service.SetConnectionKinds(connections.NewStaticConnectionKinds(map[string][]string{
+		connections.TypePrometheus: nil, connections.TypeThanos: nil,
+	}))
 	wireConnectionsReader(t, db, service)
 	created, err := service.Create(commandContext(t), connections.CreateInput{
 		Name:          "fixture-metrics",
@@ -189,6 +192,9 @@ func seedMetricsConnection(t *testing.T, db *sql.DB) {
 func seedAlternateMetricsConnection(t *testing.T, db *sql.DB) {
 	t.Helper()
 	service := connections.NewService(db, func() ([]byte, error) { return make([]byte, 32), nil })
+	service.SetConnectionKinds(connections.NewStaticConnectionKinds(map[string][]string{
+		connections.TypePrometheus: nil, connections.TypeThanos: nil,
+	}))
 	wireConnectionsReader(t, db, service)
 	created, err := service.Create(commandContext(t), connections.CreateInput{
 		Name:          "alternate-metrics",

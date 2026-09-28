@@ -13,6 +13,7 @@ import (
 	"strconv"
 
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/plugins"
 
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/danielgtaylor/huma/v2"
@@ -38,43 +39,13 @@ type connectionConfigInput struct {
 	APIKey              string `json:"apiKey,omitempty"`
 }
 
-// splitConfig separates the non-secret projection from the secret carrier
-// per the frozen oneOf variants.
-func splitConfig(input connectionConfigInput) (nonSecret json.RawMessage, secret json.RawMessage, secretPresent bool, err error) {
-	switch input.Type {
-	case connections.TypePrometheus, connections.TypeThanos:
-		authType := input.AuthType
-		if authType == "" {
-			authType = "none"
-		}
-		projection, _ := json.Marshal(map[string]any{
-			"type": input.Type, "baseUrl": input.BaseURL,
-			"tlsCaPem": input.TLSCaPem, "tlsServerName": input.TLSServerName,
-			"tlsSkipVerify": input.TLSSkipVerify, "authType": authType,
-			"username": input.Username,
-		})
-		switch authType {
-		case "none":
-			if input.Username != "" || input.Password != "" || input.BearerToken != "" {
-				return nil, nil, false, errors.New("none authentication cannot include credentials")
-			}
-			return projection, nil, false, nil
-		case "basic":
-			if input.Username == "" || input.Password == "" || input.BearerToken != "" {
-				return nil, nil, false, errors.New("basic authentication requires username and password only")
-			}
-			secret, _ = json.Marshal(map[string]string{"type": input.Type, "username": input.Username, "password": input.Password})
-			return projection, secret, true, nil
-		case "bearer":
-			if input.Username != "" || input.Password != "" || input.BearerToken == "" {
-				return nil, nil, false, errors.New("bearer authentication requires bearerToken only")
-			}
-			secret, _ = json.Marshal(map[string]string{"type": input.Type, "bearerToken": input.BearerToken})
-			return projection, secret, true, nil
-		default:
-			return nil, nil, false, errors.New("metrics authType must be none, basic or bearer")
-		}
-	case connections.TypeModelProvider:
+// splitConfig separates the non-secret projection from the secret carrier.
+// The core-owned model_provider identity keeps its own variant; every other
+// type must resolve to a registry-declared trusted HTTP connection kind
+// (ADR-0014) and shares the bounded HTTP projection. Auth-mode membership is
+// re-verified inside the domain; unknown/revoked types are rejected here.
+func (application *apiServer) splitConfig(input connectionConfigInput) (nonSecret json.RawMessage, secret json.RawMessage, secretPresent bool, err error) {
+	if input.Type == connections.TypeModelProvider {
 		if input.APIKey == "" {
 			return nil, nil, false, errors.New("model provider requires an apiKey secret")
 		}
@@ -97,9 +68,53 @@ func splitConfig(input connectionConfigInput) (nonSecret json.RawMessage, secret
 		nonSecret, _ := json.Marshal(projection)
 		secret, _ := json.Marshal(map[string]string{"type": connections.TypeModelProvider, "apiKey": input.APIKey})
 		return nonSecret, secret, true, nil
-	default:
-		return nil, nil, false, errors.New("connection.type must be prometheus, thanos, kubernetes or model_provider")
 	}
+	// Every other type must be a trusted HTTP connection kind; the domain
+	// re-verifies the declaration (revoked plugin, auth-mode membership).
+	if _, ok := application.httpConnectionKind(input.Type); !ok {
+		return nil, nil, false, errors.New("connection.type is not an available connection kind")
+	}
+	authType := input.AuthType
+	if authType == "" {
+		authType = "none"
+	}
+	projection, _ := json.Marshal(map[string]any{
+		"type": input.Type, "baseUrl": input.BaseURL,
+		"tlsCaPem": input.TLSCaPem, "tlsServerName": input.TLSServerName,
+		"tlsSkipVerify": input.TLSSkipVerify, "authType": authType,
+		"username": input.Username,
+	})
+	switch authType {
+	case "none":
+		if input.Username != "" || input.Password != "" || input.BearerToken != "" {
+			return nil, nil, false, errors.New("none authentication cannot include credentials")
+		}
+		return projection, nil, false, nil
+	case "basic":
+		if input.Username == "" || input.Password == "" || input.BearerToken != "" {
+			return nil, nil, false, errors.New("basic authentication requires username and password only")
+		}
+		secret, _ = json.Marshal(map[string]string{"type": input.Type, "username": input.Username, "password": input.Password})
+		return projection, secret, true, nil
+	case "bearer":
+		if input.Username != "" || input.Password != "" || input.BearerToken == "" {
+			return nil, nil, false, errors.New("bearer authentication requires bearerToken only")
+		}
+		secret, _ = json.Marshal(map[string]string{"type": input.Type, "bearerToken": input.BearerToken})
+		return projection, secret, true, nil
+	default:
+		return nil, nil, false, errors.New("http authType must be none, basic or bearer")
+	}
+}
+
+// httpConnectionKind resolves the trusted HTTP connection declaration for a
+// connection type through the boot-wired registry view. Unwired views (and
+// unknown or revoked kinds) fail closed.
+func (application *apiServer) httpConnectionKind(connectionType string) (plugins.HTTPConnectionKind, bool) {
+	if application.connectionKinds == nil {
+		return plugins.HTTPConnectionKind{}, false
+	}
+	return application.connectionKinds.LookupHTTPConnectionKind(connectionType)
 }
 
 func connectionError(err error) error {
@@ -238,7 +253,7 @@ func (application *apiServer) createConnection(ctx context.Context, input *struc
 	if err != nil {
 		return nil, err
 	}
-	nonSecret, secret, secretPresent, splitErr := splitConfig(input.Body.Connection)
+	nonSecret, secret, secretPresent, splitErr := application.splitConfig(input.Body.Connection)
 	if splitErr != nil {
 		return nil, problemUnprocessable("连接配置不完整：" + splitErr.Error())
 	}
@@ -764,7 +779,7 @@ func (application *apiServer) rotateConnectionCredential(ctx context.Context, in
 	if err != nil {
 		return nil, err
 	}
-	nonSecret, secret, secretPresent, splitErr := splitConfig(input.Body.Connection)
+	nonSecret, secret, secretPresent, splitErr := application.splitConfig(input.Body.Connection)
 	if splitErr != nil {
 		return nil, problemUnprocessable("连接配置不完整：" + splitErr.Error())
 	}

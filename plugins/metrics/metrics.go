@@ -806,6 +806,8 @@ func init() {
 		ConfigSchema:        metricsConfigSchema("prometheus"),
 		DefaultEnabled:      true,
 		ConnectionKind:      "prometheus",
+		ConnectionTransport: plugins.ConnectionTransportHTTP,
+		ConnectionAuthModes: []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
 		Tools:               metricsToolProvider{id: plugins.PrometheusID},
 	})
 	plugins.Register(plugins.Plugin{
@@ -818,6 +820,8 @@ func init() {
 		ConfigSchema:        metricsConfigSchema("thanos"),
 		DefaultEnabled:      true,
 		ConnectionKind:      "thanos",
+		ConnectionTransport: plugins.ConnectionTransportHTTP,
+		ConnectionAuthModes: []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
 		Tools:               metricsToolProvider{id: plugins.ThanosID},
 	})
 }

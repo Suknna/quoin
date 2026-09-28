@@ -248,7 +248,9 @@ func newSourceObservationRecoveryFixture(t *testing.T) (*sql.DB, *RuntimeService
 	registry := plugins.NewRegistry()
 	if err := registry.Register(plugins.Plugin{
 		ID: "prometheus", Version: "1", DisplayName: "Prometheus", Description: "metrics source",
-		ConnectionKind: "prometheus", DefaultEnabled: true,
+		ConnectionKind: "prometheus", ConnectionTransport: plugins.ConnectionTransportHTTP,
+		ConnectionAuthModes: []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
+		DefaultEnabled:      true,
 		DiscoverObjects: []plugins.DiscoverObject{
 			{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
 		},

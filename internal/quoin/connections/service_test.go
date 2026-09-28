@@ -53,6 +53,9 @@ func newService(t *testing.T) (*connections.Service, *sql.DB, string) {
 		return readKey(t, config.RootKeyFile)
 	})
 	service.SetReader(database.Reader)
+	// ADR-0014: every service test resolves connection kinds through a real
+	// frozen registry view declaring the two legacy metrics kinds.
+	service.SetConnectionKinds(fixtureConnectionKinds(t))
 	connections.SetReleaseVersion("v0.1.0-dev")
 	connections.ProbeContractSource = func() string { return "contract_version: 1" }
 	// The qualification/audit FKs reference real users; create the fixture
@@ -157,7 +160,10 @@ func TestEnvelopeRoundTripAndTamper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload.Thanos == nil || payload.Thanos.Password != "secret-password-1" {
+	// ADR-0014: new seals carry the shared HTTP carrier, so the legacy Thanos
+	// alias stays nil; the behavioral fact is that the grant path decrypts
+	// the exact sealed secret.
+	if payload.Metrics == nil || payload.Metrics.Password != "secret-password-1" || payload.Thanos != nil {
 		t.Fatalf("decrypted secret wrong: %+v", payload)
 	}
 	// Tamper with the ciphertext: must fail closed.

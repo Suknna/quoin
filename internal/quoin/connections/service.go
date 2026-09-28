@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/contract"
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/connections/modelprovider"
@@ -45,6 +46,54 @@ var (
 	ErrActiveConflict = errors.New("connection state conflicts with the request")
 	ErrSingleEnabled  = errors.New("another enabled connection of this type already exists")
 )
+
+// ConnectionKinds is the authorization seam between the connections domain
+// and the frozen plugin registry (ADR-0014): it reports which connection
+// types are trusted HTTP connection kinds and which bounded auth modes each
+// accepts. Production wires the registry view resolved against deployment
+// enablement; an unknown, reserved or revoked (disabled plugin) type yields
+// no declaration and every path fails closed. A nil seam closes all HTTP
+// kinds — only the core-owned model_provider identity stays valid.
+type ConnectionKinds interface {
+	LookupHTTPConnectionKind(connectionType string) (plugins.HTTPConnectionKind, bool)
+}
+
+// SetConnectionKinds injects the frozen registry's kind view. Boot wires it
+// once; it is not a runtime switch.
+func (service *Service) SetConnectionKinds(kinds ConnectionKinds) {
+	service.kinds = kinds
+}
+
+// NewStaticConnectionKinds returns a ConnectionKinds resolving exactly the
+// given kind → auth-mode table. It exists for tests and constrained hosts
+// that cannot link the plugin registry; production resolves through the
+// registry view so the frozen assembly stays the only authority. A nil mode
+// slice means the full bounded none/basic/bearer vocabulary.
+func NewStaticConnectionKinds(kinds map[string][]string) ConnectionKinds {
+	return staticConnectionKinds(kinds)
+}
+
+type staticConnectionKinds map[string][]string
+
+func (table staticConnectionKinds) LookupHTTPConnectionKind(connectionType string) (plugins.HTTPConnectionKind, bool) {
+	modes, ok := table[connectionType]
+	if !ok {
+		return plugins.HTTPConnectionKind{}, false
+	}
+	if modes == nil {
+		modes = []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer}
+	}
+	return plugins.HTTPConnectionKind{Kind: connectionType, Transport: plugins.ConnectionTransportHTTP, AuthModes: append([]string(nil), modes...)}, true
+}
+
+// httpKind resolves the trusted HTTP declaration for a connection type.
+// Unwired, or for unknown/revoked types, it fails closed.
+func (service *Service) httpKind(connectionType string) (plugins.HTTPConnectionKind, bool) {
+	if service.kinds == nil || connectionType == TypeModelProvider {
+		return plugins.HTTPConnectionKind{}, false
+	}
+	return service.kinds.LookupHTTPConnectionKind(connectionType)
+}
 
 // RowVersionError carries the authoritative connections.row_version.
 type RowVersionError struct {
@@ -99,6 +148,8 @@ type PostEnableHook func(ctx context.Context, tx execution.Executor, name string
 
 type Service struct {
 	db *sql.DB
+	// kinds is the injected plugin-registry kind seam (SetConnectionKinds).
+	kinds ConnectionKinds
 	// reader is the read seam for every query path; production injects the
 	// real read-only pool (SetReader). It defaults to the write pool until
 	// the deployment composition wires the dedicated reader.
@@ -150,8 +201,12 @@ func (service *Service) SetPostEnableInTx(hook PostEnableHook) {
 }
 
 // validateConfig checks the typed non-secret projection against the frozen
-// per-type shapes (DATA-CONN-005) and returns normalized JSON.
-func validateConfig(connectionType string, config json.RawMessage) (json.RawMessage, error) {
+// per-type shapes (DATA-CONN-005) and returns normalized JSON. The
+// model_provider identity keeps its core-owned contract; every other type
+// must resolve to a registry-declared trusted HTTP connection kind (ADR-0014)
+// and satisfies the shared bounded HTTP shape (baseUrl, closed TLS options,
+// one declared auth mode).
+func (service *Service) validateConfig(connectionType string, config json.RawMessage) (json.RawMessage, error) {
 	var document map[string]any
 	if err := json.Unmarshal(config, &document); err != nil {
 		return nil, fmt.Errorf("%w: config is not valid JSON", ErrValidation)
@@ -159,43 +214,7 @@ func validateConfig(connectionType string, config json.RawMessage) (json.RawMess
 	if kind, _ := document["type"].(string); kind != connectionType {
 		return nil, fmt.Errorf("%w: config type discriminator must be %q", ErrValidation, connectionType)
 	}
-	switch connectionType {
-	case TypePrometheus, TypeThanos:
-		baseURL, _ := document["baseUrl"].(string)
-		if baseURL == "" {
-			return nil, fmt.Errorf("%w: baseUrl is required", ErrValidation)
-		}
-		for _, field := range []string{"tlsCaPem", "tlsServerName"} {
-			if value, ok := document[field].(string); !ok && document[field] != nil {
-				return nil, fmt.Errorf("%w: %s must be a string", ErrValidation, field)
-			} else if ok && len(value) > 1<<20 {
-				return nil, fmt.Errorf("%w: %s too large", ErrValidation, field)
-			}
-		}
-		if _, ok := document["tlsSkipVerify"].(bool); !ok && document["tlsSkipVerify"] != nil {
-			return nil, fmt.Errorf("%w: tlsSkipVerify must be a boolean", ErrValidation)
-		}
-		authType, authTypePresent := document["authType"].(string)
-		username, usernamePresent := document["username"]
-		// Pre-authType Thanos revisions may retain an optional username without
-		// a password. Preserve their original no-auth behavior rather than
-		// inferring Basic Auth from the username alone. Public requests declare
-		// authType explicitly through the OpenAPI variant.
-		if authType == "" {
-			authType = "none"
-		}
-		if authType != "none" && authType != "basic" && authType != "bearer" {
-			return nil, fmt.Errorf("%w: authType must be none, basic or bearer", ErrValidation)
-		}
-		if authType == "basic" {
-			value, ok := username.(string)
-			if !usernamePresent || !ok || value == "" {
-				return nil, fmt.Errorf("%w: basic auth requires username", ErrValidation)
-			}
-		} else if authTypePresent && usernamePresent && username != "" {
-			return nil, fmt.Errorf("%w: username only applies to basic auth", ErrValidation)
-		}
-	case TypeModelProvider:
+	if connectionType == TypeModelProvider {
 		var provider contract.ModelProviderConfig
 		if err := json.Unmarshal(config, &provider); err != nil {
 			return nil, fmt.Errorf("%w: model provider config has invalid field types", ErrValidation)
@@ -211,8 +230,12 @@ func validateConfig(connectionType string, config json.RawMessage) (json.RawMess
 				return nil, fmt.Errorf("%w: embeddingModelId must be a non-empty string when configured", ErrValidation)
 			}
 		}
-	default:
-		return nil, fmt.Errorf("%w: unknown connection type", ErrValidation)
+	} else if declaration, ok := service.httpKind(connectionType); ok {
+		if err := validateHTTPKindConfig(declaration, document); err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, fmt.Errorf("%w: connection type %q is not an available connection kind", ErrValidation, connectionType)
 	}
 	// Reject credential material in the revision projection. Auth mode and
 	// basic username are safe to retain; the password, bearer token or API
@@ -227,6 +250,56 @@ func validateConfig(connectionType string, config json.RawMessage) (json.RawMess
 		return nil, err
 	}
 	return normalized, nil
+}
+
+// validateHTTPKindConfig checks the shared bounded HTTP connection shape
+// (DATA-CONN-005) against the registry declaration: baseUrl required, closed
+// TLS field types, and an authType inside the kind's declared modes. The
+// legacy omitted authType maps onto "none" — a kind that does not declare
+// "none" must receive an explicit mode.
+func validateHTTPKindConfig(declaration plugins.HTTPConnectionKind, document map[string]any) error {
+	baseURL, _ := document["baseUrl"].(string)
+	if baseURL == "" {
+		return fmt.Errorf("%w: baseUrl is required", ErrValidation)
+	}
+	for _, field := range []string{"tlsCaPem", "tlsServerName"} {
+		if value, ok := document[field].(string); !ok && document[field] != nil {
+			return fmt.Errorf("%w: %s must be a string", ErrValidation, field)
+		} else if ok && len(value) > 1<<20 {
+			return fmt.Errorf("%w: %s too large", ErrValidation, field)
+		}
+	}
+	if _, ok := document["tlsSkipVerify"].(bool); !ok && document["tlsSkipVerify"] != nil {
+		return fmt.Errorf("%w: tlsSkipVerify must be a boolean", ErrValidation)
+	}
+	authType, authTypePresent := document["authType"].(string)
+	username, usernamePresent := document["username"]
+	// Pre-authType Thanos revisions may retain an optional username without
+	// a password. Preserve their original no-auth behavior rather than
+	// inferring Basic Auth from the username alone. Public requests declare
+	// authType explicitly through the OpenAPI variant.
+	if authType == "" {
+		authType = plugins.AuthModeNone
+	}
+	declared := false
+	for _, mode := range declaration.AuthModes {
+		if mode == authType {
+			declared = true
+			break
+		}
+	}
+	if !declared {
+		return fmt.Errorf("%w: authType %q is not declared for connection kind %q", ErrValidation, authType, declaration.Kind)
+	}
+	if authType == plugins.AuthModeBasic {
+		value, ok := username.(string)
+		if !usernamePresent || !ok || value == "" {
+			return fmt.Errorf("%w: basic auth requires username", ErrValidation)
+		}
+	} else if authTypePresent && usernamePresent && username != "" {
+		return fmt.Errorf("%w: username only applies to basic auth", ErrValidation)
+	}
+	return nil
 }
 
 // validateSecret enforces the per-type secret carrier shape.
@@ -246,9 +319,26 @@ func validateSecret(connectionType string, secret []byte) error {
 
 type typedSecretJSON struct {
 	Type          string                   `json:"type"`
+	HTTP          *metricsSecretJSON       `json:"http,omitempty"`
 	Prometheus    *metricsSecretJSON       `json:"prometheus,omitempty"`
 	Thanos        *metricsSecretJSON       `json:"thanos,omitempty"`
 	ModelProvider *modelProviderSecretJSON `json:"model_provider,omitempty"`
+}
+
+// httpCredentialCarrier extracts the bounded HTTP credential from an opened
+// secret, preferring the shared HTTP carrier and falling back to the legacy
+// per-kind carriers of envelopes sealed before ADR-0014. Nil means the
+// secret carries no HTTP credential shape at all.
+func httpCredentialCarrier(secret *typedSecretJSON) *MetricsCredentialSecret {
+	if secret == nil {
+		return nil
+	}
+	for _, carrier := range []*metricsSecretJSON{secret.HTTP, secret.Prometheus, secret.Thanos} {
+		if carrier != nil {
+			return &MetricsCredentialSecret{Username: carrier.Username, Password: carrier.Password, BearerToken: carrier.BearerToken}
+		}
+	}
+	return nil
 }
 
 // metricsSecretJSON supports the closed metrics auth modes: no carrier for
@@ -261,13 +351,10 @@ type metricsSecretJSON struct {
 	BearerToken string `json:"bearerToken,omitempty"`
 }
 
-// validateMetricsCredential prevents programmatic callers from persisting a
+// validateHTTPCredential prevents programmatic callers from persisting a
 // credential mode that cannot produce the declared HTTP authentication. The
 // public adapter applies the same rules before this service boundary.
-func validateMetricsCredential(connectionType string, config, secret []byte) error {
-	if connectionType != TypePrometheus && connectionType != TypeThanos {
-		return nil
-	}
+func validateHTTPCredential(declaration plugins.HTTPConnectionKind, config, secret []byte) error {
 	var projection struct {
 		AuthType string `json:"authType"`
 		Username string `json:"username"`
@@ -291,12 +378,22 @@ func validateMetricsCredential(connectionType string, config, secret []byte) err
 	if projection.AuthType == "" {
 		return nil
 	}
+	declared := false
+	for _, mode := range declaration.AuthModes {
+		if mode == projection.AuthType {
+			declared = true
+			break
+		}
+	}
+	if !declared {
+		return fmt.Errorf("%w: authType %q is not declared for connection kind %q", ErrValidation, projection.AuthType, declaration.Kind)
+	}
 	switch projection.AuthType {
-	case "none":
+	case plugins.AuthModeNone:
 		if carrier.Username != "" || carrier.Password != "" || carrier.BearerToken != "" {
 			return fmt.Errorf("%w: no-auth metrics connection must not carry credentials", ErrValidation)
 		}
-	case "basic":
+	case plugins.AuthModeBasic:
 		// A pre-authType direct service fixture may contain the historical
 		// username-only Thanos shape. HTTP requests cannot reach this branch
 		// because splitConfig requires password; retain it only so an existing
@@ -304,12 +401,10 @@ func validateMetricsCredential(connectionType string, config, secret []byte) err
 		if projection.Username == "" || carrier.BearerToken != "" || (carrier.Username != "" && carrier.Username != projection.Username) {
 			return fmt.Errorf("%w: basic metrics credentials are incomplete", ErrValidation)
 		}
-	case "bearer":
+	case plugins.AuthModeBearer:
 		if carrier.BearerToken == "" || carrier.Username != "" || carrier.Password != "" {
 			return fmt.Errorf("%w: bearer metrics credentials are incomplete", ErrValidation)
 		}
-	default:
-		return fmt.Errorf("%w: unsupported metrics auth type", ErrValidation)
 	}
 	return nil
 }
@@ -339,15 +434,17 @@ func (service *Service) Create(ctx context.Context, input CreateInput, createdBy
 		if err := requireActor(ctx, createdBy); err != nil {
 			return Summary{}, execution.Changed, err
 		}
-		config, err := validateConfig(input.Type, input.NonSecretJSON)
+		config, err := service.validateConfig(input.Type, input.NonSecretJSON)
 		if err != nil {
 			return Summary{}, execution.Changed, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
 		}
 		if err := validateSecret(input.Type, input.Secret); err != nil {
 			return Summary{}, execution.Changed, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
 		}
-		if err := validateMetricsCredential(input.Type, config, input.Secret); err != nil {
-			return Summary{}, execution.Changed, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
+		if declaration, ok := service.httpKind(input.Type); ok {
+			if err := validateHTTPCredential(declaration, config, input.Secret); err != nil {
+				return Summary{}, execution.Changed, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
+			}
 		}
 		now := timestampOf(service.now)
 		var bindingRevision int
@@ -400,10 +497,10 @@ func (service *Service) insertGeneration(ctx context.Context, tx execution.Execu
 	}
 	var envelope *envelopeWire
 	if len(secret) == 0 {
-		// A model provider requires an API key. Prometheus-compatible
-		// connections may use no auth, but still seal an explicit empty
-		// carrier to preserve independent, auditable credential generations.
-		if connectionType != TypePrometheus && connectionType != TypeThanos {
+		// A model provider requires an API key. Trusted HTTP connection kinds
+		// may use no auth, but still seal an explicit empty carrier to
+		// preserve independent, auditable credential generations.
+		if _, isHTTP := service.httpKind(connectionType); !isHTTP {
 			return 0, fmt.Errorf("%w: %s requires a secret", ErrValidation, connectionType)
 		}
 		secret = []byte("{}")
@@ -431,14 +528,13 @@ func typedSecretFromRaw(connectionType string, secret []byte) *typedSecretJSON {
 	var carrier map[string]string
 	_ = json.Unmarshal(secret, &carrier)
 	payload := &typedSecretJSON{Type: connectionType}
-	switch connectionType {
-	case TypePrometheus:
-		payload.Prometheus = &metricsSecretJSON{Username: carrier["username"], Password: carrier["password"], BearerToken: carrier["bearerToken"]}
-	case TypeThanos:
-		payload.Thanos = &metricsSecretJSON{Username: carrier["username"], Password: carrier["password"], BearerToken: carrier["bearerToken"]}
-	case TypeModelProvider:
+	if connectionType == TypeModelProvider {
 		payload.ModelProvider = &modelProviderSecretJSON{APIKey: carrier["apiKey"]}
+		return payload
 	}
+	// Every trusted HTTP connection kind seals the shared HTTP carrier
+	// (ADR-0014); the envelope type and its AAD retain the kind identity.
+	payload.HTTP = &metricsSecretJSON{Username: carrier["username"], Password: carrier["password"], BearerToken: carrier["bearerToken"]}
 	return payload
 }
 
@@ -547,37 +643,40 @@ func (service *Service) Enable(ctx context.Context, name string, expectedRowVers
 			// runner still records the command as the durable fact.
 			return getSummaryOn(ctx, tx, name)
 		}
-		if connectionType == TypeModelProvider || connectionType == TypePrometheus || connectionType == TypeThanos {
-			if qualifiedProbeResultID == 0 {
-				return Summary{}, rejectionOf(ErrValidation, codeValidation, fmt.Sprintf("%s enable requires an explicit passed probe result", connectionType), id)
-			}
-			var probeType string
-			var outcome string
-			var probeRevisionID, probeGenerationID int64
-			var currentRevisionID, currentGenerationID int64
-			if err := tx.QueryRowContext(ctx, `SELECT connection_type,outcome,connection_revision_id,credential_generation_id FROM connection_probe_results WHERE id=?`, qualifiedProbeResultID).Scan(&probeType, &outcome, &probeRevisionID, &probeGenerationID); err != nil {
-				return Summary{}, rejectionOf(ErrValidation, codeValidation, "unknown probe result", id)
-			}
-			if err := tx.QueryRowContext(ctx, `SELECT current_revision_id,current_credential_generation_id FROM connections WHERE id=?`, id).Scan(&currentRevisionID, &currentGenerationID); err != nil {
-				return Summary{}, err
-			}
-			// Rotation deliberately leaves an already enabled metrics connection in
-			// revalidation-required state. A passed real probe over its new immutable
-			// revision/generation pair is the event that clears that state; rejecting
-			// it because the flag is set would make recovery impossible. Old results
-			// cannot qualify because their frozen pair no longer matches.
-			if probeType != connectionType || outcome != "passed" || probeRevisionID != currentRevisionID || probeGenerationID != currentGenerationID {
-				return Summary{}, rejectionOf(ErrActiveConflict, codeActiveConflict, "probe result does not close onto the current pair", id)
-			}
-			// The explicit qualification event must close onto the row version
-			// the enabling UPDATE produces (trigger checks
-			// q.enabled_row_version = NEW.row_version AFTER the update): insert
-			// it first against row_version+1, then advance the row in the same
-			// transaction. Metrics and model providers share this immutable proof;
-			// type-specific SQL closure verifies the matching real probe child.
-			if _, err := tx.ExecContext(ctx, `INSERT INTO connection_enable_qualifications(connection_id,enabled_row_version,probe_result_id,created_by,created_at) VALUES(?,?,?,?,?)`, id, rowVersion+1, qualifiedProbeResultID, createdBy, timestampOf(service.now)); err != nil {
-				return Summary{}, err
-			}
+		// Every connection identity qualifies through an explicit passed real
+		// probe (the core-owned model provider included): enablement is never
+		// granted without immutable proof over the current pair. A type whose
+		// plugin declaration vanished still lands here — fail closed, never
+		// enable blind.
+		if qualifiedProbeResultID == 0 {
+			return Summary{}, rejectionOf(ErrValidation, codeValidation, fmt.Sprintf("%s enable requires an explicit passed probe result", connectionType), id)
+		}
+		var probeType string
+		var outcome string
+		var probeRevisionID, probeGenerationID int64
+		var currentRevisionID, currentGenerationID int64
+		if err := tx.QueryRowContext(ctx, `SELECT connection_type,outcome,connection_revision_id,credential_generation_id FROM connection_probe_results WHERE id=?`, qualifiedProbeResultID).Scan(&probeType, &outcome, &probeRevisionID, &probeGenerationID); err != nil {
+			return Summary{}, rejectionOf(ErrValidation, codeValidation, "unknown probe result", id)
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT current_revision_id,current_credential_generation_id FROM connections WHERE id=?`, id).Scan(&currentRevisionID, &currentGenerationID); err != nil {
+			return Summary{}, err
+		}
+		// Rotation deliberately leaves an already enabled metrics connection in
+		// revalidation-required state. A passed real probe over its new immutable
+		// revision/generation pair is the event that clears that state; rejecting
+		// it because the flag is set would make recovery impossible. Old results
+		// cannot qualify because their frozen pair no longer matches.
+		if probeType != connectionType || outcome != "passed" || probeRevisionID != currentRevisionID || probeGenerationID != currentGenerationID {
+			return Summary{}, rejectionOf(ErrActiveConflict, codeActiveConflict, "probe result does not close onto the current pair", id)
+		}
+		// The explicit qualification event must close onto the row version
+		// the enabling UPDATE produces (trigger checks
+		// q.enabled_row_version = NEW.row_version AFTER the update): insert
+		// it first against row_version+1, then advance the row in the same
+		// transaction. Metrics and model providers share this immutable proof;
+		// type-specific SQL closure verifies the matching real probe child.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO connection_enable_qualifications(connection_id,enabled_row_version,probe_result_id,created_by,created_at) VALUES(?,?,?,?,?)`, id, rowVersion+1, qualifiedProbeResultID, createdBy, timestampOf(service.now)); err != nil {
+			return Summary{}, err
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE connections SET enabled=1,revalidation_required=0,row_version=row_version+1 WHERE id=? AND row_version=?`, id, rowVersion)
 		if err != nil {
@@ -726,12 +825,17 @@ func (service *Service) Rotate(ctx context.Context, name string, expectedRowVers
 		if err := requireActor(ctx, createdBy); err != nil {
 			return Summary{}, execution.Changed, err
 		}
-		config, err := validateConfig(input.Type, input.NonSecretJSON)
+		config, err := service.validateConfig(input.Type, input.NonSecretJSON)
 		if err != nil {
 			return Summary{}, execution.Changed, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
 		}
 		if err := validateSecret(input.Type, input.Secret); err != nil {
 			return Summary{}, execution.Changed, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
+		}
+		if declaration, ok := service.httpKind(input.Type); ok {
+			if err := validateHTTPCredential(declaration, config, input.Secret); err != nil {
+				return Summary{}, execution.Changed, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
+			}
 		}
 		var id int64
 		var connectionType string

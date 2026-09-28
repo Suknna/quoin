@@ -24,6 +24,9 @@ func TestRootKeyRebindAtomicallyIsolatesAndRetainsOldEnvelope(t *testing.T) {
 	ctx := context.Background()
 	config, originalKey, database := rebindFixture(t)
 	service := connections.NewService(database.SQL, func() ([]byte, error) { return os.ReadFile(config.RootKeyFile) })
+	service.SetConnectionKinds(connections.NewStaticConnectionKinds(map[string][]string{
+		connections.TypePrometheus: nil, connections.TypeThanos: nil,
+	}))
 	adminCtx := rebindAdminContext(t)
 	input := rebindThanosInput("old-secret")
 	created, err := service.Create(adminCtx, input, 1, "create-before-rebind")
@@ -107,6 +110,9 @@ func TestRootKeyRebindAtomicallyIsolatesAndRetainsOldEnvelope(t *testing.T) {
 	}
 
 	newService := connections.NewService(reopened.SQL, func() ([]byte, error) { return newKey, nil })
+	newService.SetConnectionKinds(connections.NewStaticConnectionKinds(map[string][]string{
+		connections.TypePrometheus: nil, connections.TypeThanos: nil,
+	}))
 	newService.SetReader(reopened.Reader)
 	current, err := newService.Get(ctx, "main-thanos")
 	if err != nil {
@@ -146,6 +152,9 @@ func TestRootKeyRebindRollsBackEveryStateChangeWhenAuditCannotCommit(t *testing.
 	ctx := context.Background()
 	config, originalKey, database := rebindFixture(t)
 	service := connections.NewService(database.SQL, func() ([]byte, error) { return os.ReadFile(config.RootKeyFile) })
+	service.SetConnectionKinds(connections.NewStaticConnectionKinds(map[string][]string{
+		connections.TypePrometheus: nil, connections.TypeThanos: nil,
+	}))
 	created, err := service.Create(rebindAdminContext(t), rebindThanosInput("old-secret"), 1, "create-for-rollback")
 	if err != nil {
 		t.Fatal(err)
@@ -257,6 +266,9 @@ func TestRootKeyRebindExplicitDisableClosesChecklist(t *testing.T) {
 	ctx := context.Background()
 	config, _, database := rebindFixture(t)
 	service := connections.NewService(database.SQL, func() ([]byte, error) { return os.ReadFile(config.RootKeyFile) })
+	service.SetConnectionKinds(connections.NewStaticConnectionKinds(map[string][]string{
+		connections.TypePrometheus: nil, connections.TypeThanos: nil,
+	}))
 	created, err := service.Create(rebindAdminContext(t), rebindThanosInput("old-secret"), 1, "create-for-disable")
 	if err != nil {
 		t.Fatal(err)
@@ -277,6 +289,9 @@ func TestRootKeyRebindExplicitDisableClosesChecklist(t *testing.T) {
 	}
 	defer reopened.Close()
 	service = connections.NewService(reopened.SQL, func() ([]byte, error) { return newKey, nil })
+	service.SetConnectionKinds(connections.NewStaticConnectionKinds(map[string][]string{
+		connections.TypePrometheus: nil, connections.TypeThanos: nil,
+	}))
 	service.SetReader(reopened.Reader)
 	current, err := service.Get(ctx, created.Name)
 	if err != nil {

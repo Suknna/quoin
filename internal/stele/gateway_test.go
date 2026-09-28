@@ -252,6 +252,39 @@ func TestGatewayExecutesWithBasicAuthAndSucceeds(t *testing.T) {
 	}
 }
 
+// TestGatewayExecutesSyntheticHTTPConnectionKind proves the Stele gateway is
+// connection-kind-agnostic (ADR-0014): the execution contract resolves the
+// non-secret projection and injects the bounded credentials for ANY trusted
+// HTTP connection kind — the type string is opaque at the gateway.
+func TestGatewayExecutesSyntheticHTTPConnectionKind(t *testing.T) {
+	var seen atomic.Value
+	platform := newPlatform(t, func(writer http.ResponseWriter, request *http.Request) {
+		seen.Store(platformRecord{Method: request.Method, Auth: request.Header.Get("Authorization")})
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte(`{"status":"success","data":{"resultType":"scalar"}}`))
+	})
+	harness := startGateway(t, func(_ context.Context, connectionID int64) (*runtimev1.AcquireConnectionCredentialResponse, error) {
+		return &runtimev1.AcquireConnectionCredentialResponse{
+			ConnectionId:         connectionID,
+			ConnectionRevisionId: 3,
+			ConnectionType:       "synth-http",
+			RevisionConfigJson:   []byte(fmt.Sprintf(`{"type":"synth-http","baseUrl":%q,"authType":"basic","username":"synth-user"}`, platform.URL)),
+			Thanos:               &runtimev1.ThanosCredentialSecret{Username: "synth-user", Password: "synth-pass"},
+		}, nil
+	}, gatewayDefaultRatePerMinute)
+
+	harness.pushExecute("call-synth", 9, 3, "GET", "/api/v1/query", "query=vector(1)", 5000, nil)
+	result := harness.awaitResult(t, "call-synth")
+	if result.GetStatus() != runtimev1.PlatformCallStatus_PLATFORM_CALL_STATUS_SUCCEEDED {
+		t.Fatalf("status = %v (%s %s), want SUCCEEDED", result.GetStatus(), result.GetErrorCode(), result.GetErrorDetail())
+	}
+	record, _ := seen.Load().(platformRecord)
+	expected := "Basic " + basicAuthHeader("synth-user", "synth-pass")
+	if record.Auth != expected || record.Method != http.MethodGet {
+		t.Fatalf("platform request = %+v, want basic auth over GET", record)
+	}
+}
+
 func TestGatewayBearerAuthAndHTTPErrorPassThrough(t *testing.T) {
 	var auth atomic.Value
 	platform := newPlatform(t, func(writer http.ResponseWriter, request *http.Request) {

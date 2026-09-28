@@ -560,7 +560,7 @@ func applyMaterialAuth(request *http.Request, material *material) error {
 		}
 		request.Header.Set("Authorization", "Bearer "+material.bearerToken)
 	default:
-		return fmt.Errorf("unsupported metrics auth type %q", authType)
+		return fmt.Errorf("unsupported auth type %q", authType)
 	}
 	return nil
 }

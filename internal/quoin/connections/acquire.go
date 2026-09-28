@@ -22,7 +22,7 @@ var ErrAcquireDenied = errors.New("connection material acquire denied")
 
 // MetricsConnectionPayload 是一次按需连接材料投递的产物（只在内存中存在，
 // 绝不落库）。RevisionConfigJSON 是连接当前 revision 的非秘密类型化投影；
-// Metrics 是解密后的凭据（prometheus/thanos 共用同一 HTTP 凭据形状）。
+// Metrics 是解密后的凭据（全部受信 HTTP 连接种类共用的有界 HTTP carrier）。
 type MetricsConnectionPayload struct {
 	ConnectionID         int64
 	ConnectionRevisionID int64
@@ -32,15 +32,15 @@ type MetricsConnectionPayload struct {
 	Metrics              *MetricsCredentialSecret
 }
 
-// AcquireMetricsConnection 按 connection_id 投递一次出向执行材料：读
+// AcquireConnectionCredential 按 connection_id 投递一次出向执行材料：读
 // connections + current_revision + 最新 credential_generations，校验连接
-// type ∈ {prometheus,thanos}（不校验 enabled：连接探测是 Enable 的资格
-// 前提，必须能在新建未启用/轮换待复验的连接上执行；模型可见查询的
-// enabled 门禁在授权侧——config_thanos_query grant 创建与执行前校验均
-// 要求 enabled=1 且无待复验——不依赖本缝隙重复把关），然后复用
-// FulfillGrant 的解密管线在 runner 守卫事务内打开 envelope（敏感读的
-// 审计纪律与 grant reveal 一致，DATA-CONN-002）。model_provider 连接在此
-// 处被确定性拒绝——模型凭据只走 Plinth grant（FetchCredentialGrant），
+// type 是注册表声明的受信 HTTP 连接种类（不校验 enabled：连接探测是 Enable
+// 的资格前提，必须能在新建未启用/轮换待复验的连接上执行；模型可见查询的
+// enabled 门禁在授权侧——config_thanos_query grant 创建与执行前校验均要求
+// enabled=1 且无待复验——不依赖本缝隙重复把关），然后复用 FulfillGrant 的
+// 解密管线在 runner 守卫事务内打开 envelope（敏感读的审计纪律与 grant
+// reveal 一致，DATA-CONN-002）。model_provider 与未知/已撤销（插件被停用）
+// 的种类在此确定性拒绝——模型凭据只走 Plinth grant（FetchCredentialGrant），
 // 绝不经网关投递。
 func (service *Service) AcquireMetricsConnection(ctx context.Context, connectionID int64) (MetricsConnectionPayload, error) {
 	// gRPC 流处理器上下文不带用户身份；这里以系统 task 主体建立执行范围，
@@ -84,8 +84,14 @@ func (service *Service) acquireMetricsConnectionOn(ctx context.Context, tx *exec
 		}
 		return MetricsConnectionPayload{}, err
 	}
-	if connectionType != TypePrometheus && connectionType != TypeThanos {
+	if connectionType == TypeModelProvider {
 		return MetricsConnectionPayload{}, fmt.Errorf("%w: connection type %q is not gateway-executable", ErrAcquireDenied, connectionType)
+	}
+	// The registry is the only gateway-executability authority (ADR-0014):
+	// the connection type must resolve to a trusted HTTP connection kind whose
+	// plugin is still enabled. Unknown and revoked types fail closed.
+	if _, ok := service.httpKind(connectionType); !ok {
+		return MetricsConnectionPayload{}, fmt.Errorf("%w: connection type %q is not a trusted HTTP connection kind", ErrAcquireDenied, connectionType)
 	}
 	var revisionConfig sql.NullString
 	if err := tx.QueryRowContext(ctx, `
@@ -109,13 +115,10 @@ func (service *Service) acquireMetricsConnectionOn(ctx context.Context, tx *exec
 	if err != nil {
 		return MetricsConnectionPayload{}, err
 	}
-	switch {
-	case secret.Prometheus != nil:
-		payload.Metrics = &MetricsCredentialSecret{Username: secret.Prometheus.Username, Password: secret.Prometheus.Password, BearerToken: secret.Prometheus.BearerToken}
-	case secret.Thanos != nil:
-		payload.Metrics = &MetricsCredentialSecret{Username: secret.Thanos.Username, Password: secret.Thanos.Password, BearerToken: secret.Thanos.BearerToken}
-	default:
-		// metrics 连接允许无认证（空 carrier 也封存了独立 generation）。
+	if carrier := httpCredentialCarrier(secret); carrier != nil {
+		payload.Metrics = carrier
+	} else {
+		// HTTP 连接允许无认证（空 carrier 也封存了独立 generation）。
 		payload.Metrics = &MetricsCredentialSecret{}
 	}
 	return payload, nil

@@ -151,9 +151,10 @@ func (server *steleRelayServer) deliverOneEvent(ctx context.Context, event *runt
 	}
 }
 
-// AcquireConnectionCredential 按需投递出向执行材料（ADR-0011）：仅接受
-// prometheus/thanos 连接；model_provider 拒绝（PermissionDenied）——模型
-// 凭据只走 Plinth 的 FetchCredentialGrant，绝不经网关信道分发。
+// AcquireConnectionCredential 按需投递出向执行材料（ADR-0011/0014）：仅接受
+// 注册表声明的受信 HTTP 连接种类（其插件仍在部署启用集合内）；
+// model_provider 与未知/已撤销种类拒绝（PermissionDenied）——模型凭据只走
+// Plinth 的 FetchCredentialGrant，绝不经网关信道分发。
 func (server *steleRelayServer) AcquireConnectionCredential(ctx context.Context, request *runtimev1.AcquireConnectionCredentialRequest) (*runtimev1.AcquireConnectionCredentialResponse, error) {
 	if err := server.authorize(ctx); err != nil {
 		return nil, err

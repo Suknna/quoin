@@ -15,6 +15,7 @@ type envelopeWire = secrets.Envelope
 func sealEnvelope(rootKey []byte, connectionID, generationSeq int64, connectionType string, bindingRevision int, typed *typedSecretJSON) (*envelopeWire, error) {
 	return secrets.Seal(rootKey, connectionID, generationSeq, connectionType, bindingRevision, &secrets.TypedSecret{
 		Type:          typed.Type,
+		HTTP:          metricsOf(typed.HTTP),
 		Prometheus:    metricsOf(typed.Prometheus),
 		Thanos:        metricsOf(typed.Thanos),
 		ModelProvider: modelProviderOf(typed.ModelProvider),
@@ -28,6 +29,7 @@ func openEnvelope(rootKey []byte, connectionID, generationSeq int64, connectionT
 	}
 	return &typedSecretJSON{
 		Type:          secret.Type,
+		HTTP:          metricsFrom(secret.HTTP),
 		Prometheus:    metricsFrom(secret.Prometheus),
 		Thanos:        metricsFrom(secret.Thanos),
 		ModelProvider: modelProviderFrom(secret.ModelProvider),

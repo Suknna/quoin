@@ -77,6 +77,12 @@ func newHarness(t *testing.T, connectionType string) *harness {
 	// reader (OpenReadOnly over this fixture file) — its probe lifecycle's
 	// pure reads fail closed without it.
 	conns := connections.NewService(db, func() ([]byte, error) { return rootKey, nil })
+	// ADR-0014: the fixture resolves kinds through the same registry view
+	// shape the boot wiring installs, seeded with this harness's explicit
+	// enablement set (the descriptors do not rely on DefaultEnabled).
+	kindView := registry.ConnectionKindView()
+	kindView.SetEnabled(enabled)
+	conns.SetConnectionKinds(kindView)
 	connsReader, err := execution.OpenReadOnly(directory + "/test.db")
 	if err != nil {
 		t.Fatal(err)
@@ -134,14 +140,16 @@ func observationTestRegistry(t *testing.T) (*plugins.Registry, []string) {
 	descriptors := []plugins.Plugin{
 		{
 			ID: "prometheus", Version: "1", DisplayName: "Prometheus", Description: "metrics source",
-			ConnectionKind: "prometheus",
+			ConnectionKind: "prometheus", ConnectionTransport: plugins.ConnectionTransportHTTP,
+			ConnectionAuthModes: []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
 			DiscoverObjects: []plugins.DiscoverObject{
 				{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
 			},
 		},
 		{
 			ID: "thanos", Version: "1", DisplayName: "Thanos", Description: "global metrics source",
-			ConnectionKind: "thanos",
+			ConnectionKind: "thanos", ConnectionTransport: plugins.ConnectionTransportHTTP,
+			ConnectionAuthModes: []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
 			DiscoverObjects: []plugins.DiscoverObject{
 				{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
 			},

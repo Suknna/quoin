@@ -77,6 +77,7 @@ func newLocalInspectionFixture(t *testing.T) (*sql.DB, *RuntimeService) {
 	if err := conns.SetReader(reader); err != nil {
 		t.Fatal(err)
 	}
+	conns.SetConnectionKinds(fixtureConnectionKinds())
 	analyses := analysis.NewService(db)
 	if err := analyses.SetReader(reader); err != nil {
 		t.Fatal(err)

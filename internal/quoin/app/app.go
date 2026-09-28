@@ -96,7 +96,12 @@ type apiServer struct {
 	inspectionDispatchFunc       func(ctx context.Context)
 	inspectionCancelDispatchFunc func(ctx context.Context, attemptID int64) error
 	pluginRegistry               *plugins.Registry
-	enabledPlugins               []string
+	// connectionKinds is the deployment-facing view over the frozen registry
+	// that Quoin's connections domain consumes as its trusted HTTP
+	// connection-kind seam (ADR-0014); configurePlugins installs the
+	// resolved enablement set.
+	connectionKinds *plugins.ConnectionKindView
+	enabledPlugins  []string
 	// Upgrade maintenance authorities (T36): the prepare command, the drain
 	// reconciler, and the live HTTP surface swap hooks.
 	upgradeService    *upgrade.Service
@@ -174,6 +179,7 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		upgradeService:   upgrade.NewService(db),
 	}
 	application.initPluginRegistry()
+	application.connectionKinds = application.pluginRegistry.ConnectionKindView()
 	application.rootKey = func() ([]byte, error) {
 		if rootKeyFile == "" {
 			return nil, fmt.Errorf("root key file not configured")
@@ -186,6 +192,9 @@ func newAPIServer(service *auth.Service, db *sql.DB, rootKeyFile string) *apiSer
 		application.observations = service
 	}
 	application.connections = connections.NewService(db, application.rootKey)
+	// ADR-0014：出向连接种类经冻结插件注册表裁决（受信 HTTP 连接种类 + 有界
+	// 认证方式），部署启用集合解析后即刻收口未知/已撤销种类。
+	application.connections.SetConnectionKinds(application.connectionKinds)
 	// ADR-0004：接入启用即用。默认基础巡检计划在启用事务内幂等创建（仅人工
 	// 运行，不产生定时模型费用）；失败回滚整个启用，确保不会出现"已启用却
 	// 无即用计划"的中间态。hook 收到连接执行器 runner 的受守卫事务句柄，
