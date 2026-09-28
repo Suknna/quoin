@@ -110,6 +110,16 @@ type Plugin struct {
 	// catalog (consumed by inspection planning; execution happens through the
 	// plugin's internal tools).
 	InspectionTemplates []InspectionTemplate
+	// PostCommitSubscriptions declares the finite committed-fact vocabulary
+	// entries this plugin consumes (ADR-0014). Valid only together with a
+	// non-nil PostCommitHandler; registration rejects unknown fact types and
+	// duplicate subscriptions.
+	PostCommitSubscriptions []PostCommitSubscription
+	// PostCommitHandler is the after-commit subscriber invoked outside every
+	// authority transaction, at-least-once per fact, with no database handle
+	// and no credentials. A failure never changes the committed inbound
+	// adjudication.
+	PostCommitHandler PostCommitHandler
 }
 
 // ConfigValidator is an optional, purely static configuration checker for

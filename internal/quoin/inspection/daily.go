@@ -515,6 +515,11 @@ func (s *Service) CreateScheduledDailyReport(ctx context.Context, config DailyRe
 		// this boundary's transaction: not a scheduling error, no durable trace.
 		return nil
 	}
+	if err == nil {
+		// ADR-0014: the due fact (if any subscriber wants it) committed with
+		// the report; wake the dispatcher only after the commit returned.
+		s.notifyPostCommit()
+	}
 	return err
 }
 
@@ -583,6 +588,11 @@ func (s *Service) createScheduledDailyReportOn(ctx context.Context, tx execution
 	}
 	reportID, err := result.LastInsertId()
 	if err != nil {
+		return 0, err
+	}
+	// ADR-0014: the frozen window's due fact joins the same authority
+	// transaction as the Collecting report row.
+	if err := s.emitDailyWindowDueFact(ctx, tx, configID, configRowVersion, reportID, localDate, dailyTimeText(windowStart), dailyTimeText(windowEnd)); err != nil {
 		return 0, err
 	}
 	return reportID, nil
@@ -657,6 +667,10 @@ func (s *Service) SealDueDailyReports(ctx context.Context, boundary time.Time) e
 			sealErrors = append(sealErrors, fmt.Errorf("seal daily report %d: %w", reportID, err))
 		}
 	}
+	// Sealed facts (if any subscriber wants them) committed above; wake the
+	// dispatcher once per boundary regardless of per-report failures — each
+	// successful seal is already durable.
+	s.notifyPostCommit()
 	return errors.Join(sealErrors...)
 }
 
@@ -718,9 +732,14 @@ func (s *Service) sealDailyReportOn(ctx context.Context, tx execution.Executor, 
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_daily_report_versions WHERE report_id=?`, reportID).Scan(&version); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `
+	versionInsert, err := tx.ExecContext(ctx, `
 		INSERT INTO inspection_daily_report_versions(report_id,version,content,created_at) VALUES(?,?,?,?)`,
-		reportID, version+1, string(encoded), s.nowText()); err != nil {
+		reportID, version+1, string(encoded), s.nowText())
+	if err != nil {
+		return err
+	}
+	versionRowID, err := versionInsert.LastInsertId()
+	if err != nil {
 		return err
 	}
 	result, err := tx.ExecContext(ctx, `
@@ -733,7 +752,9 @@ func (s *Service) sealDailyReportOn(ctx context.Context, tx execution.Executor, 
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		return fmt.Errorf("daily report %d left Collecting after seal append", reportID)
 	}
-	return nil
+	// ADR-0014: the sealed fact joins the same authority transaction as the
+	// immutable version and the Sealed state transition.
+	return s.emitReportSealedFact(ctx, tx, reportID, versionRowID, configKey, localDate, content.SealedAt)
 }
 
 // buildDailyReportContent aggregates the frozen window's per-source facts.

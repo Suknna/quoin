@@ -40,6 +40,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/knowledge"
 	"github.com/Suknna/quoin/internal/quoin/maintenance"
 	"github.com/Suknna/quoin/internal/quoin/observation"
+	"github.com/Suknna/quoin/internal/quoin/pluginevents"
 	qruntime "github.com/Suknna/quoin/internal/quoin/runtime"
 	"github.com/Suknna/quoin/internal/quoin/secrets"
 	"github.com/Suknna/quoin/internal/quoin/upgrade"
@@ -366,9 +367,24 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	// ADR-0004: deployment YAML selects plugin enablement; the resolved
 	// state feeds the management catalog, the frozen tool catalogs of every
 	// agent slice and the fault-origin eligibility in one authoritative pass.
-	if _, err := application.configurePlugins(config.EnabledPlugins); err != nil {
+	enabledPlugins, err := application.configurePlugins(config.EnabledPlugins)
+	if err != nil {
 		return fmt.Errorf("configure plugins: %w", err)
 	}
+	// ADR-0014: the post-commit fact runtime assembles from the same frozen
+	// registry and resolved enablement. The publisher persists facts inside
+	// the authority transactions; the dispatcher delivers strictly after
+	// commit, outside every write lock, and is a deliberate no-op without
+	// enabled subscribers.
+	publisher := pluginevents.NewPublisher(application.pluginRegistry, enabledPlugins)
+	application.alerts.SetPostCommitPublisher(publisher)
+	application.inspections.SetPostCommitPublisher(publisher)
+	hookDispatcher, err := pluginevents.NewDispatcher(database.SQL, database.Reader, application.pluginRegistry, enabledPlugins)
+	if err != nil {
+		return fmt.Errorf("assemble post-commit dispatcher: %w", err)
+	}
+	publisher.SetNotifier(hookDispatcher.Kick)
+	go hookDispatcher.Run(ctx)
 	// Plinth probes network partitions every 20 seconds. Accept those idle
 	// HTTP/2 pings: the default gRPC server minimum is five minutes and sends
 	// GOAWAY(too_many_pings), which otherwise prevents every runtime task.

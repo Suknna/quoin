@@ -54,6 +54,21 @@ type txQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+// observationCommit is one committed normalized alert observation collected
+// inside the intake transaction for the post-commit fact (ADR-0014). It is a
+// bounded reference set — never the raw payload.
+type observationCommit struct {
+	sourceID       int64
+	sourceKey      string
+	deliveryID     int64
+	deliveryItemID int64
+	occurrenceID   int64
+	observationID  int64
+	rowVersion     int64
+	state          string
+	effect         string
+}
+
 // OccurrenceRef identifies an occurrence affected by a delivery.
 type OccurrenceRef struct {
 	ID         int64  `json:"id"`
@@ -137,6 +152,9 @@ func (service *Service) DeliverEvent(ctx context.Context, sourceKind, relayID st
 		}
 		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
 	}
+	// ADR-0014: the facts (if any) committed with the delivery; wake the
+	// post-commit dispatcher only after the authority commit returned.
+	service.publisher.Notify()
 	return result, nil
 }
 
@@ -270,6 +288,7 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 	processed := 0
 	occurrences := []OccurrenceRef{}
 	issues := []IntakeIssueRef{}
+	commits := []observationCommit{}
 	normalizerNeeded := false
 	for index := range preparedItems {
 		item := &preparedItems[index]
@@ -297,7 +316,7 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 			issues = append(issues, issueRef)
 			continue
 		}
-		occurrence, effect, err := service.applyItem(ctx, tx, sourceID, sourceKey, *item, itemID, deliveryID, receivedAt, committedAt, normalization)
+		occurrence, effect, observationID, err := service.applyItem(ctx, tx, sourceID, sourceKey, *item, itemID, deliveryID, receivedAt, committedAt, normalization)
 		if err != nil {
 			return DeliveryResult{}, err
 		}
@@ -307,6 +326,11 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 		}
 		if occurrence != nil {
 			occurrences = append(occurrences, *occurrence)
+			commits = append(commits, observationCommit{
+				sourceID: sourceID, sourceKey: sourceKey, deliveryID: deliveryID, deliveryItemID: itemID,
+				occurrenceID: occurrence.ID, observationID: observationID,
+				rowVersion: occurrence.RowVersion, state: occurrence.State, effect: effect,
+			})
 		}
 	}
 
@@ -330,6 +354,15 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 			return DeliveryResult{}, issueErr
 		}
 		issues = append(issues, issueRef)
+	}
+
+	// ADR-0014: the committed normalized observations become bounded
+	// post-commit facts inside this same authority transaction — same commit
+	// or same rollback, never a post-hoc fact.
+	for _, commit := range commits {
+		if _, err := service.emitObservationFact(ctx, tx, commit); err != nil {
+			return DeliveryResult{}, err
+		}
 	}
 
 	return DeliveryResult{
@@ -497,7 +530,7 @@ func (service *Service) classifyAndInsertItem(ctx context.Context, conn executio
 // (sql.ErrNoRows branch) executes the ADR-0012 intake pipeline stages that
 // freeze delivery-time evidence: Normalize (统一语义列), Enrich (富化文档) and
 // Correlate (全部命中视图)；Dedup 即外层的身份三元组幂等与观测机制本身。
-func (service *Service) applyItem(ctx context.Context, conn execution.Executor, sourceID int64, sourceKey string, item prepared, itemID, deliveryID int64, receivedAt time.Time, committedAt string, normalization deliveryNormalization) (*OccurrenceRef, string, error) {
+func (service *Service) applyItem(ctx context.Context, conn execution.Executor, sourceID int64, sourceKey string, item prepared, itemID, deliveryID int64, receivedAt time.Time, committedAt string, normalization deliveryNormalization) (*OccurrenceRef, string, int64, error) {
 	var occurrenceID int64
 	var state string
 	var rowVersion int64
@@ -506,12 +539,11 @@ func (service *Service) applyItem(ctx context.Context, conn execution.Executor, 
 	if errors.Is(err, sql.ErrNoRows) {
 		labelsCanonical, canonicalErr := CanonicalLabels(item.labels)
 		if canonicalErr != nil {
-			return nil, "", canonicalErr
+			return nil, "", 0, canonicalErr
 		}
 		digest := DigestLabels(labelsCanonical)
 		// Normalize：按 payload alerts[i] 对位冻结统一语义（缺失/失败时为缺省值）。
 		severity, title, annotationsCanonical, resource := normalization.semanticsFor(item.index)
-
 		// DATA-ALERT-006: a resolved-first delivery creates the occurrence
 		// already closed (state='Resolved', resolved_at set) with a
 		// resolved_first observation; the schema CHECK on alert_occurrences
@@ -531,7 +563,7 @@ func (service *Service) applyItem(ctx context.Context, conn execution.Executor, 
 		result, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_occurrences(source_id, fingerprint, external_identity, starts_at, state, row_version, labels_canonical, labels_digest, severity, title, annotations_canonical, resource, first_seen_at, last_state_change_at, resolved_at) VALUES(?,?,?,?,?,1,?,?,?,?,?,?,?,?,?)`,
 			sourceID, item.fingerprint, externalIdentity, item.startsAt, initialState, labelsCanonical, digest, severity, title, annotationsCanonical, resource, committedAt, committedAt, resolvedAt)
 		if insertErr != nil {
-			return nil, "", insertErr
+			return nil, "", 0, insertErr
 		}
 		occurrenceID, _ = result.LastInsertId()
 
@@ -539,49 +571,50 @@ func (service *Service) applyItem(ctx context.Context, conn execution.Executor, 
 		// 区分"无规则命中"与"未求值"）。
 		enrichmentJSON, enrichErr := evaluateEnrichment(ctx, conn, sourceKey, item.labels)
 		if enrichErr != nil {
-			return nil, "", enrichErr
+			return nil, "", 0, enrichErr
 		}
 		if err := persistEnrichment(ctx, conn, occurrenceID, enrichmentJSON, committedAt); err != nil {
-			return nil, "", err
+			return nil, "", 0, err
 		}
 
 		// Correlate：全部命中视图各冻结一行关联证据，视图后续编辑不回写。
 		matched, correlateErr := correlateViews(ctx, conn, sourceID, item.labels)
 		if correlateErr != nil {
-			return nil, "", correlateErr
+			return nil, "", 0, correlateErr
 		}
 		if err := persistCorrelations(ctx, conn, occurrenceID, matched, committedAt); err != nil {
-			return nil, "", err
+			return nil, "", 0, err
 		}
 		state = initialState
 		rowVersion = 1
 
 		for name, value := range item.labels {
 			if _, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_occurrence_labels(occurrence_id, name, value) VALUES(?,?,?)`, occurrenceID, name, value); insertErr != nil {
-				return nil, "", insertErr
+				return nil, "", 0, insertErr
 			}
 		}
-		if err := insertObservation(ctx, conn, deliveryID, itemID, occurrenceID, item.itemStatus, item.startsAt, item.endsAt, receivedAt, committedAt, effect); err != nil {
-			return nil, "", err
+		observationID, err := insertObservation(ctx, conn, deliveryID, itemID, occurrenceID, item.itemStatus, item.startsAt, item.endsAt, receivedAt, committedAt, effect)
+		if err != nil {
+			return nil, "", 0, err
 		}
-		return &OccurrenceRef{ID: occurrenceID, State: state, RowVersion: rowVersion}, effect, nil
+		return &OccurrenceRef{ID: occurrenceID, State: state, RowVersion: rowVersion}, effect, observationID, nil
 	}
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 
 	var storedCanonical string
 	if err := conn.QueryRowContext(ctx, `SELECT labels_canonical FROM alert_occurrences WHERE id=?`, occurrenceID).Scan(&storedCanonical); err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	incomingCanonical, err := CanonicalLabels(item.labels)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	if storedCanonical != incomingCanonical {
 		// classifyAndInsertItem already fenced this; a drift here means the
 		// occurrence snapshot changed under this transaction — surface it.
-		return nil, "", fmt.Errorf("occurrence labels snapshot drifted during delivery")
+		return nil, "", 0, fmt.Errorf("occurrence labels snapshot drifted during delivery")
 	}
 
 	effect := "repeat_firing"
@@ -603,22 +636,26 @@ func (service *Service) applyItem(ctx context.Context, conn execution.Executor, 
 		}
 		if _, err := conn.ExecContext(ctx, `UPDATE alert_occurrences SET state=?, row_version=?, last_state_change_at=?, resolved_at=? WHERE id=? AND row_version=?`,
 			newState, newRowVersion, committedAt, resolvedAt, occurrenceID, rowVersion); err != nil {
-			return nil, "", err
+			return nil, "", 0, err
 		}
 		state = newState
 		rowVersion = newRowVersion
 	}
 
-	if err := insertObservation(ctx, conn, deliveryID, itemID, occurrenceID, item.itemStatus, item.startsAt, item.endsAt, receivedAt, committedAt, effect); err != nil {
-		return nil, "", err
+	observationID, err := insertObservation(ctx, conn, deliveryID, itemID, occurrenceID, item.itemStatus, item.startsAt, item.endsAt, receivedAt, committedAt, effect)
+	if err != nil {
+		return nil, "", 0, err
 	}
-	return &OccurrenceRef{ID: occurrenceID, State: state, RowVersion: rowVersion}, effect, nil
+	return &OccurrenceRef{ID: occurrenceID, State: state, RowVersion: rowVersion}, effect, observationID, nil
 }
 
-func insertObservation(ctx context.Context, conn execution.Executor, deliveryID, itemID, occurrenceID int64, observedState, startsAt, endsAt string, receivedAt time.Time, committedAt string, effect string) error {
-	_, err := conn.ExecContext(ctx, `INSERT INTO alert_observations(delivery_id, delivery_item_id, occurrence_id, observed_state, starts_at_source, ends_at_source, received_at, committed_at, effect) VALUES(?,?,?,?,?,?,?,?,?)`,
+func insertObservation(ctx context.Context, conn execution.Executor, deliveryID, itemID, occurrenceID int64, observedState, startsAt, endsAt string, receivedAt time.Time, committedAt string, effect string) (int64, error) {
+	result, err := conn.ExecContext(ctx, `INSERT INTO alert_observations(delivery_id, delivery_item_id, occurrence_id, observed_state, starts_at_source, ends_at_source, received_at, committed_at, effect) VALUES(?,?,?,?,?,?,?,?,?)`,
 		deliveryID, itemID, occurrenceID, observedState, startsAt, nullString(endsAt), receivedAt.UTC().Format(time.RFC3339Nano), committedAt, effect)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
 }
 
 func nullString(value string) any {

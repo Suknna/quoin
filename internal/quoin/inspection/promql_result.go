@@ -164,12 +164,26 @@ func (s *Service) CommitPromQLProposal(ctx context.Context, attemptID int64, boo
 		if proposal.Outcome != "success" {
 			status = "gap"
 		}
-		if _, err := tx.ExecContext(commandCtx, `
+		checkResult, err := tx.ExecContext(commandCtx, `
 			INSERT INTO inspection_check_results(run_id,check_key,status,evidence_id,attempt_id,result_digest,gap_reason,created_at)
-			VALUES(?,?,?,?,?,?,?,?)`, runID, checkKey, status, evidenceID, attemptID, digest[:], nullableGap, s.nowText()); err != nil {
+			VALUES(?,?,?,?,?,?,?,?)`, runID, checkKey, status, evidenceID, attemptID, digest[:], nullableGap, s.nowText())
+		if err != nil {
 			return struct{}{}, err
 		}
+		checkResultID, idErr := checkResult.LastInsertId()
+		if idErr != nil {
+			return struct{}{}, idErr
+		}
 		if err := s.convergeOn(commandCtx, tx, runID); err != nil {
+			return struct{}{}, err
+		}
+		// ADR-0014: the committed check fact joins the same authority
+		// transaction; a gap states its gap, only evidence carries a reference.
+		var capturedEvidence int64
+		if id, ok := evidenceID.(int64); ok {
+			capturedEvidence = id
+		}
+		if err := s.emitCheckEvidenceFact(commandCtx, tx, runID, checkResultID, attemptID, capturedEvidence, checkKey, status); err != nil {
 			return struct{}{}, err
 		}
 		return struct{}{}, nil
@@ -180,6 +194,7 @@ func (s *Service) CommitPromQLProposal(ctx context.Context, attemptID int64, boo
 		}
 		return err
 	}
+	s.notifyPostCommit()
 	return nil
 }
 
