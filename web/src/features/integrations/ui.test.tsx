@@ -1796,8 +1796,8 @@ describe("event source instance settings (#110 story 2)", () => {
 		render(
 			<IntegrationView route={`/settings/platform/integrations?platform=${SETTINGS_SOURCE_KIND}&instance=edge-site`} />,
 		);
-		expect(await screen.findByText("已启用")).toBeInTheDocument();
-		expect(screen.getByText("siteName")).toBeInTheDocument();
+	expect(await screen.findByText("已启用")).toBeInTheDocument();
+	expect(await screen.findByText("siteName")).toBeInTheDocument();
 		expect(screen.getByText(/\["Old"\]/)).toBeInTheDocument();
 		fireEvent.click(screen.getByRole("button", { name: "编辑设置" }));
 		expect(screen.getByLabelText("siteName")).toHaveValue("edge");
