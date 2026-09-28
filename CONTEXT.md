@@ -7,6 +7,8 @@ Quoin 帮助内部运维团队基于监控证据调查告警、执行巡检并�
 > **统一 mTLS 组件认证（2026-09，ADR-0009）：** 内部组件认证收敛为单一 PKI：部署 CA（runtime-ca）签发 Stele/Plinth 客户端证书（CN=stele / CN=plinth），quoin:8443 强制 mTLS 并按 CN 授权服务。注册制（一次性注册令牌、长期 Bearer、两阶段轮换、`runtime_slots`/`runtime_credentials` 权威）与 Stele service token 整体退役；组件启动即认证，无注册步骤。本文其余涉及注册/token 轮换的条款仅作历史解读，现行权威见 [ADR-0009](docs/adr/0009-unified-mtls-component-auth.md)。
 > **三组件职责规范与插件体系 v2（2026-09-20，ADR-0011，实施已落地）：** [ADR-0011](docs/adr/0011-component-responsibility-and-plugin-v2.md) 重写了三组件职责——Stele 升级为外部网关（入向队列化立即 ACK、出向凭证注入/限流/执行，own 本地 SQLite 运行态），Plinth 收窄为对插件体系零感知的推理沙箱，Quoin 成为插件注册中心与工具编排中枢（业务库唯一写者、对外部平台凭据只写不读）。下文 Quoin/Plinth/Stele 三个角色条目已按新职责改写；旧「Stele 同步落库后 ACK」条款被显式取代。
 
+> **小核心与事件式插件（2026-09-28，ADR-0014，实施中）：** [ADR-0014](docs/adr/0014-small-core-event-plugins.md) 扩展了入向来源的词表。下文「逻辑告警源」「告警发生」采用跨来源的身份含义；涉及 Alertmanager 独有指纹校验和平台硬编码的旧语句只说明该来源的特例，不再限制所有告警来源。日报等后续能力仍以 ADR 的实施状态为准。
+
 ## 契约术语
 
 **Proto 权威契约**：
@@ -96,16 +98,16 @@ _Avoid_: 权限凭据、会话 ID、幂等键、把所有用户活动合并为�
 _Avoid_: 退役后复用 key、隐藏 UUID 与用户 key 双重身份、因显示名变化切断历史
 
 **逻辑告警源（Logical Alert Source）**：
-一个具有稳定来源身份的告警发送方；同一 HA Alertmanager 集群的副本共享一个来源身份，不同告警源使用不同的认证凭据和 source ID。
-_Avoid_: 单个 Alertmanager Pod、Stele 实例、告警送达
+一个具有稳定来源身份的上游告警发送方，绑定一种已注册的来源协议；相同协议可有多个独立来源。同一 HA Alertmanager 集群的副本共享一个来源身份，不同告警源使用不同的认证凭据和 source ID。
+_Avoid_: 单个 Alertmanager Pod、Stele 实例、告警送达、用插件类型替代来源实例身份
 
 **告警送达（Alert Delivery）**：
 逻辑告警源向 Stele 发起并由 Quoin 持久化的一次原始通知请求。Quoin 保存精确原始 body、协议、来源、Stele 接收时间、提交时间、完整性和逐项处理结果。整体 JSON 或 `alerts[]` 无法可靠枚举时记录 Rejected Delivery，不更新任何告警发生并返回非 2xx；顶层可解析时先预检全部项目，在一个事务中处理正常项目并隔离 `FingerprintMismatch`、`IdentityConflict` 等异常项目，不能让数组第一项获胜，也不能让异常项目阻塞其他正常状态更新。Alertmanager 的顶层 status 和 groupKey 只作为分组通知元数据；`truncatedAlerts > 0` 时正常处理已包含项目、永久记录不完整事实并在接入状态中提示，commit 后仍返回 `204`，不对未知的缺失项作任何生命周期推断。
 _Avoid_: 告警记录、告警事件、按 payload 合并的请求、用分组状态改写单条告警、单项异常拒绝整个可解析 Delivery
 
 **告警发生（Alert Occurrence）**：
-一个具有唯一监控身份的上游 Alertmanager 告警从触发到恢复的生命周期。Alertmanager v1 以 `source_id + fingerprint + normalized startsAt` 定位一个发生：`source_id` 隔离逻辑告警源，fingerprint 延续 Alertmanager 基于完整 labels 的告警身份，startsAt 区分同一身份的不同触发周期。Quoin 同时保存不可变完整 labels 快照，并在关联每次送达前逐项复核；同一三元组出现不同 labels 时记录 IdentityConflict，绝不静默合并。生命周期状态只有 `Firing | Resolved`，只能由载荷中对应 `alerts[i].status` 推进；不得使用顶层 status、groupKey、endsAt、截断后的缺失、来源停用或长期无通知推断恢复或 Unknown。Firing 只表示最近一次有效观察为 firing 且尚未收到 resolved，不承诺目标此刻仍异常。平台内部故障不是 Alert Occurrence，也不得伪造 Delivery 或上游业务归属。
-_Avoid_: 告警送达、平台内部故障、事故、分组通知状态、出站 Connection 身份、只按 fingerprint 跨触发周期合并、用 body hash 或 groupKey 去重、把接入完整性混入生命周期状态
+一个来源内唯一告警身份从触发到恢复的生命周期。身份以 `source_id + source identity + normalized startsAt` 定位：Alertmanager 的 source identity 是基于完整 labels 校验的原生 fingerprint；其他已声明外部身份模式的来源由上游稳定 externalId 标识，同源内存储其摘要与原文以防误合并。startsAt 区分同一身份的不同触发周期。Quoin 同时保存不可变完整 labels 快照，并在关联每次送达前逐项复核；同一身份出现不同 labels 时记录 IdentityConflict，绝不静默合并。生命周期状态只有 `Firing | Resolved`，只能由载荷中对应项目的状态推进；不得使用顶层 status、groupKey、endsAt、截断后的缺失、来源停用或长期无通知推断恢复或 Unknown。Firing 只表示最近一次有效观察为 firing 且尚未收到 resolved，不承诺目标此刻仍异常。平台内部故障不是 Alert Occurrence，也不得伪造 Delivery 或上游业务归属。
+_Avoid_: 告警送达、平台内部故障、事故、分组通知状态、出站 Connection 身份、跨来源合并、用 body hash 或 groupKey 去重、把接入完整性混入生命周期状态
 
 **告警视图归属（Alert View Attribution，[ADR 0008](docs/adr/0008-business-view-alert-attribution.md)）**：
 Alert Occurrence 首次接收时一次性判定的业务归属权威：候选业务视图必须显式声明交付 Alertmanager 告警源（`alertSourceKeys` 非空）且全部精确标签条件命中。唯一匹配 `attributed`、多匹配 `ambiguous`、无匹配 `unattributed`；空标签条件不构成兜底匹配。判定结果与候选完整快照冻结在独立投影表，终身不重算；读模型展示的 key/name 取自冻结快照。旧 business_system 归属字段与旧归属证据停写、只读保留，历史未归属不重算、不伪造；平台故障与无过滤读取之外的归属过滤永不拼接平台行。
