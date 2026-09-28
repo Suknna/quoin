@@ -2521,10 +2521,10 @@ export interface components {
             components: components["schemas"]["RuntimeSlot"][];
         };
         AlertOccurrenceSummary: {
-            /** @description Alertmanager occurrence locator or platform:<fault-id> identity. */
+            /** @description Alert occurrence locator or platform:<fault-id> identity. */
             id: string;
-            /** @enum {string} */
-            source: "alertmanager" | "platform";
+            /** @description Registered alert source kind, or platform for an internal fault. */
+            source: string;
             /** @enum {string} */
             component?: "plinth";
             reason?: string;
@@ -3313,8 +3313,8 @@ export interface components {
         };
         AlertSourceSummary: {
             key: components["schemas"]["StableKey"];
-            /** @enum {string} */
-            protocol: "alertmanager";
+            /** @description Registered alert event source kind. */
+            protocol: string;
             enabled: boolean;
             /** @description 来源行并发前提（enable/disable 命令使用，HTTP-COMMAND-002）。 */
             rowVersion: number;
@@ -3349,8 +3349,7 @@ export interface components {
         } & (unknown & unknown & unknown);
         CreateAlertSourceRequest: components["schemas"]["CommandBase"] & {
             key: components["schemas"]["StableKey"];
-            /** @enum {string} */
-            protocol: "alertmanager";
+            protocol: string;
         };
         AlertSourceCredentialMetadata: {
             sourceKey: components["schemas"]["StableKey"];

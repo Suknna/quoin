@@ -816,7 +816,7 @@ function AlertDetailSheet({
 											/>
 										)}
 									</section>
-									{occurrence.source === "alertmanager" &&
+									{occurrence.source !== "platform" &&
 										correlationLabels(occurrence).length > 0 && (
 											<>
 												<Separator />

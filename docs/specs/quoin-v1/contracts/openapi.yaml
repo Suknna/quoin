@@ -5247,10 +5247,10 @@ components:
       properties:
         id:
           type: string
-          description: Alertmanager occurrence locator or platform:<fault-id> identity.
+          description: Alert occurrence locator or platform:<fault-id> identity.
         source:
           type: string
-          enum: [alertmanager, platform]
+          description: Registered alert source kind, or platform for an internal fault.
         component:
           type: string
           enum: [plinth]
@@ -6805,7 +6805,8 @@ components:
           $ref: '#/components/schemas/StableKey'
         protocol:
           type: string
-          enum: [alertmanager]
+          pattern: '^[a-z][a-z0-9-]*$'
+          description: Registered alert event source kind.
         enabled:
           type: boolean
         rowVersion:
@@ -6900,7 +6901,7 @@ components:
               $ref: '#/components/schemas/StableKey'
             protocol:
               type: string
-              enum: [alertmanager]
+              pattern: '^[a-z][a-z0-9-]*$'
     AlertSourceCredentialMetadata:
       type: object
       required: [sourceKey, credentialId, revealAvailable]

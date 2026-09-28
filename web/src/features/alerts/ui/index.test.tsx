@@ -63,7 +63,7 @@ describe("alerts module", () => {
   it("shows normalized semantics, correlation views and enrichment fields", async () => {
     const fetchMock = vi.fn().mockImplementation((input: string) => Promise.resolve({ ok: true, json: async () => {
       if (input === "/api/v1/alerts/alert-normalized") return {
-        id: "alert-normalized", source: "alertmanager", state: "Firing", rowVersion: 1,
+        id: "alert-normalized", source: "synthetic", state: "Firing", rowVersion: 1,
         severity: "critical", title: "CheckoutLatencyHigh", resource: "checkout-8080",
         firstSeenAt: "2026-01-01T00:00:00Z", lastStateChangeAt: "2026-01-01T00:00:00Z",
         labels: { alertname: "CheckoutLatencyHigh", service: "checkout" },
