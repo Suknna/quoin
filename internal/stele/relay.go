@@ -23,8 +23,10 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/plugins"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -37,8 +39,9 @@ const (
 // credential digest snapshot for inbound bearer auth, and the unary RPCs the
 // forwarder and gateway need.
 type Relay struct {
-	conn   *grpc.ClientConn
-	client runtimev1.SteleRelayClient
+	conn     *grpc.ClientConn
+	client   runtimev1.SteleRelayClient
+	manifest string
 
 	mu        sync.RWMutex
 	snapshot  *runtimev1.GetCredentialSnapshotResponse
@@ -73,7 +76,7 @@ func NewRelay(endpoint, caFile, clientCertFile, clientKeyFile string) (*Relay, e
 	if err != nil {
 		return nil, err
 	}
-	return &Relay{conn: conn, client: runtimev1.NewSteleRelayClient(conn)}, nil
+	return &Relay{conn: conn, client: runtimev1.NewSteleRelayClient(conn), manifest: plugins.Default().InboundManifestFingerprint()}, nil
 }
 
 func (relay *Relay) Close() error {
@@ -101,6 +104,7 @@ func (relay *Relay) Run(ctx context.Context) {
 func (relay *Relay) refresh(ctx context.Context) {
 	callCtx, cancel := context.WithTimeout(ctx, relayCallTimeout)
 	defer cancel()
+	callCtx = metadata.AppendToOutgoingContext(callCtx, plugins.InboundManifestMetadataKey, relay.manifest)
 	response, err := relay.client.GetCredentialSnapshot(callCtx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -182,6 +186,7 @@ func subtleCompare(a, b []byte) bool {
 func (relay *Relay) DeliverEvents(ctx context.Context, events []*runtimev1.RelayEvent) (*runtimev1.DeliverEventsResponse, error) {
 	callCtx, cancel := context.WithTimeout(ctx, relayCallTimeout)
 	defer cancel()
+	callCtx = metadata.AppendToOutgoingContext(callCtx, plugins.InboundManifestMetadataKey, relay.manifest)
 	return relay.client.DeliverEvents(callCtx, &runtimev1.DeliverEventsRequest{
 		ContractFingerprint: contract.ProtoAuthorityFingerprint,
 		Events:              events,

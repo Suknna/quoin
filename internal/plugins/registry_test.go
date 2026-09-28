@@ -77,6 +77,20 @@ func TestRegistryEventSourceLookup(t *testing.T) {
 	}
 }
 
+func TestInboundManifestFingerprintTracksVersionNotRegistrationOrder(t *testing.T) {
+	first := newTestRegistry(t).InboundManifestFingerprint()
+	if len(first) != 64 {
+		t.Fatalf("manifest fingerprint %q must be SHA-256 hex", first)
+	}
+	second := plugins.NewRegistry()
+	if err := second.Register(plugins.Plugin{ID: "alpha", Version: "2", DefaultEnabled: true, EventSource: stubSource{kind: "alphaevents"}, EventTypes: []string{"alerts.batch"}}); err != nil {
+		t.Fatal(err)
+	}
+	if first == second.InboundManifestFingerprint() {
+		t.Fatal("source version drift did not change the manifest fingerprint")
+	}
+}
+
 func TestRegistryRequiresSourceEventDeclarations(t *testing.T) {
 	registry := plugins.NewRegistry()
 	if err := registry.Register(plugins.Plugin{ID: "broken", Version: "1", EventSource: stubSource{kind: "broken"}}); err == nil {

@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -41,6 +42,7 @@ type relayTLSFixture struct {
 	steleClient   tls.Certificate
 	plinthClient  tls.Certificate
 	serverAddress string
+	manifest      string
 }
 
 func startRelayServer(t *testing.T, alertsService *alerts.Service, connectionsService *connections.Service) relayTLSFixture {
@@ -60,6 +62,7 @@ func startRelayServer(t *testing.T, alertsService *alerts.Service, connectionsSe
 		t.Fatal(err)
 	}
 	fixture := relayTLSFixture{}
+	fixture.manifest = alertsService.SourceRegistry().InboundManifestFingerprint()
 	var err error
 	if fixture.caPEM, err = os.ReadFile(secrets + "/runtime-ca.pem"); err != nil {
 		t.Fatal(err)
@@ -111,7 +114,22 @@ func relayClient(t *testing.T, fixture relayTLSFixture, clientCert *tls.Certific
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return runtimev1.NewSteleRelayClient(conn)
+	return &manifestRelayClient{SteleRelayClient: runtimev1.NewSteleRelayClient(conn), manifest: fixture.manifest}
+}
+
+type manifestRelayClient struct {
+	runtimev1.SteleRelayClient
+	manifest string
+}
+
+func (client *manifestRelayClient) GetCredentialSnapshot(ctx context.Context, req *runtimev1.GetCredentialSnapshotRequest, opts ...grpc.CallOption) (*runtimev1.GetCredentialSnapshotResponse, error) {
+	ctx = metadata.AppendToOutgoingContext(ctx, plugins.InboundManifestMetadataKey, client.manifest)
+	return client.SteleRelayClient.GetCredentialSnapshot(ctx, req, opts...)
+}
+
+func (client *manifestRelayClient) DeliverEvents(ctx context.Context, req *runtimev1.DeliverEventsRequest, opts ...grpc.CallOption) (*runtimev1.DeliverEventsResponse, error) {
+	ctx = metadata.AppendToOutgoingContext(ctx, plugins.InboundManifestMetadataKey, client.manifest)
+	return client.SteleRelayClient.DeliverEvents(ctx, req, opts...)
 }
 
 // relayTestHarness 装配一次 relay 测试的真实部件：引导数据库、alerts 服务
@@ -407,6 +425,14 @@ func TestSteleRelayMTLSIdentityAndDelivery(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("seeded credential missing from snapshot: %+v", snapshot)
+	}
+	wrongAssembly := relayClient(t, fixture, &fixture.steleClient).(*manifestRelayClient)
+	wrongAssembly.manifest = "out-of-date-plugin-assembly"
+	if _, err := wrongAssembly.GetCredentialSnapshot(ctx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("mismatched inbound manifest snapshot status=%v err=%v", status.Code(err), err)
+	}
+	if _, err := wrongAssembly.DeliverEvents(ctx, &runtimev1.DeliverEventsRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("mismatched inbound manifest relay status=%v err=%v", status.Code(err), err)
 	}
 
 	body := []byte(`{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"CPU","instance":"db-1"},"startsAt":"2026-08-17T10:00:00Z","fingerprint":"` + relayFingerprintHex(map[string]string{"alertname": "CPU", "instance": "db-1"}) + `"}],"truncatedAlerts":0}`)

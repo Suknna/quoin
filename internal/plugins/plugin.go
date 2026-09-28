@@ -29,6 +29,11 @@ import (
 	"encoding/json"
 )
 
+// InboundManifestMetadataKey is sent over the authenticated Stele→Quoin
+// channel on inbound-control RPCs. It is a compatibility fingerprint, not an
+// authentication token; mTLS remains the service identity authority.
+const InboundManifestMetadataKey = "quoin-inbound-manifest"
+
 // Well-known plugin IDs. They are naming authorities only: an ID becomes
 // usable when a host process actually registers the plugin.
 const (

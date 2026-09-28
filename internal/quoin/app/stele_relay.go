@@ -13,10 +13,12 @@ import (
 
 	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -55,6 +57,18 @@ func (server *steleRelayServer) checkContractFingerprint(value string) error {
 	return nil
 }
 
+func (server *steleRelayServer) checkInboundManifest(ctx context.Context) error {
+	meta, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return status.Error(codes.FailedPrecondition, "inbound plugin manifest missing")
+	}
+	values := meta.Get(plugins.InboundManifestMetadataKey)
+	if len(values) != 1 || values[0] != server.alerts.SourceRegistry().InboundManifestFingerprint() {
+		return status.Error(codes.FailedPrecondition, "inbound plugin manifest mismatch")
+	}
+	return nil
+}
+
 // Connect 把网关流转交给 steleGateway（握手裁决与收发循环在那里）。
 func (server *steleRelayServer) Connect(stream runtimev1.SteleRelay_ConnectServer) error {
 	if server.gateway == nil {
@@ -70,6 +84,9 @@ func (server *steleRelayServer) GetCredentialSnapshot(ctx context.Context, reque
 		return nil, err
 	}
 	if err := server.checkContractFingerprint(request.GetContractFingerprint()); err != nil {
+		return nil, err
+	}
+	if err := server.checkInboundManifest(ctx); err != nil {
 		return nil, err
 	}
 	version, sources, err := server.alerts.CredentialSnapshot(ctx)
@@ -105,6 +122,9 @@ func (server *steleRelayServer) DeliverEvents(ctx context.Context, request *runt
 		return nil, err
 	}
 	if err := server.checkContractFingerprint(request.GetContractFingerprint()); err != nil {
+		return nil, err
+	}
+	if err := server.checkInboundManifest(ctx); err != nil {
 		return nil, err
 	}
 	response := &runtimev1.DeliverEventsResponse{

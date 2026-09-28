@@ -16,6 +16,7 @@ package plugins
 //     types — Plinth is plugin-unaware by construction (ADR-0011).
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -233,6 +234,32 @@ func (r *Registry) SourceEvent(kind, eventType string) bool {
 	}
 	r.mu.Unlock()
 	return false
+}
+
+// InboundManifestFingerprint is the deterministic versioned declaration of
+// compiled inbound sources shared by Quoin and Stele. Deployment enablement
+// remains a separate authorization decision; any compiled source divergence
+// makes the inbound handshake fail closed before credential snapshots or
+// queued events are accepted.
+func (r *Registry) InboundManifestFingerprint() string {
+	r.mu.Lock()
+	r.ensureFrozen()
+	type declaration struct {
+		ID, Version, Kind, AlertIdentity string
+		EventTypes                       []string
+	}
+	manifest := make([]declaration, 0, len(r.sources))
+	for kind, id := range r.sources {
+		plugin := r.plugins[id]
+		events := append([]string{}, plugin.EventTypes...)
+		sort.Strings(events)
+		manifest = append(manifest, declaration{ID: id, Version: plugin.Version, Kind: kind, AlertIdentity: plugin.AlertIdentity, EventTypes: events})
+	}
+	r.mu.Unlock()
+	sort.Slice(manifest, func(i, j int) bool { return manifest[i].Kind < manifest[j].Kind })
+	encoded, _ := json.Marshal(manifest) // every field is a validated string
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", sum)
 }
 
 // EventSourceKinds returns the registered inbound source kinds, sorted.
