@@ -9,6 +9,7 @@ import {
 	getDailyReportVersion,
 	listDailyReportConfigs,
 	listDailyReports,
+	listMissingDailyReports,
 	rerunDailyReport,
 	updateDailyReportConfig,
 } from "./daily";
@@ -110,6 +111,15 @@ describe("daily report HTTP wire contract", () => {
 		expect(reports[1].sealedAt).toBeUndefined();
 		expect(calls[0].url).toContain("configKey=ops-daily");
 		expect(calls[0].url).toContain("limit=50");
+	});
+
+	it("reads explicit missing local dates for one config without inventing backfill", async () => {
+		const calls = stubFetch([
+			{ method: "GET", path: /\/api\/v1\/inspections\/daily-reports\/missing\?configKey=ops-daily$/, body: { items: [{ configKey: "ops-daily", localDate: "2026-09-26", reason: "not_scheduled" }] } },
+		]);
+		const dates = await listMissingDailyReports("ops-daily");
+		expect(dates).toEqual([{ configKey: "ops-daily", localDate: "2026-09-26", reason: "not_scheduled" }]);
+		expect(calls).toEqual([{ method: "GET", url: "/api/v1/inspections/daily-reports/missing?configKey=ops-daily", body: undefined }]);
 	});
 
 	it("reads the report detail with contributions, versions and sealed content", async () => {

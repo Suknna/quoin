@@ -27,6 +27,7 @@ import { EntityList } from "@/components/EntityList";
 import {
 	type DailyReportConfig,
 	type DailyReportSummary,
+	type MissingDailyReportDate,
 	backfillDailyReport,
 	dailyLocalDatePattern,
 	dailyStateBadgeClass,
@@ -35,11 +36,14 @@ import {
 	formatDailyTime,
 	listDailyReportConfigs,
 	listDailyReports,
+	listMissingDailyReports,
 } from "@/features/inspection/daily";
 
 /** 补跑漏过的整日：窗口仍是所选原日期，服务端绝不偷换为当前日期。 */
 function BackfillDialog({
 	configs,
+	initialConfigKey,
+	initialLocalDate,
 	suspended,
 	busy,
 	error,
@@ -49,6 +53,8 @@ function BackfillDialog({
 	onBackfilled,
 }: {
 	configs: DailyReportConfig[];
+	initialConfigKey?: string;
+	initialLocalDate?: string;
 	suspended: boolean;
 	busy: boolean;
 	error: string;
@@ -57,8 +63,8 @@ function BackfillDialog({
 	onOpenChange: (open: boolean) => void;
 	onBackfilled: (report: DailyReportSummary) => void;
 }) {
-	const [configKey, setConfigKey] = useState("");
-	const [localDate, setLocalDate] = useState("");
+	const [configKey, setConfigKey] = useState(initialConfigKey ?? "");
+	const [localDate, setLocalDate] = useState(initialLocalDate ?? "");
 	const selected = configs.find((config) => config.configKey === configKey);
 	return (
 		<DialogContent>
@@ -158,6 +164,13 @@ export function DailyReportsOverview({
 	const [backfillOpen, setBackfillOpen] = useState(false);
 	const [backfillBusy, setBackfillBusy] = useState(false);
 	const [backfillError, setBackfillError] = useState("");
+	const [missingConfigKey, setMissingConfigKey] = useState("");
+	const [missingDates, setMissingDates] = useState<MissingDailyReportDate[]>([]);
+	const [missingLoadedKey, setMissingLoadedKey] = useState("");
+	const [missingLoading, setMissingLoading] = useState(false);
+	const [missingError, setMissingError] = useState("");
+	const [missingRefresh, setMissingRefresh] = useState(0);
+	const [missingTarget, setMissingTarget] = useState<MissingDailyReportDate>();
 
 	const load = useCallback(async () => {
 		setError("");
@@ -187,6 +200,20 @@ export function DailyReportsOverview({
 		const timer = window.setTimeout(() => void load(), 0);
 		return () => window.clearTimeout(timer);
 	}, [load]);
+	const activeMissingConfigKey = configs.find((entry) => entry.enabled && entry.configKey === missingConfigKey)?.configKey ?? configs.find((entry) => entry.enabled)?.configKey;
+	useEffect(() => {
+		if (!activeMissingConfigKey || suspended) return;
+		let active = true;
+		const timer = window.setTimeout(() => {
+			setMissingLoading(true);
+			setMissingError("");
+			void listMissingDailyReports(activeMissingConfigKey).then(
+				(items) => { if (active) { setMissingDates(items); setMissingLoadedKey(activeMissingConfigKey); } },
+				(reason) => { if (active) { setMissingLoadedKey(activeMissingConfigKey); setMissingError(messageOf(reason, "无法读取遗漏日期。")); } },
+			).finally(() => { if (active) setMissingLoading(false); });
+		}, 0);
+		return () => { active = false; window.clearTimeout(timer); };
+	}, [activeMissingConfigKey, suspended, missingRefresh]);
 
 	const configDisplayName = (configKey: string) =>
 		configName[configKey] ?? configKey;
@@ -311,17 +338,53 @@ export function DailyReportsOverview({
 					emptyDescription="配置触发后每天自动生成；也可用“补跑日报”手动创建。"
 				/>
 			</section>
+			{activeMissingConfigKey && (
+				<section className="space-y-3">
+					<div className="flex flex-wrap items-end justify-between gap-3">
+						<div className="space-y-1">
+							<h2 className="text-xl font-semibold">遗漏日期</h2>
+							<p className="text-sm text-muted-foreground">只列当前配置生效以来最近 30 天该触发却没有日报的本地日期；不自动补造健康事实。</p>
+						</div>
+						<Select value={activeMissingConfigKey} onValueChange={setMissingConfigKey} disabled={suspended}>
+							<SelectTrigger aria-label="查看遗漏日期的报告配置" className="w-64"><SelectValue /></SelectTrigger>
+							<SelectContent><SelectGroup>{configs.filter((entry) => entry.enabled).map((entry) => (
+								<SelectItem key={entry.configKey} value={entry.configKey}>{entry.displayName}</SelectItem>
+							))}</SelectGroup></SelectContent>
+						</Select>
+					</div>
+					{missingError && <Alert variant="destructive"><AlertTitle>遗漏日期读取失败</AlertTitle><AlertDescription>{missingError}</AlertDescription><Button size="sm" variant="outline" className="mt-2" onClick={() => setMissingRefresh((value) => value + 1)}>重试</Button></Alert>}
+					<EntityList
+						items={(missingLoadedKey === activeMissingConfigKey ? missingDates : []).map((date) => ({
+							id: `${date.configKey}/${date.localDate}`,
+							title: date.localDate,
+							subtitle: date.reason === "trigger_nonexistent" ? "夏令时跳时：该触发分钟不存在" : "到期未生成日报",
+							badge: { text: "待人工补跑", variant: "outline" as const },
+							date,
+						}))}
+						columns={["title", "subtitle", "status", "actions"]}
+						renderActions={(item) => <Button size="sm" variant="outline" disabled={suspended} onClick={() => { setMissingTarget(item.date); setBackfillOpen(true); }}>补跑该日</Button>}
+						loading={!suspended && (missingLoading || missingLoadedKey !== activeMissingConfigKey)}
+						loadingLabel="正在核对遗漏日期"
+						emptyTitle="当前配置最近 30 天无已知遗漏日期"
+						emptyDescription="旧配置时段未参与核对；没有报告的日期仍可用补跑功能指定。"
+					/>
+				</section>
+			)}
 			<Dialog open={backfillOpen} onOpenChange={setBackfillOpen}>
 				<BackfillDialog
+					key={`${missingTarget?.configKey ?? "manual"}/${missingTarget?.localDate ?? "manual"}`}
 					configs={configs}
+					initialConfigKey={missingTarget?.configKey}
+					initialLocalDate={missingTarget?.localDate}
 					suspended={suspended}
 					busy={backfillBusy}
 					error={backfillError}
 					onBusyChange={setBackfillBusy}
 					onError={setBackfillError}
-					onOpenChange={setBackfillOpen}
+					onOpenChange={(open) => { setBackfillOpen(open); if (!open) setMissingTarget(undefined); }}
 					onBackfilled={(report) => {
 						setReports((current) => [report, ...current]);
+						setMissingRefresh((value) => value + 1);
 						void navigate(
 							`/inspections/daily/${encodeURIComponent(report.configKey)}/${encodeURIComponent(report.localDate)}`,
 						);

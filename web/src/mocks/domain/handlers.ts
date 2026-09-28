@@ -1440,6 +1440,15 @@ export const domainHandlers = [
 				.map(dailyWireOf),
 		);
 	}),
+	http.get("*/api/v1/inspections/daily-reports/missing", ({ request }) => {
+		const denied = adminRequired();
+		if (denied) return denied;
+		const key = new URL(request.url).searchParams.get("configKey");
+		if (!key || !getMockState().dailyReportConfigs.some((config) => config.configKey === key)) return problem(404, "未找到每日报告配置。");
+		// Demo data is a fixed snapshot, not a fabricated 30-day scheduler
+		// history. Real missing dates come from Quoin's read-only projection.
+		return page([]);
+	}),
 	http.get(
 		"*/api/v1/inspections/daily-reports/:configKey/:localDate",
 		({ params }) => {

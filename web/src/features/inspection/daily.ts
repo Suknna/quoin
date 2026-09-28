@@ -9,6 +9,7 @@ import type {
 	DailyReportSummary as GeneratedDailyReportSummary,
 	DailyReportAnalysisSummary as GeneratedDailyReportAnalysisSummary,
 	DailyReportAnalysisDetail as GeneratedDailyReportAnalysisDetail,
+	MissingDailyReportDate as GeneratedMissingDailyReportDate,
 } from "@/api/generated/types";
 /** Reuses the plan/run module's problem+json failure projection. */
 import { InspectionApiError, newClientCommandId } from "./api";
@@ -39,6 +40,7 @@ export type DailyReportTriggerKind = DailyReportSummary["triggerKind"];
 export type DailyReportVersionSummary = DailyReportDetail["versions"][number];
 export type DailyReportAnalysisSummary = GeneratedDailyReportAnalysisSummary;
 export type DailyReportAnalysisDetail = GeneratedDailyReportAnalysisDetail;
+export type MissingDailyReportDate = GeneratedMissingDailyReportDate;
 
 function queryOf(options: { configKey?: string; limit?: number }): string {
 	const query = new URLSearchParams({ limit: String(options.limit ?? 50) });
@@ -109,6 +111,15 @@ export async function listDailyReports(
 	);
 	if (!response.ok) throw await failure(response);
 	const page = (await response.json()) as { items?: DailyReportSummary[] };
+	return page.items ?? [];
+}
+
+/** Last 30 eligible local dates under the config's current schedule only. */
+export async function listMissingDailyReports(configKey: string): Promise<MissingDailyReportDate[]> {
+	const query = new URLSearchParams({ configKey });
+	const response = await fetch(`/api/v1/inspections/daily-reports/missing?${query}`, { credentials: "include" });
+	if (!response.ok) throw await failure(response);
+	const page = (await response.json()) as { items?: MissingDailyReportDate[] };
 	return page.items ?? [];
 }
 

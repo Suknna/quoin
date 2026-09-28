@@ -59,6 +59,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/inspections/daily-reports/missing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 列出一个日报配置最近三十天未产生报告的应触发本地日期
+         * @description 只展示当前启用配置自最近一次修改以来已到触发时刻却无报告身份的本地日期；不会自动补跑，也不声称旧配置的历史日期健康或缺失。DST 不存在的触发时间明确标记可人工补跑。
+         */
+        get: operations["listMissingInspectionDailyReports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/inspections/daily-reports/backfill": {
         parameters: {
             query?: never;
@@ -2339,6 +2359,16 @@ export interface components {
             createdAt: components["schemas"]["Timestamp"];
             updatedAt: components["schemas"]["Timestamp"];
         };
+        MissingDailyReportDate: {
+            configKey: components["schemas"]["StableKey"];
+            /** Format: date */
+            localDate: string;
+            /**
+             * @description 前者表示触发后未生成报告；后者表示夏令时跳时导致该时区当日无配置的本地触发分钟。
+             * @enum {string}
+             */
+            reason: "not_scheduled" | "trigger_nonexistent";
+        };
         DailyReportSummary: {
             id: components["schemas"]["LocatorId"];
             configKey: string;
@@ -4197,6 +4227,7 @@ export interface components {
 export type PluginInspectionScope = components['schemas']['PluginInspectionScope'];
 export type DailyReportConfigInput = components['schemas']['DailyReportConfigInput'];
 export type DailyReportConfig = components['schemas']['DailyReportConfig'];
+export type MissingDailyReportDate = components['schemas']['MissingDailyReportDate'];
 export type DailyReportSummary = components['schemas']['DailyReportSummary'];
 export type DailyReportSource = components['schemas']['DailyReportSource'];
 export type DailyReportContribution = components['schemas']['DailyReportContribution'];
@@ -4535,6 +4566,33 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    listMissingInspectionDailyReports: {
+        parameters: {
+            query: {
+                configKey: components["schemas"]["StableKey"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 按本地日期倒序的有界缺失日期；空集合不代表早于当前配置版本的日期均有报告。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["MissingDailyReportDate"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     backfillInspectionDailyReport: {

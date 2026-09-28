@@ -41,6 +41,14 @@ func TestDailyReportConfigAndBackfillOverHTTP(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("read daily config status=%d body=%s", response.Code, response.Body.String())
 	}
+	response = api.Get("/api/v1/inspections/daily-reports/missing?configKey=daily-http", headers)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"items":[]`) {
+		t.Fatalf("missing-day read status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = api.Get("/api/v1/inspections/daily-reports/missing?configKey=unknown", headers)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown config missing-day status=%d body=%s", response.Code, response.Body.String())
+	}
 	response = api.Post("/api/v1/inspections/daily-reports/backfill", strings.NewReader(`{
 		"clientCommandId":"backfill-daily-http-1","configKey":"daily-http","localDate":"2026-09-26"
 	}`), headers)

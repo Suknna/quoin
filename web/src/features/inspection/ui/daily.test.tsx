@@ -10,6 +10,7 @@ const dailyApi = vi.hoisted(() => ({
 	createDailyReportConfig: vi.fn(),
 	updateDailyReportConfig: vi.fn(),
 	listDailyReports: vi.fn(),
+	listMissingDailyReports: vi.fn(),
 	getDailyReport: vi.fn(),
 	getDailyReportVersion: vi.fn(),
 	listDailyReportAnalyses: vi.fn(),
@@ -91,12 +92,13 @@ const sealedDetail = {
 beforeEach(() => {
 	dailyApi.listDailyReportConfigs.mockResolvedValue([config]);
 	dailyApi.listDailyReports.mockResolvedValue([sealedSummary]);
+	dailyApi.listMissingDailyReports.mockResolvedValue([]);
 	dailyApi.getDailyReport.mockResolvedValue(sealedDetail);
 	dailyApi.getDailyReportVersion.mockResolvedValue(JSON.stringify(sealedDetail.latest));
 	dailyApi.listDailyReportAnalyses.mockResolvedValue([]);
 	dailyApi.createDailyReportConfig.mockResolvedValue(config);
 	dailyApi.updateDailyReportConfig.mockResolvedValue(config);
-	dailyApi.backfillDailyReport.mockResolvedValue({ ...sealedSummary, state: "Collecting", sealedAt: undefined });
+	dailyApi.backfillDailyReport.mockResolvedValue({ ...sealedSummary, id: "6", localDate: "2026-09-26", state: "Collecting", sealedAt: undefined });
 	dailyApi.rerunDailyReport.mockResolvedValue(sealedSummary);
 	dailyApi.getDailyReportConfig.mockResolvedValue(config);
 	planApi.listInspectionPlans.mockResolvedValue([
@@ -120,7 +122,7 @@ describe("DailyReportsOverview", () => {
 	it("renders configs and frozen reports with honest state badges", async () => {
 		const navigate = vi.fn();
 		render(<DailyReportsOverview suspended={false} navigate={navigate} />);
-		expect(await screen.findByText("运维每日报告")).toBeInTheDocument();
+		expect(await screen.findByRole("button", { name: "编辑 运维每日报告" })).toBeInTheDocument();
 		expect(screen.getByText(/每天 08:00/)).toBeInTheDocument();
 		expect(screen.getByText(/2026-09-27 · 运维每日报告/)).toBeInTheDocument();
 		expect(screen.getByText("已封存")).toBeInTheDocument();
@@ -139,12 +141,23 @@ describe("DailyReportsOverview", () => {
 	it("guards the backfill dialog on config + date before enabling submission", async () => {
 		render(<DailyReportsOverview suspended={false} navigate={vi.fn()} />);
 		// 等配置列表装载完成，按钮才可用（装载中禁用）。
-		await screen.findByText("运维每日报告");
+		await screen.findByRole("button", { name: "编辑 运维每日报告" });
 		const trigger = await screen.findByRole("button", { name: "补跑日报" });
 		await waitFor(() => expect(trigger).toBeEnabled());
 		fireEvent.click(trigger);
 		const submit = await screen.findByRole("button", { name: "发起补跑" });
 		expect(submit).toBeDisabled();
+	});
+
+	it("shows an explicitly missed local day and preselects it for manual backfill", async () => {
+		dailyApi.listMissingDailyReports.mockResolvedValue([{ configKey: "ops-daily", localDate: "2026-09-26", reason: "not_scheduled" }]);
+		render(<DailyReportsOverview suspended={false} navigate={vi.fn()} />);
+		expect(await screen.findByText("2026-09-26")).toBeInTheDocument();
+		expect(screen.getByText("到期未生成日报")).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "补跑该日" }));
+		expect(await screen.findByLabelText("报告日期")).toHaveValue("2026-09-26");
+		fireEvent.click(screen.getByRole("button", { name: "发起补跑" }));
+		await waitFor(() => expect(dailyApi.backfillDailyReport).toHaveBeenCalledWith("ops-daily", "2026-09-26"));
 	});
 });
 

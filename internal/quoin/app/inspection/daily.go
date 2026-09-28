@@ -155,6 +155,34 @@ func (handler *Handler) registerDailyReports(api huma.API) {
 		response.Body.Items = items
 		return response, nil
 	})
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/daily-reports/missing", OperationID: "listMissingInspectionDailyReports"}, func(ctx context.Context, input *struct {
+		Session   string `cookie:"__Host-quoin-session"`
+		ConfigKey string `query:"configKey" minLength:"1"`
+	}) (*struct {
+		CacheControl string `header:"Cache-Control"`
+		Body         struct {
+			Items []inspection.MissingDailyDate `json:"items"`
+		}
+	}, error) {
+		if _, err := handler.reader(ctx, input.Session); err != nil {
+			return nil, err
+		}
+		if input.ConfigKey == "" {
+			return nil, huma.Error400BadRequest("需要日报配置标识", nil)
+		}
+		items, err := handler.Inspections.MissingDailyReports(ctx, input.ConfigKey)
+		if err != nil {
+			return nil, mapDomainError(err)
+		}
+		response := &struct {
+			CacheControl string `header:"Cache-Control"`
+			Body         struct {
+				Items []inspection.MissingDailyDate `json:"items"`
+			}
+		}{CacheControl: noStore()}
+		response.Body.Items = items
+		return response, nil
+	})
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/daily-reports/{configKey}/{localDate}", OperationID: "getInspectionDailyReport"}, func(ctx context.Context, input *struct {
 		Session   string `cookie:"__Host-quoin-session"`
 		ConfigKey string `path:"configKey"`

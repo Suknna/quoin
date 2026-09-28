@@ -198,6 +198,33 @@ paths:
                     items: {$ref: '#/components/schemas/DailyReportSummary'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/inspections/daily-reports/missing:
+    get:
+      tags: [inspections]
+      operationId: listMissingInspectionDailyReports
+      summary: 列出一个日报配置最近三十天未产生报告的应触发本地日期
+      description: 只展示当前启用配置自最近一次修改以来已到触发时刻却无报告身份的本地日期；不会自动补跑，也不声称旧配置的历史日期健康或缺失。DST 不存在的触发时间明确标记可人工补跑。
+      parameters:
+        - in: query
+          name: configKey
+          required: true
+          schema: {$ref: '#/components/schemas/StableKey'}
+      responses:
+        '200':
+          description: 按本地日期倒序的有界缺失日期；空集合不代表早于当前配置版本的日期均有报告。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 30
+                    items: {$ref: '#/components/schemas/MissingDailyReportDate'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /api/v1/inspections/daily-reports/backfill:
     post:
       tags: [inspections]
@@ -4733,6 +4760,17 @@ components:
         rowVersion: {type: integer, minimum: 1}
         createdAt: {$ref: '#/components/schemas/Timestamp'}
         updatedAt: {$ref: '#/components/schemas/Timestamp'}
+    MissingDailyReportDate:
+      type: object
+      required: [configKey, localDate, reason]
+      additionalProperties: false
+      properties:
+        configKey: {$ref: '#/components/schemas/StableKey'}
+        localDate: {type: string, format: date}
+        reason:
+          type: string
+          enum: [not_scheduled, trigger_nonexistent]
+          description: 前者表示触发后未生成报告；后者表示夏令时跳时导致该时区当日无配置的本地触发分钟。
     DailyReportSummary:
       type: object
       required: [id, configKey, localDate, timezone, windowStartUtc, windowEndUtc, triggerKind, state, latestVersion, createdAt]

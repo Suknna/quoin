@@ -198,6 +198,7 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("getInspectionDailyReportConfig", http.MethodGet, "/api/v1/inspections/daily-report-configs/{configKey}", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
 		declaration("updateInspectionDailyReportConfig", http.MethodPut, "/api/v1/inspections/daily-report-configs/{configKey}", operations.LevelAdmin, operations.KindCommand, "inspection_daily_report"),
 		declaration("listInspectionDailyReports", http.MethodGet, "/api/v1/inspections/daily-reports", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
+		declaration("listMissingInspectionDailyReports", http.MethodGet, "/api/v1/inspections/daily-reports/missing", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
 		declaration("getInspectionDailyReport", http.MethodGet, "/api/v1/inspections/daily-reports/{configKey}/{localDate}", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
 		declaration("getInspectionDailyReportVersion", http.MethodGet, "/api/v1/inspections/daily-reports/{configKey}/{localDate}/versions/{version}", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
 		declaration("backfillInspectionDailyReport", http.MethodPost, "/api/v1/inspections/daily-reports/backfill", operations.LevelAdmin, operations.KindCommand, "inspection_daily_report"),
