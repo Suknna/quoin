@@ -120,7 +120,11 @@ describe("WorkspaceShell navigation", () => {
 
 	it("shows each administrator operations entry once with only the route-matching item active", () => {
 		renderShell("/inspections/run-1");
-		expect(screen.getAllByText("运维中心")).toHaveLength(3);
+		// 组归属只由全局栏表达一次；面板头部呈现模块自己的页面标题，不再重复组名。
+		expect(
+			screen.getAllByRole("button", { name: "运维中心" }),
+		).toHaveLength(1);
+		expect(screen.getAllByText("功能页面").length).toBeGreaterThan(0);
 		for (const name of ["告警列表", "故障复盘", "巡检", "业务视图"])
 			expect(screen.getByRole("button", { name })).toBeInTheDocument();
 		expect(
@@ -168,7 +172,7 @@ describe("WorkspaceShell navigation", () => {
 
 	it("keeps AI SRE knowledge navigation and active semantics", () => {
 		renderShell("/knowledge/items/k-1");
-		expect(screen.getAllByText("AI SRE")).toHaveLength(3);
+		expect(screen.getAllByRole("button", { name: "AI SRE" })).toHaveLength(1);
 		expect(screen.getByRole("button", { name: "知识" })).toHaveAttribute(
 			"aria-current",
 			"page",

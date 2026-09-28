@@ -271,7 +271,9 @@ export function WorkspaceShell({
 }) {
 	const operations = isOperationsRoute(route);
 	const aiSre = isAiSreRoute(route);
-	const moduleHeader = operations ? "运维中心" : aiSre ? "AI SRE" : view.title;
+	// 面板头部始终呈现模块自己的页面标题：组归属由左侧全局栏的激活态表达，
+	// 不再在页面上方再压一个组名标题（巡检页曾因此同时出现“运维中心”与“巡检计划”两级标题）。
+	const moduleHeader = view.title;
 	// The module pane folds away entirely (global rail stays), giving detail pages full width.
 	const [paneCollapsed, setPaneCollapsed] = useState(
 		() => window.localStorage.getItem(PANE_STORAGE_KEY) === "collapsed",
