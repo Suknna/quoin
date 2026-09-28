@@ -4,6 +4,16 @@ import type {
 	PluginInspectionPlan,
 	UserSummary,
 } from "../../api/generated/types";
+import type {
+	DailyReportConfig,
+	DailyReportDetail,
+} from "../../features/inspection/daily";
+
+/** One mock daily report: the read-model detail plus per-version sealed content. */
+export interface MockDailyReport extends DailyReportDetail {
+	/** version → raw sealed content JSON string, mirroring the stored document. */
+	contents: Record<string, string>;
+}
 
 interface LabelContractSummary {
 	id: string;
@@ -197,6 +207,8 @@ export interface MockState {
 	inspectionPlans: PluginInspectionPlan[];
 	inspectionRuns: InspectionRunDetail[];
 	reports: Record<string, InspectionReportDetail[]>;
+	dailyReportConfigs: DailyReportConfig[];
+	dailyReports: MockDailyReport[];
 	candidates: CandidateDetail[];
 	knowledge: KnowledgeDetail[];
 	versions: Record<string, KnowledgeVersionDetail[]>;
@@ -412,6 +424,101 @@ function baseState(scenario: MockScenario): MockState {
 		createdAt: now,
 		updatedAt: now,
 	};
+	// 跨来源日报（ADR-0014）演示边界：一份已封存（含 plan_missing 缺口事实），
+	// 一份采集中（无版本、无结论）。
+	const dailySealedContent = {
+		schemaKind: "inspection_daily_report_v1",
+		configKey: "ops-daily",
+		localDate: "2026-09-27",
+		timezone: "Asia/Shanghai",
+		windowStartUtc: "2026-09-26T16:00:00Z",
+		windowEndUtc: "2026-09-27T16:00:00Z",
+		sealedAt: "2026-09-28T02:00:00Z",
+		sources: [
+			{
+				planKey: latencyPlan.planKey,
+				displayName: latencyPlan.displayName,
+				connectionName: latencyPlan.connectionName,
+				pluginId: latencyPlan.pluginId,
+				templateId: latencyPlan.templateId,
+				templateVersion: latencyPlan.templateVersion ?? undefined,
+				enabled: true,
+				sourceEnabled: true,
+				status: "ok" as const,
+				checks: [
+					{
+						runId: 7,
+						checkKey: "promql_check",
+						status: "ok",
+						observedAt: "2026-09-27T09:30:00Z",
+					},
+				],
+			},
+			{
+				planKey: "legacy-cron-check",
+				enabled: false,
+				sourceEnabled: false,
+				missing: true,
+				status: "gap" as const,
+				gapReasons: ["plan_missing"],
+			},
+		],
+		totals: { checksOk: 1, checksGap: 0, checksError: 0, sourcesGap: 1 },
+	};
+	const sealedDailyReport: MockDailyReport = {
+		id: "daily-report-1",
+		configKey: "ops-daily",
+		localDate: "2026-09-27",
+		timezone: "Asia/Shanghai",
+		windowStartUtc: "2026-09-26T16:00:00Z",
+		windowEndUtc: "2026-09-27T16:00:00Z",
+		triggerKind: "schedule",
+		state: "Sealed",
+		sealedAt: "2026-09-28T02:00:00Z",
+		latestVersion: 1,
+		createdAt: "2026-09-28T00:00:00Z",
+		configRowVersion: 1,
+		cutoffAt: "2026-09-28T02:00:00Z",
+		contributions: dailySealedContent.sources,
+		versions: [{ version: 1, createdAt: "2026-09-28T02:00:00Z" }],
+		latest: dailySealedContent,
+		contents: { "1": JSON.stringify(dailySealedContent, null, 2) },
+	};
+	const collectingDailyReport: MockDailyReport = {
+		id: "daily-report-2",
+		configKey: "ops-daily",
+		localDate: "2026-09-28",
+		timezone: "Asia/Shanghai",
+		windowStartUtc: "2026-09-27T16:00:00Z",
+		windowEndUtc: "2026-09-28T16:00:00Z",
+		triggerKind: "schedule",
+		state: "Collecting",
+		latestVersion: 0,
+		createdAt: "2026-09-29T00:00:00Z",
+		configRowVersion: 1,
+		cutoffAt: "2026-09-29T02:00:00Z",
+		contributions: [
+			{
+				planKey: latencyPlan.planKey,
+				displayName: latencyPlan.displayName,
+				connectionName: latencyPlan.connectionName,
+				pluginId: latencyPlan.pluginId,
+				templateId: latencyPlan.templateId,
+				templateVersion: latencyPlan.templateVersion ?? undefined,
+				enabled: true,
+				sourceEnabled: true,
+			},
+			{
+				planKey: "legacy-cron-check",
+				enabled: false,
+				sourceEnabled: false,
+				missing: true,
+			},
+		],
+		versions: [],
+		contents: {},
+	};
+
 	// A seeded active run exercises cancel semantics on a plan-scoped (non-legacy) Run.
 	const activeRun: InspectionRunDetail = {
 		id: "inspection-run-2",
@@ -1017,6 +1124,20 @@ function baseState(scenario: MockScenario): MockState {
 		businessViews: [checkoutView, catalogView],
 		inspectionPlans: [latencyPlan],
 		inspectionRuns: [activeRun, run],
+		dailyReportConfigs: [
+			{
+				configKey: "ops-daily",
+				displayName: "运维每日报告",
+				enabled: true,
+				timezone: "Asia/Shanghai",
+				triggerTime: "08:00",
+				planKeys: [latencyPlan.planKey, "legacy-cron-check"],
+				rowVersion: 1,
+				createdAt: now,
+				updatedAt: now,
+			},
+		],
+		dailyReports: [sealedDailyReport, collectingDailyReport],
 		reports: {
 			[run.id]: [
 				{
@@ -1078,6 +1199,8 @@ function baseState(scenario: MockScenario): MockState {
 		state.inspectionPlans = [];
 		state.inspectionRuns = [];
 		state.reports = {};
+		state.dailyReportConfigs = [];
+		state.dailyReports = [];
 		state.candidates = [];
 		state.knowledge = [];
 		state.versions = {};
