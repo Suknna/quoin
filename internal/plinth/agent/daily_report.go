@@ -33,6 +33,11 @@ const (
 	// 单个索引条目的缩减上限：超长测量摘要（如巨型标签值）在索引中显式
 	// 省略（measurementElided），完整内容经工具取回——导览绝不携带无界正文。
 	dailyProvenanceEntryCapBytes = 2 * 1024
+	// The closing source, indexPartial, truncation marker (including its
+	// explanatory note), and closing provenance tags all count toward the
+	// budget, even when the next source has zero checks. Reserve more than their
+	// maximum fixed-format size before accepting each source/check entry.
+	dailyProvenanceTrailerBytes = 1024
 )
 
 // dailyProvenanceTruncationNote 是截断标记携带的固定说明（字节恒定）。
@@ -244,7 +249,7 @@ func BuildDailyReportMessages(input DailyReportInput) ([]*schema.Message, error)
 		}
 		target.WriteString("      </check>\n")
 	}
-	used, shownChecks, shownSources := 0, 0, 0
+	used, shownChecks, shownSources := provenance.Len(), 0, 0
 	truncated := false
 	for _, source := range input.Sources {
 		if truncated {
@@ -263,6 +268,10 @@ func BuildDailyReportMessages(input DailyReportInput) ([]*schema.Message, error)
 		for _, reason := range source.GapReasons {
 			sourceOpen.WriteString("      <gapReason>" + xmlEscape(reason) + "</gapReason>\n")
 		}
+		if used+sourceOpen.Len()+dailyProvenanceTrailerBytes > budget {
+			truncated = true
+			break
+		}
 		used += sourceOpen.Len()
 		provenance.WriteString(sourceOpen.String())
 		checksShownHere := 0
@@ -274,9 +283,8 @@ func BuildDailyReportMessages(input DailyReportInput) ([]*schema.Message, error)
 				renderCheck(reduced, check, true)
 				entry = reduced
 			}
-			if used+entry.Len() > budget && shownChecks > 0 {
-				// 超出导览预算：显式截断。首条检查项永远保留（有界），保证
-				// 索引至少携带一个真实条目形状；其余事实经工具取回。
+			if used+entry.Len()+dailyProvenanceTrailerBytes > budget {
+				// 超出导览预算：显式截断；完整事实经工具取回。
 				truncated = true
 				break
 			}
@@ -286,9 +294,13 @@ func BuildDailyReportMessages(input DailyReportInput) ([]*schema.Message, error)
 			shownChecks++
 		}
 		if checksShownHere < len(source.Checks) {
-			fmt.Fprintf(provenance, "      <indexPartial checksShown=\"%d\" checksTotal=\"%d\" />\n", checksShownHere, len(source.Checks))
+			partial := fmt.Sprintf("      <indexPartial checksShown=\"%d\" checksTotal=\"%d\" />\n", checksShownHere, len(source.Checks))
+			provenance.WriteString(partial)
+			used += len(partial)
 		}
-		provenance.WriteString("    </source>\n")
+		const closingSource = "    </source>\n"
+		provenance.WriteString(closingSource)
+		used += len(closingSource)
 		shownSources++
 	}
 	if truncated {
@@ -297,6 +309,9 @@ func BuildDailyReportMessages(input DailyReportInput) ([]*schema.Message, error)
 		provenance.WriteString(" note=\"" + xmlEscape(dailyProvenanceTruncationNote) + "\" />\n")
 	}
 	provenance.WriteString("  </provenance>\n")
+	if provenance.Len() > budget {
+		return nil, fmt.Errorf("render daily report prompt: provenance index exceeds its byte budget")
+	}
 	body.WriteString(provenance.String())
 	// (c) 人读日报总结的输出要求：管理员撰写的冻结期望（仅本次报告版本）
 	// 优先；缺省使用内置安全默认。期望文本是用户级说明——XML 转义后原样

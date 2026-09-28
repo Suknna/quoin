@@ -326,6 +326,42 @@ func TestDailyReportPromptBoundsProvenanceIndexUnderContextBudget(t *testing.T) 
 	}
 }
 
+func TestDailyReportPromptBoundsAllEmptySources(t *testing.T) {
+	input := dailyReportTestInput()
+	input.ModelContract.ContextBudgetTokens = 8000
+	input.Sources = nil
+	for index := 0; index < 2500; index++ {
+		source := dailySourceFor(fmt.Sprintf("empty-plan-%04d", index))
+		source.Checks = nil
+		source.Status = "gap"
+		source.GapReasons = []string{"no_collection"}
+		input.Sources = append(input.Sources, source)
+	}
+	messages, err := BuildDailyReportMessages(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := messages[1].Content
+	parsed := parseDailyPrompt(t, prompt)
+	if len(parsed.Sources) == 0 || len(parsed.Sources) >= len(input.Sources) {
+		t.Fatalf("empty source index was not bounded: %d of %d", len(parsed.Sources), len(input.Sources))
+	}
+	start := strings.Index(prompt, "  <provenance ")
+	end := strings.Index(prompt, "  </provenance>\n")
+	if start < 0 || end < start {
+		t.Fatal("bounded provenance section missing")
+	}
+	indexBytes := len(prompt[start : end+len("  </provenance>\n")])
+	if indexBytes > dailyProvenanceBudget(input.ModelContract.ContextBudgetTokens) {
+		t.Fatalf("empty source index %d exceeds %d byte budget", indexBytes, dailyProvenanceBudget(input.ModelContract.ContextBudgetTokens))
+	}
+	if !strings.Contains(prompt, fmt.Sprintf("shownSources=\"%d\"", len(parsed.Sources))) ||
+		!strings.Contains(prompt, "totalSources=\"2500\"") ||
+		!strings.Contains(prompt, "shownChecks=\"0\" totalChecks=\"0\"") {
+		t.Fatal("truncation must accurately report empty sources and zero checks")
+	}
+}
+
 // TestDailyReportPromptRendersFullIndexWithinLargeBudget 钉住预算内的完整
 // 渲染：小输入 + 宽预算不产生截断标记，逐项内容与既有契约一致。
 func TestDailyReportPromptRendersFullIndexWithinLargeBudget(t *testing.T) {
