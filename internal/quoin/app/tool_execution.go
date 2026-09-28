@@ -180,6 +180,8 @@ func (service *RuntimeService) executeRoutedToolCall(ctx context.Context, attemp
 		seal = service.invokeKnowledgeSearchTool(execCtx, loaded)
 	} else if toolName == "knowledge_get" {
 		seal = service.invokeKnowledgeGetTool(execCtx, loaded)
+	} else if toolName == "daily_report_get" {
+		seal = service.invokeDailyReportGetTool(execCtx, attempts, loaded)
 	} else if toolName == "artifact_read" || toolName == "artifact_grep" {
 		seal = service.invokeArtifactTool(execCtx, loaded)
 	} else {

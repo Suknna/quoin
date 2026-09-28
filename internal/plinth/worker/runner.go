@@ -146,6 +146,11 @@ func (runner *Runner) Run(parent context.Context, attemptID int64, dispatch *run
 	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS {
 		workMode = workerv1.WorkMode_WORK_MODE_INSPECTION_ANALYSIS
 		runner.failureSchemaKind = InspectionOutputSchemaKind
+	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_DAILY_ANALYSIS {
+		// 日报总结与巡检分析共用工作模式：同为 chat 工具循环 agent；失败载荷
+		// 用自己的冻结结果 schema。
+		workMode = workerv1.WorkMode_WORK_MODE_INSPECTION_ANALYSIS
+		runner.failureSchemaKind = InspectionDailyOutputSchemaKind
 	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION {
 		workMode = workerv1.WorkMode_WORK_MODE_KNOWLEDGE_EXTRACTION
 		runner.failureSchemaKind = KnowledgeExtractionOutputSchemaKind

@@ -114,6 +114,9 @@ type Service struct {
 	sealDailyReport     *execution.Operation
 	manualDailyReport   *execution.Operation
 	rerunDailyReport    *execution.Operation
+	// 日报 Agent 分析（ADR-0014）：创建重试与结果裁决都是系统后台工作。
+	ensureDailyAnalysis *execution.Operation
+	dailyAnalysisResult *execution.Operation
 }
 
 // NewService assembles the module over db: the pool backs the runner's owned
@@ -178,6 +181,8 @@ func (s *Service) registerOperations() {
 	s.sealDailyReport = register(execution.Operation{Name: CommandSealDailyReport, Class: execution.ClassWrite, ObjectType: ObjectInspectionDailyReport, Authorize: requireSchedulerSource})
 	s.manualDailyReport = register(execution.Operation{Name: CommandManualDailyReport, Class: execution.ClassWrite, ObjectType: ObjectInspectionDailyReport, Authorize: authorizeInspectionAdmin})
 	s.rerunDailyReport = register(execution.Operation{Name: CommandRerunDailyReport, Class: execution.ClassWrite, ObjectType: ObjectInspectionDailyReport, Authorize: authorizeInspectionAdmin})
+	s.ensureDailyAnalysis = register(execution.Operation{Name: commandDailyAnalysisEnsure, Class: execution.ClassWrite, ObjectType: ObjectInspectionDailyReport, Authorize: requireSystemResultWork})
+	s.dailyAnalysisResult = register(execution.Operation{Name: commandDailyAnalysisResult, Class: execution.ClassWrite, ObjectType: ObjectInspectionDailyReport, Authorize: requireSystemResultWork})
 }
 
 // SetReader injects the composition layer's real read-only query surface
@@ -310,6 +315,25 @@ func (s *Service) schedulerContext(ctx context.Context) (context.Context, error)
 		CorrelationID: correlationID,
 		Actor:         execution.Principal{Kind: execution.PrincipalSystem, ID: 0},
 		Source:        execution.Source{Kind: execution.SourceScheduler},
+	})
+}
+
+// taskContext establishes the system background-task scope for the daily
+// analysis sweep (the periodic local-execution pass owns no business child;
+// each ensure is its own operation with its own correlation). A context that
+// already carries metadata is passed through unchanged.
+func (s *Service) taskContext(ctx context.Context) (context.Context, error) {
+	if _, ok := execution.FromContext(ctx); ok {
+		return ctx, nil
+	}
+	correlationID, err := execution.NewCorrelationID()
+	if err != nil {
+		return nil, err
+	}
+	return execution.WithMetadata(ctx, execution.Metadata{
+		CorrelationID: correlationID,
+		Actor:         execution.Principal{Kind: execution.PrincipalSystem, ID: 0},
+		Source:        execution.Source{Kind: execution.SourceTask},
 	})
 }
 

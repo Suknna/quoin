@@ -54,6 +54,10 @@ const KnowledgeExtractionAgentVersion = "initial-analysis-v1"
 // to freeze a per-attempt tool catalog for inspection analyses.
 const InspectionAnalysisAgentVersion = "inspection-analysis-v5"
 
+// InspectionDailyAnalysisAgentVersion pins the cross-source daily report
+// analysis agent generation (mirrors attempt.InspectionDailyAgentVersion).
+const InspectionDailyAnalysisAgentVersion = "inspection-daily-analysis-v1"
+
 // KeptInspectionAnalysisAgentVersion retains the Keep-adapted
 // inspection-analysis-v3 prompt generation for already-created attempts.
 const KeptInspectionAnalysisAgentVersion = "inspection-analysis-v3"

@@ -145,6 +145,12 @@ func (service *RuntimeService) handleAttemptAcceptRouted(ctx context.Context, en
 				sharedops.LogEvent("quoin", "error", "inspection.accept_failed", err.Error())
 			}
 		}
+	case "inspection_daily_analysis":
+		if service.Inspections != nil {
+			if err := service.Inspections.Attempts().Accept(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
+				sharedops.LogEvent("quoin", "error", "inspection.daily_accept_failed", err.Error())
+			}
+		}
 	case "initial_analysis":
 		if err := service.Analyses.AcceptAttempt(ctx, accept.GetAttemptId(), envelope.GetBootId(), envelope.GetConnectionEpoch()); err != nil {
 			sharedops.LogEvent("quoin", "error", "analysis.accept_failed", err.Error())
@@ -212,6 +218,10 @@ func (service *RuntimeService) handleResultProposalRouted(ctx context.Context, e
 	}
 	if attemptType == "inspection_analysis" {
 		service.handleInspectionReportResultProposal(ctx, envelope, proposal)
+		return
+	}
+	if attemptType == "inspection_daily_analysis" {
+		service.handleInspectionDailyResultProposal(ctx, envelope, proposal)
 		return
 	}
 	if attemptType == "knowledge_extraction" {
@@ -300,6 +310,12 @@ func (service *RuntimeService) handleCancelAckRouted(ctx context.Context, slot s
 		if service.Inspections != nil {
 			if err := service.Inspections.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
 				sharedops.LogEvent("quoin", "error", "inspection.analysis_cancel_ack", err.Error())
+			}
+		}
+	case "inspection_daily_analysis":
+		if service.Inspections != nil {
+			if err := service.Inspections.Attempts().CancelAck(ctx, ack.GetAttemptId()); err != nil {
+				sharedops.LogEvent("quoin", "error", "inspection.daily_cancel_ack", err.Error())
 			}
 		}
 	case "initial_analysis":

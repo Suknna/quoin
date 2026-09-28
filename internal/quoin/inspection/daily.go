@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Suknna/quoin/internal/agentcontext"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
@@ -48,6 +49,10 @@ const dailyReportContentKind = "inspection_daily_report_v1"
 // settled by then are explicit cutoff gaps, never silently dropped and never
 // waited on unboundedly.
 const dailyCollectionCutoff = 2 * time.Hour
+
+// maxDailyExpectedOutputLength 有界化管理员撰写的期望输出文本（纯文本，
+// 不含任何工具/授权语义；渲染时 XML 转义并冻结到具体报告版本）。
+const maxDailyExpectedOutputLength = 4000
 
 // triggerTimePattern is the closed local wall-clock vocabulary for the daily
 // trigger: 24h 'HH:MM'.
@@ -84,10 +89,14 @@ type DailyReportConfig struct {
 	Timezone    string   `json:"timezone"`
 	TriggerTime string   `json:"triggerTime"`
 	PlanKeys    []string `json:"planKeys"`
-	RowVersion  int64    `json:"rowVersion"`
-	CreatedAt   string   `json:"createdAt"`
-	UpdatedAt   string   `json:"updatedAt"`
-	configID    int64
+	// ReportInstructions 是可选的人类期望输出说明（有界纯文本）；nil 表示
+	// 使用渲染器内置的安全默认（逐来源状态/事实变化/缺口/风险与下一步/引用
+	// Run 与 Evidence id）。
+	ReportInstructions *string `json:"reportInstructions,omitempty"`
+	RowVersion         int64   `json:"rowVersion"`
+	CreatedAt          string  `json:"createdAt"`
+	UpdatedAt          string  `json:"updatedAt"`
+	configID           int64
 }
 
 // DailyReportConfigInput is the create/update command payload.
@@ -98,52 +107,32 @@ type DailyReportConfigInput struct {
 	Timezone    string
 	TriggerTime string
 	PlanKeys    []string
+	// ReportInstructions 可选；指向 nil = 使用内置默认；空串 = 显式清除
+	// （存 NULL，同样回落默认）；非空 = 仅使用该文本（有界校验）。
+	ReportInstructions *string
 }
 
 // dailyContribution is the trigger-time frozen identity of one participating
 // plan and its source. Later plan/connection changes never re-enter an
 // existing report; the frozen snapshot defines the contributing set.
-type dailyContribution struct {
-	PlanKey         string `json:"planKey"`
-	DisplayName     string `json:"displayName,omitempty"`
-	ConnectionName  string `json:"connectionName,omitempty"`
-	PluginID        string `json:"pluginId,omitempty"`
-	TemplateID      string `json:"templateId,omitempty"`
-	TemplateVersion string `json:"templateVersion,omitempty"`
-	Enabled         bool   `json:"enabled"`
-	SourceEnabled   bool   `json:"sourceEnabled"`
-	Missing         bool   `json:"missing,omitempty"`
-}
+// The shape is shared with the model-visible projection vocabulary
+// (internal/agentcontext): the sealed document and analysis snapshots must
+// stay byte-compatible with what the daily prompt renderer reads.
+type dailyContribution = agentcontext.DailyContribution
 
 // dailyCheckItem is one per-check fact inside a sealed source report. Gaps
 // keep their reason and observation time when the collection recorded one;
 // absence of data is listed, never filled in.
-type dailyCheckItem struct {
-	RunID      int64   `json:"runId"`
-	CheckKey   string  `json:"checkKey"`
-	Status     string  `json:"status"`
-	GapReason  *string `json:"gapReason,omitempty"`
-	ObservedAt *string `json:"observedAt,omitempty"`
-}
+type dailyCheckItem = agentcontext.DailyCheckItem
 
 // dailySourceReport is the sealed aggregation for one contributing plan: the
 // frozen contribution identity plus the explicit outcome. status is "gap"
 // whenever any explicit gap reason exists or any check is not ok; it is "ok"
 // only with at least one settled check and none failing.
-type dailySourceReport struct {
-	dailyContribution
-	Status     string           `json:"status"`
-	GapReasons []string         `json:"gapReasons,omitempty"`
-	Checks     []dailyCheckItem `json:"checks,omitempty"`
-}
+type dailySourceReport = agentcontext.DailySourceReport
 
 // dailyTotals is the coarse sealed roll-up over sources and checks.
-type dailyTotals struct {
-	ChecksOK    int `json:"checksOk"`
-	ChecksGap   int `json:"checksGap"`
-	ChecksError int `json:"checksError"`
-	SourcesGap  int `json:"sourcesGap"`
-}
+type dailyTotals = agentcontext.DailyTotals
 
 // dailyReportContent is the frozen sealed document. All fields come from
 // immutable rows plus the seal moment; re-deriving it later from the same
@@ -178,8 +167,10 @@ type DailyReportSummary struct {
 
 // DailyReportVersionSummary is one immutable version entry.
 type DailyReportVersionSummary struct {
-	Version   int64  `json:"version"`
-	CreatedAt string `json:"createdAt"`
+	Version int64 `json:"version"`
+	// ExpectedOutput 是该版本分析所用的人类期望输出（封存/重分析时冻结）。
+	ExpectedOutput *string `json:"expectedOutput,omitempty"`
+	CreatedAt      string  `json:"createdAt"`
 }
 
 // DailyReportDetail is the read model of one daily report: frozen identity,
@@ -220,9 +211,9 @@ func (s *Service) CreateDailyReportConfig(ctx context.Context, principalID int64
 			return DailyReportConfig{}, execution.Unchanged, err
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO inspection_daily_report_configs(config_key,display_name,enabled,timezone,trigger_time,plan_keys_json,row_version,created_by,created_at,updated_at)
-			VALUES(?,?,?,?,?,?,1,?,?,?)`,
-			input.ConfigKey, input.DisplayName, boolInt(input.Enabled), dailyTimezone(input.Timezone), input.TriggerTime, string(planKeys), principalID, now, now); err != nil {
+			INSERT INTO inspection_daily_report_configs(config_key,display_name,enabled,timezone,trigger_time,plan_keys_json,report_instructions,row_version,created_by,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,1,?,?,?)`,
+			input.ConfigKey, input.DisplayName, boolInt(input.Enabled), dailyTimezone(input.Timezone), input.TriggerTime, string(planKeys), dailyExpectedOutputText(input), principalID, now, now); err != nil {
 			return DailyReportConfig{}, execution.Unchanged, err
 		}
 		config, err := s.dailyConfigOn(ctx, tx, input.ConfigKey)
@@ -257,9 +248,9 @@ func (s *Service) UpdateDailyReportConfig(ctx context.Context, principalID int64
 			return DailyReportConfig{}, execution.Unchanged, err
 		}
 		result, err := tx.ExecContext(ctx, `
-			UPDATE inspection_daily_report_configs SET display_name=?,enabled=?,timezone=?,trigger_time=?,plan_keys_json=?,row_version=row_version+1,updated_at=?
+			UPDATE inspection_daily_report_configs SET display_name=?,enabled=?,timezone=?,trigger_time=?,plan_keys_json=?,report_instructions=?,row_version=row_version+1,updated_at=?
 			WHERE config_key=? AND row_version=?`,
-			input.DisplayName, boolInt(input.Enabled), dailyTimezone(input.Timezone), input.TriggerTime, string(planKeys), now,
+			input.DisplayName, boolInt(input.Enabled), dailyTimezone(input.Timezone), input.TriggerTime, string(planKeys), dailyExpectedOutputText(input), now,
 			input.ConfigKey, expectedRowVersion)
 		if err != nil {
 			return DailyReportConfig{}, execution.Unchanged, err
@@ -326,10 +317,11 @@ func (s *Service) dailyConfigOn(ctx context.Context, q rowQuerier, configKey str
 	var config DailyReportConfig
 	var enabled int
 	var planKeysJSON string
+	var reportInstructions sql.NullString
 	err := q.QueryRowContext(ctx, `
-		SELECT id,config_key,display_name,enabled,timezone,trigger_time,plan_keys_json,row_version,created_at,updated_at
+		SELECT id,config_key,display_name,enabled,timezone,trigger_time,plan_keys_json,report_instructions,row_version,created_at,updated_at
 		FROM inspection_daily_report_configs WHERE config_key=?`, configKey).
-		Scan(&config.configID, &config.ConfigKey, &config.DisplayName, &enabled, &config.Timezone, &config.TriggerTime, &planKeysJSON, &config.RowVersion, &config.CreatedAt, &config.UpdatedAt)
+		Scan(&config.configID, &config.ConfigKey, &config.DisplayName, &enabled, &config.Timezone, &config.TriggerTime, &planKeysJSON, &reportInstructions, &config.RowVersion, &config.CreatedAt, &config.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DailyReportConfig{}, &PlanConflictError{Code: "not_found", Detail: "日报配置不存在"}
 	}
@@ -340,6 +332,9 @@ func (s *Service) dailyConfigOn(ctx context.Context, q rowQuerier, configKey str
 	config.PlanKeys = []string{}
 	if err := json.Unmarshal([]byte(planKeysJSON), &config.PlanKeys); err != nil {
 		return DailyReportConfig{}, err
+	}
+	if reportInstructions.Valid {
+		config.ReportInstructions = &reportInstructions.String
 	}
 	return config, nil
 }
@@ -381,17 +376,38 @@ func (s *Service) validateDailyConfigInput(ctx context.Context, q execution.Exec
 			return &PlanConflictError{Code: "unknown_plan", Detail: fmt.Sprintf("参与计划 %s 不存在", key)}
 		}
 	}
+	if input.ReportInstructions != nil {
+		length := len([]rune(*input.ReportInstructions))
+		if length > maxDailyExpectedOutputLength {
+			return &PlanConflictError{Code: "malformed_expected_output", Detail: fmt.Sprintf("期望输出不能超过 %d 字符", maxDailyExpectedOutputLength)}
+		}
+	}
 	return nil
 }
 
 // dailyConfigDigestPayload keeps the ledger digest explicit and stable per
 // command shape; expectedRowVersion is zero for creates.
 func dailyConfigDigestPayload(input DailyReportConfigInput, expectedRowVersion int64) map[string]any {
-	return map[string]any{
+	payload := map[string]any{
 		"configKey": input.ConfigKey, "displayName": input.DisplayName, "enabled": input.Enabled,
 		"timezone": dailyTimezone(input.Timezone), "triggerTime": input.TriggerTime,
 		"planKeys": dailyPlanKeys(input.PlanKeys), "expectedRowVersion": expectedRowVersion,
 	}
+	// 期望输出参与命令 digest：nil（继承默认）与空串（显式清除，同存 NULL）
+	// 在存储上不可区分，但携带与否必须不可混淆 replay；仅非空文本进 digest。
+	if input.ReportInstructions != nil && *input.ReportInstructions != "" {
+		payload["reportInstructions"] = *input.ReportInstructions
+	}
+	return payload
+}
+
+// dailyExpectedOutputText 折叠配置的期望输出三态到存储列：nil 与空串都存
+// NULL（渲染回落内置默认），非空存原文。
+func dailyExpectedOutputText(input DailyReportConfigInput) any {
+	if input.ReportInstructions == nil || *input.ReportInstructions == "" {
+		return nil
+	}
+	return *input.ReportInstructions
 }
 
 // dailyPlanKeys normalizes the payload plan list: never nil, sorted and
@@ -525,9 +541,10 @@ func (s *Service) createScheduledDailyReportOn(ctx context.Context, tx execution
 	var enabled int
 	var timezone string
 	var configRowVersion int64
+	var expectedOutput sql.NullString
 	err := tx.QueryRowContext(ctx, `
-		SELECT enabled,timezone,row_version FROM inspection_daily_report_configs WHERE config_key=?`, configKey).
-		Scan(&enabled, &timezone, &configRowVersion)
+		SELECT enabled,timezone,row_version,report_instructions FROM inspection_daily_report_configs WHERE config_key=?`, configKey).
+		Scan(&enabled, &timezone, &configRowVersion, &expectedOutput)
 	if errors.Is(err, sql.ErrNoRows) {
 		// The config vanished between the due projection and this
 		// transaction: not a scheduling error, leave no durable trace.
@@ -574,10 +591,10 @@ func (s *Service) createScheduledDailyReportOn(ctx context.Context, tx execution
 	cutoff := boundary.Add(dailyCollectionCutoff)
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO inspection_daily_reports(config_id,config_key,config_row_version,local_date,timezone,window_start_utc,window_end_utc,
-			trigger_kind,scheduled_for,cutoff_at,contributions_json,state,created_at)
-		VALUES(?,?,?,?,?,?,?, 'schedule',?,?,?,'Collecting',?)`,
+			trigger_kind,scheduled_for,cutoff_at,contributions_json,expected_output,state,created_at)
+		VALUES(?,?,?,?,?,?,?, 'schedule',?,?,?,?,'Collecting',?)`,
 		configID, configKey, configRowVersion, localDate, timezone, dailyTimeText(windowStart), dailyTimeText(windowEnd),
-		dailyTimeText(boundary), dailyTimeText(cutoff), string(contributionsJSON), s.nowText())
+		dailyTimeText(boundary), dailyTimeText(cutoff), string(contributionsJSON), expectedOutput, s.nowText())
 	if err != nil {
 		return 0, err
 	}
@@ -685,11 +702,12 @@ func (s *Service) dueSealReportIDs(ctx context.Context, boundary time.Time) ([]i
 // so a sealed report always has exactly the version the seal produced.
 func (s *Service) sealDailyReportOn(ctx context.Context, tx execution.Executor, reportID int64, boundary time.Time) error {
 	var configKey, localDate, timezone, windowStartUTC, windowEndUTC, contributionsJSON string
+	var expectedOutput sql.NullString
 	err := tx.QueryRowContext(ctx, `
-		SELECT config_key,local_date,timezone,window_start_utc,window_end_utc,contributions_json
+		SELECT config_key,local_date,timezone,window_start_utc,window_end_utc,contributions_json,expected_output
 		FROM inspection_daily_reports WHERE id=? AND state='Collecting' AND cutoff_at<=?`,
 		reportID, dailyTimeText(boundary)).
-		Scan(&configKey, &localDate, &timezone, &windowStartUTC, &windowEndUTC, &contributionsJSON)
+		Scan(&configKey, &localDate, &timezone, &windowStartUTC, &windowEndUTC, &contributionsJSON, &expectedOutput)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Already sealed (or cutoff not yet reached in this transaction's
 		// view): the winner owns the seal, a replay records nothing.
@@ -719,8 +737,8 @@ func (s *Service) sealDailyReportOn(ctx context.Context, tx execution.Executor, 
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO inspection_daily_report_versions(report_id,version,content,created_at) VALUES(?,?,?,?)`,
-		reportID, version+1, string(encoded), s.nowText()); err != nil {
+		INSERT INTO inspection_daily_report_versions(report_id,version,content,expected_output,created_at) VALUES(?,?,?,?,?)`,
+		reportID, version+1, string(encoded), expectedOutput, s.nowText()); err != nil {
 		return err
 	}
 	result, err := tx.ExecContext(ctx, `
@@ -772,7 +790,7 @@ func (s *Service) buildDailyReportContent(ctx context.Context, tx execution.Exec
 // UTC RFC3339 timestamps, so the fixed-width prefix comparison is exact at
 // the minute-precision window boundaries).
 func (s *Service) dailySourceReportOn(ctx context.Context, tx execution.Executor, contribution dailyContribution, windowStartUTC, windowEndUTC string) (dailySourceReport, error) {
-	source := dailySourceReport{dailyContribution: contribution, Status: "ok", Checks: []dailyCheckItem{}}
+	source := dailySourceReport{DailyContribution: contribution, Status: "ok", Checks: []dailyCheckItem{}}
 	addReason := func(reason string) {
 		source.GapReasons = append(source.GapReasons, reason)
 	}
@@ -857,7 +875,8 @@ func (s *Service) dailySourceReportOn(ctx context.Context, tx execution.Executor
 func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, runID int64) ([]dailyCheckItem, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT x.check_key, x.status, x.gap_reason,
-		       COALESCE(json_extract(x.meta_json,'$.observedAt'), e.observed_at)
+		       COALESCE(json_extract(x.meta_json,'$.observedAt'), e.observed_at),
+		       x.evidence_id, e.result_json
 		FROM inspection_check_results x
 		LEFT JOIN evidence e ON e.id=x.evidence_id
 		WHERE x.run_id=? ORDER BY x.check_key`, runID)
@@ -870,7 +889,9 @@ func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, 
 		var item dailyCheckItem
 		item.RunID = runID
 		var gapReason, observedAt sql.NullString
-		if err := rows.Scan(&item.CheckKey, &item.Status, &gapReason, &observedAt); err != nil {
+		var evidenceID sql.NullInt64
+		var resultJSON sql.NullString
+		if err := rows.Scan(&item.CheckKey, &item.Status, &gapReason, &observedAt, &evidenceID, &resultJSON); err != nil {
 			return nil, err
 		}
 		if gapReason.Valid {
@@ -879,9 +900,91 @@ func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, 
 		if observedAt.Valid {
 			item.ObservedAt = &observedAt.String
 		}
+		if evidenceID.Valid {
+			item.EvidenceID = &evidenceID.Int64
+		}
+		// 限界测量投影：只读已提交 Evidence 的确定性摘要（类型/序列/样本计数
+		// 与首末样本值），绝不携带原始载荷或任何秘密；完整结果始终以
+		// evidenceId 定位。已提交成功 Evidence 的畸形结果形状是数据完整性
+		// 故障，带身份显式报错，绝不静默吞掉或编造数值。
+		if evidenceID.Valid && resultJSON.Valid {
+			measurement, err := dailyMeasurementFromEvidence(evidenceID.Int64, item.CheckKey, resultJSON.String)
+			if err != nil {
+				return nil, err
+			}
+			item.Measurement = measurement
+		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// dailyMeasurementFromEvidence derives the bounded measurement summary of one
+// committed Evidence result. The committed vocabulary is the shared PromQL
+// shape (vector/matrix); an unknown shape is summarised honestly as its type
+// alone — no values are invented.
+func dailyMeasurementFromEvidence(evidenceID int64, checkKey, resultJSON string) (*agentcontext.DailyMeasurement, error) {
+	var failure error
+	defer func() {
+		// json.Unmarshal on plugin-validated payloads cannot panic; the guard
+		// keeps a malformed document from escalating beyond a typed error.
+		if recovered := recover(); recovered != nil {
+			failure = fmt.Errorf("evidence %d check %s measurement projection failed", evidenceID, checkKey)
+		}
+	}()
+	var payload struct {
+		ResultType string          `json:"resultType"`
+		Result     json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(resultJSON), &payload); err != nil {
+		return nil, fmt.Errorf("evidence %d check %s result is malformed: %w", evidenceID, checkKey, err)
+	}
+	measurement := &agentcontext.DailyMeasurement{ResultType: payload.ResultType}
+	switch payload.ResultType {
+	case "vector":
+		var series []struct {
+			Value [2]json.RawMessage `json:"value"`
+		}
+		if err := json.Unmarshal(payload.Result, &series); err != nil {
+			return nil, fmt.Errorf("evidence %d check %s vector result is malformed: %w", evidenceID, checkKey, err)
+		}
+		measurement.Series = len(series)
+		for _, item := range series {
+			measurement.Samples++
+			value := string(item.Value[1])
+			if measurement.FirstValue == nil {
+				first := value
+				measurement.FirstValue = &first
+			}
+			last := value
+			timestamp := string(item.Value[0])
+			measurement.LastValue, measurement.LastAt = &last, &timestamp
+		}
+	case "matrix":
+		var series []struct {
+			Values [][]json.RawMessage `json:"values"`
+		}
+		if err := json.Unmarshal(payload.Result, &series); err != nil {
+			return nil, fmt.Errorf("evidence %d check %s matrix result is malformed: %w", evidenceID, checkKey, err)
+		}
+		measurement.Series = len(series)
+		for _, item := range series {
+			for index, sample := range item.Values {
+				if len(sample) != 2 {
+					continue
+				}
+				measurement.Samples++
+				if index == 0 && measurement.FirstValue == nil {
+					first := string(sample[1])
+					measurement.FirstValue = &first
+				}
+				last := string(sample[1])
+				timestamp := string(sample[0])
+				measurement.LastValue, measurement.LastAt = &last, &timestamp
+			}
+		}
+	}
+	return measurement, failure
 }
 
 // CreateManualDailyReport is the bounded manual backfill (漏过的整日人工补跑):
@@ -933,9 +1036,10 @@ func (s *Service) createManualDailyReportOn(ctx context.Context, tx execution.Ex
 	var enabled int
 	var timezone string
 	var configID, configRowVersion int64
+	var expectedOutput sql.NullString
 	err := tx.QueryRowContext(ctx, `
-		SELECT id,enabled,timezone,row_version FROM inspection_daily_report_configs WHERE config_key=?`, configKey).
-		Scan(&configID, &enabled, &timezone, &configRowVersion)
+		SELECT id,enabled,timezone,row_version,report_instructions FROM inspection_daily_report_configs WHERE config_key=?`, configKey).
+		Scan(&configID, &enabled, &timezone, &configRowVersion, &expectedOutput)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DailyReportSummary{}, &execution.Rejection{Code: "not_found", Detail: "日报配置不存在"}, nil
 	}
@@ -975,10 +1079,10 @@ func (s *Service) createManualDailyReportOn(ctx context.Context, tx execution.Ex
 	now := s.nowText()
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO inspection_daily_reports(config_id,config_key,config_row_version,local_date,timezone,window_start_utc,window_end_utc,
-			trigger_kind,scheduled_for,cutoff_at,contributions_json,state,created_at)
-		VALUES(?,?,?,?,?,?,?, 'manual',NULL,?,?,'Collecting',?)`,
+			trigger_kind,scheduled_for,cutoff_at,contributions_json,expected_output,state,created_at)
+		VALUES(?,?,?,?,?,?,?, 'manual',NULL,?,?,?,'Collecting',?)`,
 		configID, configKey, configRowVersion, localDate, timezone, dailyTimeText(windowStart), dailyTimeText(windowEnd),
-		dailyTimeText(s.clock().Add(dailyCollectionCutoff)), string(contributionsJSON), now)
+		dailyTimeText(s.clock().Add(dailyCollectionCutoff)), string(contributionsJSON), expectedOutput, now)
 	if err != nil {
 		return DailyReportSummary{}, nil, err
 	}
@@ -1057,9 +1161,14 @@ func (s *Service) rerunDailyReportOn(ctx context.Context, tx execution.Executor,
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inspection_daily_report_versions WHERE report_id=?`, reportID).Scan(&version); err != nil {
 		return DailyReportSummary{}, nil, err
 	}
+	// 期望输出按版本冻结：人工重分析采用届时配置值（配置未变则与旧版本一致）。
+	var expectedOutput sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT report_instructions FROM inspection_daily_report_configs WHERE config_key=?`, configKey).Scan(&expectedOutput); err != nil {
+		return DailyReportSummary{}, nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO inspection_daily_report_versions(report_id,version,content,created_at) VALUES(?,?,?,?)`,
-		reportID, version+1, string(encoded), content.SealedAt); err != nil {
+		INSERT INTO inspection_daily_report_versions(report_id,version,content,expected_output,created_at) VALUES(?,?,?,?,?)`,
+		reportID, version+1, string(encoded), expectedOutput, content.SealedAt); err != nil {
 		return DailyReportSummary{}, nil, err
 	}
 	summary, err := s.dailyReportSummaryOn(ctx, tx, reportID)
@@ -1168,7 +1277,7 @@ func (s *Service) ListDailyReportVersions(ctx context.Context, configKey, localD
 		return nil, err
 	}
 	rows, err := reader.QueryContext(ctx, `
-		SELECT v.version,v.created_at FROM inspection_daily_report_versions v
+		SELECT v.version,v.expected_output,v.created_at FROM inspection_daily_report_versions v
 		JOIN inspection_daily_reports r ON r.id=v.report_id
 		WHERE r.config_key=? AND r.local_date=? ORDER BY v.version DESC`, configKey, localDate)
 	if err != nil {
@@ -1178,8 +1287,12 @@ func (s *Service) ListDailyReportVersions(ctx context.Context, configKey, localD
 	items := []DailyReportVersionSummary{}
 	for rows.Next() {
 		var item DailyReportVersionSummary
-		if err := rows.Scan(&item.Version, &item.CreatedAt); err != nil {
+		var expectedOutput sql.NullString
+		if err := rows.Scan(&item.Version, &expectedOutput, &item.CreatedAt); err != nil {
 			return nil, err
+		}
+		if expectedOutput.Valid {
+			item.ExpectedOutput = &expectedOutput.String
 		}
 		items = append(items, item)
 	}

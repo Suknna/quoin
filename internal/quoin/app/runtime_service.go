@@ -232,6 +232,7 @@ func (service *RuntimeService) Connect(stream runtimev1.RuntimeControl_ConnectSe
 		go service.dispatchQueuedEmbeddings(context.Background())
 		go service.dispatchQueuedInvestigations(context.Background())
 		go service.dispatchQueuedInspections(context.Background())
+		go service.dispatchQueuedDailyAnalyses(context.Background())
 	}
 	lastInboundMessageID := first.GetMessageId()
 	for {

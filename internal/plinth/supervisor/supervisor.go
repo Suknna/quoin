@@ -56,7 +56,7 @@ func (supervisor *Supervisor) HandleDispatchAttempt(parent context.Context, sink
 		supervisor.runProbe(parent, sink, client, dispatch, binding, stopTask)
 	case runtimev1.AttemptType_ATTEMPT_TYPE_EMBEDDING:
 		supervisor.runEmbedding(parent, sink, client, dispatch, binding, stopTask)
-	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION, runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION:
+	case runtimev1.AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_INVESTIGATION, runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_DAILY_ANALYSIS, runtimev1.AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION:
 		supervisor.runAgent(parent, sink, client, dispatch, binding, stopTask)
 	default:
 		supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "supervisor does not execute this attempt type")
@@ -95,6 +95,9 @@ func (supervisor *Supervisor) runAgent(parent context.Context, sink *runtime.Fra
 			supervisor.reject(sink, attemptID, runtimev1.AttemptRejectReason_ATTEMPT_REJECT_REASON_INPUT_UNSUPPORTED, "unsupported investigation agent version")
 			return
 		}
+	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_DAILY_ANALYSIS {
+		failureSchema = plinthagent.DailyReportOutputSchemaKind
+		systemPrompt = plinthagent.DailyReportSystemPrompt
 	} else if dispatch.GetAttemptType() == runtimev1.AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS {
 		failureSchema = "inspection_report_result_v1"
 		switch input.GetAgentVersion() {

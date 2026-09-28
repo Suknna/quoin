@@ -103,6 +103,7 @@ enum AttemptType {
   ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION = 6;
   ATTEMPT_TYPE_EMBEDDING = 7;
   ATTEMPT_TYPE_CONNECTION_PROBE = 8;
+  ATTEMPT_TYPE_INSPECTION_DAILY_ANALYSIS = 9; // 跨来源日报 Agent 总结（ADR-0014）
 }
 
 // execution_attempts.scope_type 的 wire 表达（DATA-ATTEMPT-002）。
@@ -120,6 +121,7 @@ enum ScopeType {
   SCOPE_TYPE_EMBEDDING_GENERATION = 7;
   SCOPE_TYPE_CONNECTION = 8;
   SCOPE_TYPE_OBSERVATION_RUN = 10; // 来源级观测子 Attempt（ADR-0004 接入即有界观测）
+  SCOPE_TYPE_DAILY_REPORT = 11; // 跨来源日报（ADR-0014）
 }
 
 // execution_attempts.termination_reason 的 wire 表达（DATA-ATTEMPT-005）。

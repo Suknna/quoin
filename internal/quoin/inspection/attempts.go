@@ -104,6 +104,8 @@ func (s *Service) rebuildAttemptInput(ctx context.Context, attemptID int64) ([]b
 		canonical, err = s.rebuildPluginInput(ctx, attemptID)
 	case "inspection_analysis_v1":
 		canonical, err = s.rebuildAnalysisInput(ctx, attemptID)
+	case "inspection_daily_analysis_v1":
+		canonical, err = s.rebuildDailyAnalysisInput(ctx, attemptID)
 	default:
 		return nil, fmt.Errorf("attempt %d has no inspection rebuilder for %s", attemptID, schemaKind)
 	}
@@ -164,6 +166,65 @@ func (s *Service) rebuildPluginInput(ctx context.Context, attemptID int64) ([]by
 			return nil, err
 		}
 		input.Target = &target
+	}
+	return json.Marshal(input)
+}
+
+// rebuildDailyAnalysisInput deterministically reconstructs a daily report
+// analysis input from the frozen report identity and the SAME sealed version
+// document the creation index was derived from (identical decode→marshal
+// path, so the rebuilt bytes match the creation digest exactly).
+func (s *Service) rebuildDailyAnalysisInput(ctx context.Context, attemptID int64) ([]byte, error) {
+	var reportID, reportVersion int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT a.scope_id, s.inspection_report_version
+		FROM execution_attempts a
+		JOIN attempt_input_snapshots s ON s.attempt_id=a.id
+		WHERE a.id=? AND a.attempt_type='inspection_daily_analysis' AND a.scope_type='daily_report'`, attemptID).
+		Scan(&reportID, &reportVersion)
+	if err != nil {
+		return nil, err
+	}
+	modelID, contextBudget, maxOutput, err := s.Attempts().LookupChatContract(ctx, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := s.readReader()
+	if err != nil {
+		return nil, err
+	}
+	toolCatalog, err := attempt.FrozenToolCatalogDoc(ctx, reader, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	var configKey, localDate, timezone, windowStartUTC, windowEndUTC string
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT config_key,local_date,timezone,window_start_utc,window_end_utc
+		FROM inspection_daily_reports WHERE id=?`, reportID).
+		Scan(&configKey, &localDate, &timezone, &windowStartUTC, &windowEndUTC); err != nil {
+		return nil, err
+	}
+	var content string
+	var expectedOutput sql.NullString
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT content,expected_output FROM inspection_daily_report_versions WHERE report_id=? AND version=?`, reportID, reportVersion).Scan(&content, &expectedOutput); err != nil {
+		return nil, err
+	}
+	sealed := dailyReportContent{}
+	if err := json.Unmarshal([]byte(content), &sealed); err != nil {
+		return nil, fmt.Errorf("daily report %d version %d content malformed: %w", reportID, reportVersion, err)
+	}
+	input := dailyAnalysisInput{
+		SchemaKind: dailyAnalysisInputKind, AttemptID: attemptID, DailyReportID: reportID,
+		ConfigKey: configKey, LocalDate: localDate, ReportVersion: reportVersion,
+		Timezone: timezone, WindowStartUTC: windowStartUTC, WindowEndUTC: windowEndUTC,
+		ModelContract: reportModelContract{ModelID: modelID, ContextBudgetTokens: contextBudget, MaxOutputTokens: maxOutput},
+		ToolCatalog:   toolCatalog,
+		Sources:       sealed.Sources, Totals: sealed.Totals,
+		ExpectedOutput: expectedOutput.String,
+	}
+	if input.Sources == nil {
+		input.Sources = []dailySourceReport{}
 	}
 	return json.Marshal(input)
 }
