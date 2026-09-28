@@ -123,6 +123,10 @@ type localExecutionCandidate struct {
 // Queued 状态本身保证未绑定任何 runtime（schema CHECK）。整个轮次（含扫描）
 // 运行在脱离调用方的上下文上：一次已取消的触发不得截断已开始的收敛。
 func (service *RuntimeService) runLocalExecutionPass(ctx context.Context) {
+	// 日报分析创建重试与派发（ADR-0014）：与本地执行同一节拍——封存/重跑后
+	// 的 kick、周期扫描都会到达；缺模型时静默跳过，恢复后由下一轮重试。
+	service.ensureDueDailyReportAnalyses(ctx)
+	service.dispatchQueuedDailyAnalyses(ctx)
 	// 执行体使用独立后台上下文：调度 kick 携带的请求作用域可能先于执行结束。
 	execCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
 	defer cancel()

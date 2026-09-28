@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 
 	"github.com/Suknna/quoin/internal/plugins"
@@ -40,6 +41,15 @@ const KnowledgeAgentVersion = "initial-analysis-v1"
 // generation is also the first to freeze a per-attempt tool catalog for
 // inspection analyses.
 const InspectionAgentVersion = "inspection-analysis-v5"
+
+// InspectionDailyAgentVersion is the cross-source daily report analysis' own
+// frozen executor generation (ADR-0014): the daily summary prompt evolves
+// independently of both the per-run inspection prompt and the analysis
+// prompts, so its attempts and model calls carry a distinct version identity.
+// Its attempts never embed the report body: the frozen input carries the
+// bounded provenance index, and the model retrieves the sealed version
+// document through the Quoin-owned daily_report_get tool.
+const InspectionDailyAgentVersion = "inspection-daily-analysis-v1"
 
 // ToolSchemaVersion names the fixed callable tool-schema generation of the
 // initial-analysis catalog. Quoin resolves tool names only against a frozen
@@ -106,6 +116,7 @@ var platformTools = []ToolDef{
 	alertsRecentTool(),
 	knowledgeSearchTool(),
 	knowledgeGetTool(),
+	dailyReportGetTool(),
 }
 
 // knowledgeSearchTool 是检索 Quoin 自有知识库的平台工具（ADR-0012 归属判据：
@@ -206,6 +217,80 @@ func knowledgeGetTool() ToolDef {
 			number, ok := value.(float64)
 			if !ok || number < 1 || number != math.Trunc(number) {
 				return fmt.Errorf("tool knowledge_get argument %q must be a positive integer", "versionId")
+			}
+			return nil
+		},
+	}
+}
+
+// dailyLocalDatePattern is the strict 'YYYY-MM-DD' local calendar day shape
+// the daily report tool accepts; anything else is a deterministic argument
+// rejection before any row is read.
+var dailyLocalDatePattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+// dailyReportGetTool 是读取 Quoin 自有已封存日报版本的平台工具（ADR-0014：
+// 读 Quoin 自有数据 = 平台工具）。日报总结 Attempt 的模型不从提示词拿到
+// 报告正文，只能用本工具按冻结定位符取回封存版本文档；执行器额外把请求
+// 定位符与 Attempt 冻结身份逐一比对，越界读取确定性失败。参数带形状边界，
+// 与插件工具同款手写 Parameters + ValidateArguments 闭包。
+func dailyReportGetTool() ToolDef {
+	parameters := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"configKey": map[string]any{
+				"type":        "string",
+				"description": "日报配置 key（冻结上下文已给出的精瓢值，逐字使用）。",
+			},
+			"localDate": map[string]any{
+				"type":        "string",
+				"description": "日报本地日期，格式 YYYY-MM-DD（冻结上下文已给出的精瓢值）。",
+			},
+			"version": map[string]any{
+				"type":        "number",
+				"description": "要读取的封存版本号（十进制正整数，冻结上下文已给出的精瓢值）。",
+			},
+		},
+		"required": []any{"configKey", "localDate", "version"},
+	}
+	return ToolDef{
+		Name: "daily_report_get", Version: "1", ExecutionMode: "quoin_routed", FailureMode: "return_to_model",
+		ResultSchemaKind: "daily_report_get_result_v1",
+		Description:      "按 configKey/localDate/version 读取一份已封存日报版本的完整事实文档（来源、检查、缺口、窗口）。这是日报总结的唯一事实来源：正文不随提示词下发，必须先用本工具取回并按原文引用，缺口不得当作 0 或健康。",
+		Arguments:        map[string]ArgumentKind{"configKey": KindString, "localDate": KindString, "version": KindNumber},
+		Parameters:       parameters,
+		ValidateArguments: func(raw []byte) error {
+			var arguments map[string]any
+			if err := json.Unmarshal(raw, &arguments); err != nil {
+				return fmt.Errorf("tool daily_report_get arguments unparseable: %w", err)
+			}
+			for key := range arguments {
+				switch key {
+				case "configKey", "localDate", "version":
+				default:
+					return fmt.Errorf("tool daily_report_get argument %q is not part of the fixed schema", key)
+				}
+			}
+			if value, exists := arguments["configKey"]; exists {
+				if text, ok := value.(string); !ok || strings.TrimSpace(text) == "" {
+					return fmt.Errorf("tool daily_report_get argument %q must be a non-empty string", "configKey")
+				}
+			}
+			if value, exists := arguments["localDate"]; exists {
+				text, ok := value.(string)
+				if !ok || !dailyLocalDatePattern.MatchString(text) {
+					return fmt.Errorf("tool daily_report_get argument %q must be a YYYY-MM-DD local date", "localDate")
+				}
+			}
+			if value, exists := arguments["version"]; exists {
+				number, ok := value.(float64)
+				if !ok || number < 1 || number != math.Trunc(number) {
+					return fmt.Errorf("tool daily_report_get argument %q must be a positive integer", "version")
+				}
+			}
+			for _, key := range []string{"configKey", "localDate", "version"} {
+				if _, exists := arguments[key]; !exists {
+					return fmt.Errorf("tool daily_report_get requires argument %q", key)
+				}
 			}
 			return nil
 		},

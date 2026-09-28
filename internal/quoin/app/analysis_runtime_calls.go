@@ -35,6 +35,10 @@ func (service *RuntimeService) agentAttempts(attemptType string) *attempt.Servic
 		if service.Inspections != nil {
 			return service.Inspections.Attempts()
 		}
+	case "inspection_daily_analysis":
+		if service.Inspections != nil {
+			return service.Inspections.Attempts()
+		}
 	case "knowledge_extraction":
 		if service.Knowledge != nil {
 			return service.Knowledge.Attempts()

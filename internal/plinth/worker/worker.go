@@ -44,6 +44,7 @@ const OutputSchemaKind = "initial_analysis_output_v1"
 // investigation.OutputSchemaKind).
 const InvestigationOutputSchemaKind = "investigation_output_v1"
 const InspectionOutputSchemaKind = "inspection_report_result_v1"
+const InspectionDailyOutputSchemaKind = "inspection_daily_analysis_result_v1"
 const KnowledgeExtractionOutputSchemaKind = "knowledge_extraction_result_v1"
 
 // maxModelRetries bounds the worker-side physical retry budget per logical
@@ -133,6 +134,22 @@ var inspectionAnalysisMode = attemptMode{
 			return nil, err
 		}
 		return agent.BuildInspectionMessages(input)
+	},
+}
+
+// inspectionDailyAnalysisMode renders the cross-source daily report summary
+// generation (ADR-0014): the bounded XML user message carries the frozen
+// report identity, the exact daily_report_get tool call and the provenance
+// index — never the sealed document itself.
+var inspectionDailyAnalysisMode = attemptMode{
+	schemaKind: "inspection_daily_analysis_v1", agentVersion: InspectionDailyAnalysisAgentVersion, outputSchemaKind: InspectionDailyOutputSchemaKind,
+	prompt: agent.DailyReportSystemPrompt,
+	buildMessages: func(canonical []byte) ([]*schema.Message, error) {
+		input, err := agent.ParseDailyReportInput(canonical)
+		if err != nil {
+			return nil, err
+		}
+		return agent.BuildDailyReportMessages(input)
 	},
 }
 
@@ -408,6 +425,14 @@ func verifyStart(start *workerv1.StartAttempt) (attemptMode, error) {
 		default:
 			return attemptMode{}, fmt.Errorf("agent version mismatch: no inspection mode for %s", start.GetAgentVersion())
 		}
+	case inspectionDailyAnalysisMode.schemaKind:
+		// 日报总结是独立代际：只接受自己的执行身份，与巡检 Run 分析互不借用。
+		switch start.GetAgentVersion() {
+		case InspectionDailyAnalysisAgentVersion:
+			mode = inspectionDailyAnalysisMode
+		default:
+			return attemptMode{}, fmt.Errorf("agent version mismatch: no daily-report mode for %s", start.GetAgentVersion())
+		}
 	case knowledgeExtractionMode.schemaKind:
 		// knowledge 抽取固定在原共享身份上：prompt 从未随 analysis 代际演进，
 		// 新 analysis 身份不得重定向 knowledge 输出契约。
@@ -562,6 +587,32 @@ func runLoop(ctx context.Context, config Config, reader *FrameReader, writer *Fr
 					return fmt.Errorf("knowledge extraction model output must be JSON with items")
 				}
 				canonical, err := json.Marshal(map[string]any{"schemaKind": "knowledge_extraction_result_v1", "attemptId": input.AttemptID, "batchId": input.BatchID, "modelCallId": modelCallID, "items": json.RawMessage(modelOutput.Items)})
+				if err != nil {
+					return err
+				}
+				digest := sha256.Sum256(canonical)
+				if err := writer.Send(&workerv1.WorkerEnvelope{AttemptId: attemptID, Msg: &workerv1.WorkerEnvelope_WorkerResultProposal{WorkerResultProposal: &workerv1.WorkerResultProposal{SchemaKind: mode.outputSchemaKind, CanonicalJson: canonical, ContentDigest: digest[:]}}}); err != nil {
+					return err
+				}
+				ack, err := reader.Read()
+				if err != nil {
+					return err
+				}
+				if ack.GetWorkerResultAck() == nil || !ack.GetWorkerResultAck().GetAccepted() {
+					return fmt.Errorf("%w: result rejected", ErrProtocol)
+				}
+				return nil
+			}
+			if mode.schemaKind == inspectionDailyAnalysisMode.schemaKind {
+				input, err := agent.ParseDailyReportInput(start.GetCanonicalJson())
+				if err != nil {
+					return err
+				}
+				promptSum := sha256.Sum256([]byte(mode.prompt))
+				promptDigest := hex.EncodeToString(promptSum[:])
+				canonicalResult := fmt.Sprintf("inspection_daily_analysis_result_v1|%d|%d|%d|success|%s|%s", input.AttemptID, input.DailyReportID, modelCallID, assistantText, promptDigest)
+				resultSum := sha256.Sum256([]byte(canonicalResult))
+				canonical, err := json.Marshal(map[string]any{"schemaKind": "inspection_daily_analysis_result_v1", "attemptId": input.AttemptID, "dailyReportId": input.DailyReportID, "configKey": input.ConfigKey, "localDate": input.LocalDate, "reportVersion": input.ReportVersion, "modelCallId": modelCallID, "outcome": "success", "content": assistantText, "resultDigest": hex.EncodeToString(resultSum[:]), "promptDigest": promptDigest})
 				if err != nil {
 					return err
 				}

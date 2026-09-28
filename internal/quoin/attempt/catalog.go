@@ -97,6 +97,25 @@ var generationAccepts = map[string]map[string]bool{
 	"investigation-v5":       {plugins.ModeWorkerLocal: true, plugins.ModeQuoinRouted: true},
 	"inspection-analysis-v4": {},
 	"inspection-analysis-v5": {},
+	// 日报总结与巡检报告分析同一边界：它是"重新叙述既有封存事实"的冻结代理，
+	// 不接受任何插件工具（实时平台查询、发现/采证工具都不进目录）；重分析
+	// 绝不混入执行时刻的实时数据。
+	"inspection-daily-analysis-v1": {},
+}
+
+// dailyReportGetToolGenerations lists the agent identities whose base catalog
+// carries the daily-report platform tool. The sealed report document is the
+// frozen fact source of exactly one scope (the daily summary attempt); other
+// generations never see the tool, so an unrelated analysis can neither
+// discover nor read daily reports through it.
+var dailyReportGetToolGenerations = map[string]bool{
+	"inspection-daily-analysis-v1": true,
+}
+
+// generationCarriesDailyReportTool reports whether one agent generation's
+// base catalog carries the daily-report retrieval tool.
+func generationCarriesDailyReportTool(agentVersion string) bool {
+	return dailyReportGetToolGenerations[agentVersion]
 }
 
 // platformToolNames are the compiled tools no plugin owns (workspace and
@@ -288,6 +307,9 @@ func BuildCatalogs(registry *plugins.Registry, enabledPluginIDs []string) (*Cata
 			if knowledgeToolNames[def.Name] && !generationCarriesKnowledgeTool(agentVersion) {
 				continue
 			}
+			if def.Name == "daily_report_get" && !generationCarriesDailyReportTool(agentVersion) {
+				continue
+			}
 			catalog.Tools = append(catalog.Tools, frozenToolFromDefinition(def))
 		}
 		addedTools := map[string]bool{}
@@ -336,6 +358,10 @@ func catalogSchemaVersionFor(agentVersion string) string {
 	if agentVersion == "inspection-analysis-v4" || agentVersion == "inspection-analysis-v5" {
 		// 巡检分析首次按 attempt 冻结目录：拥有自己的 provenance 标签。
 		return "inspection-analysis-tools-v1"
+	}
+	if agentVersion == "inspection-daily-analysis-v1" {
+		// 日报总结目录代：同样按 attempt 冻结，独立 provenance 标签。
+		return "inspection-daily-analysis-tools-v1"
 	}
 	return ToolSchemaVersion
 }

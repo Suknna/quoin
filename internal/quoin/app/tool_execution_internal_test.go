@@ -552,8 +552,11 @@ func TestQuoinRoutedAlertsRecentExecutor(t *testing.T) {
 	fixture := newRoutedToolFixture(t, func(t *testing.T, db *sql.DB) {
 		t.Helper()
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		mustExec(t, db, `INSERT INTO alert_occurrences(id,source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,severity,title,annotations_canonical,resource,first_seen_at,last_state_change_at) VALUES(2,1,?,'2026-09-20T07:30:00Z','Firing','{}',?,'critical','CheckoutLatencyHigh','{"summary":"P95 over threshold"}','checkout:8080',?,?)`,
-			[]byte{0, 0, 0, 0, 0, 0, 1, 2}, strings.Repeat("c", 64), now, now)
+		// starts_at 用相对当前时间的冻结时刻（24h 前）：断言的是 168h 回看窗口内的
+		// 命中行为，不是某个具体日历日；绝对日期会让测试在窗口滑过后失效。
+		startedAt := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
+		mustExec(t, db, `INSERT INTO alert_occurrences(id,source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,severity,title,annotations_canonical,resource,first_seen_at,last_state_change_at) VALUES(2,1,?,?,'Firing','{}',?,'critical','CheckoutLatencyHigh','{"summary":"P95 over threshold"}','checkout:8080',?,?)`,
+			[]byte{0, 0, 0, 0, 0, 0, 1, 2}, startedAt, strings.Repeat("c", 64), now, now)
 		mustExec(t, db, `INSERT INTO alert_enrichments(occurrence_id,enrichment_json,evaluated_at) VALUES(2,'{"fields":{"team":"payments"},"rules":[]}',?)`, now)
 		mustExec(t, db, `INSERT INTO business_views(id,view_key,display_name,description,connection_id,label_conditions_json,alert_source_keys_json,row_version,created_at,updated_at) VALUES(1,'mall','商城','',NULL,'{}','["routed-source"]',1,?,?)`, now, now)
 		mustExec(t, db, `INSERT INTO alert_occurrence_correlations(occurrence_id,view_id,view_key,display_name,matched_at) VALUES(2,1,'mall','商城',?)`, now)

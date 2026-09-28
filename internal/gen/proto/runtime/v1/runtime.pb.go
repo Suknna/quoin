@@ -93,14 +93,15 @@ func (RuntimeSlot) EnumDescriptor() ([]byte, []int) {
 type AttemptType int32
 
 const (
-	AttemptType_ATTEMPT_TYPE_UNSPECIFIED           AttemptType = 0
-	AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS      AttemptType = 1
-	AttemptType_ATTEMPT_TYPE_INVESTIGATION         AttemptType = 2
-	AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS   AttemptType = 3
-	AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION AttemptType = 4
-	AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION  AttemptType = 6
-	AttemptType_ATTEMPT_TYPE_EMBEDDING             AttemptType = 7
-	AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE      AttemptType = 8
+	AttemptType_ATTEMPT_TYPE_UNSPECIFIED               AttemptType = 0
+	AttemptType_ATTEMPT_TYPE_INITIAL_ANALYSIS          AttemptType = 1
+	AttemptType_ATTEMPT_TYPE_INVESTIGATION             AttemptType = 2
+	AttemptType_ATTEMPT_TYPE_INSPECTION_ANALYSIS       AttemptType = 3
+	AttemptType_ATTEMPT_TYPE_INSPECTION_COLLECTION     AttemptType = 4
+	AttemptType_ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION      AttemptType = 6
+	AttemptType_ATTEMPT_TYPE_EMBEDDING                 AttemptType = 7
+	AttemptType_ATTEMPT_TYPE_CONNECTION_PROBE          AttemptType = 8
+	AttemptType_ATTEMPT_TYPE_INSPECTION_DAILY_ANALYSIS AttemptType = 9 // 跨来源日报 Agent 总结（ADR-0014）
 )
 
 // Enum value maps for AttemptType.
@@ -114,16 +115,18 @@ var (
 		6: "ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION",
 		7: "ATTEMPT_TYPE_EMBEDDING",
 		8: "ATTEMPT_TYPE_CONNECTION_PROBE",
+		9: "ATTEMPT_TYPE_INSPECTION_DAILY_ANALYSIS",
 	}
 	AttemptType_value = map[string]int32{
-		"ATTEMPT_TYPE_UNSPECIFIED":           0,
-		"ATTEMPT_TYPE_INITIAL_ANALYSIS":      1,
-		"ATTEMPT_TYPE_INVESTIGATION":         2,
-		"ATTEMPT_TYPE_INSPECTION_ANALYSIS":   3,
-		"ATTEMPT_TYPE_INSPECTION_COLLECTION": 4,
-		"ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION":  6,
-		"ATTEMPT_TYPE_EMBEDDING":             7,
-		"ATTEMPT_TYPE_CONNECTION_PROBE":      8,
+		"ATTEMPT_TYPE_UNSPECIFIED":               0,
+		"ATTEMPT_TYPE_INITIAL_ANALYSIS":          1,
+		"ATTEMPT_TYPE_INVESTIGATION":             2,
+		"ATTEMPT_TYPE_INSPECTION_ANALYSIS":       3,
+		"ATTEMPT_TYPE_INSPECTION_COLLECTION":     4,
+		"ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION":      6,
+		"ATTEMPT_TYPE_EMBEDDING":                 7,
+		"ATTEMPT_TYPE_CONNECTION_PROBE":          8,
+		"ATTEMPT_TYPE_INSPECTION_DAILY_ANALYSIS": 9,
 	}
 )
 
@@ -169,6 +172,7 @@ const (
 	ScopeType_SCOPE_TYPE_EMBEDDING_GENERATION   ScopeType = 7
 	ScopeType_SCOPE_TYPE_CONNECTION             ScopeType = 8
 	ScopeType_SCOPE_TYPE_OBSERVATION_RUN        ScopeType = 10 // 来源级观测子 Attempt（ADR-0004 接入即有界观测）
+	ScopeType_SCOPE_TYPE_DAILY_REPORT           ScopeType = 11 // 跨来源日报（ADR-0014）
 )
 
 // Enum value maps for ScopeType.
@@ -183,6 +187,7 @@ var (
 		7:  "SCOPE_TYPE_EMBEDDING_GENERATION",
 		8:  "SCOPE_TYPE_CONNECTION",
 		10: "SCOPE_TYPE_OBSERVATION_RUN",
+		11: "SCOPE_TYPE_DAILY_REPORT",
 	}
 	ScopeType_value = map[string]int32{
 		"SCOPE_TYPE_UNSPECIFIED":            0,
@@ -194,6 +199,7 @@ var (
 		"SCOPE_TYPE_EMBEDDING_GENERATION":   7,
 		"SCOPE_TYPE_CONNECTION":             8,
 		"SCOPE_TYPE_OBSERVATION_RUN":        10,
+		"SCOPE_TYPE_DAILY_REPORT":           11,
 	}
 )
 
@@ -7032,7 +7038,7 @@ const file_runtime_proto_rawDesc = "" +
 	"\aresults\x18\x01 \x03(\x0e2%.quoin.runtime.v1.EventDeliveryStatusR\aresults*J\n" +
 	"\vRuntimeSlot\x12\x1c\n" +
 	"\x18RUNTIME_SLOT_UNSPECIFIED\x10\x00\x12\x17\n" +
-	"\x13RUNTIME_SLOT_PLINTH\x10\x01\"\x04\b\x02\x10\x02*\xa8\x02\n" +
+	"\x13RUNTIME_SLOT_PLINTH\x10\x01\"\x04\b\x02\x10\x02*\xd4\x02\n" +
 	"\vAttemptType\x12\x1c\n" +
 	"\x18ATTEMPT_TYPE_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dATTEMPT_TYPE_INITIAL_ANALYSIS\x10\x01\x12\x1e\n" +
@@ -7041,7 +7047,8 @@ const file_runtime_proto_rawDesc = "" +
 	"\"ATTEMPT_TYPE_INSPECTION_COLLECTION\x10\x04\x12%\n" +
 	"!ATTEMPT_TYPE_KNOWLEDGE_EXTRACTION\x10\x06\x12\x1a\n" +
 	"\x16ATTEMPT_TYPE_EMBEDDING\x10\a\x12!\n" +
-	"\x1dATTEMPT_TYPE_CONNECTION_PROBE\x10\b\"\x04\b\x05\x10\x05*\xe4\x02\n" +
+	"\x1dATTEMPT_TYPE_CONNECTION_PROBE\x10\b\x12*\n" +
+	"&ATTEMPT_TYPE_INSPECTION_DAILY_ANALYSIS\x10\t\"\x04\b\x05\x10\x05*\x81\x03\n" +
 	"\tScopeType\x12\x1a\n" +
 	"\x16SCOPE_TYPE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13SCOPE_TYPE_ANALYSIS\x10\x01\x12\x1c\n" +
@@ -7052,7 +7059,8 @@ const file_runtime_proto_rawDesc = "" +
 	"\x1fSCOPE_TYPE_EMBEDDING_GENERATION\x10\a\x12\x19\n" +
 	"\x15SCOPE_TYPE_CONNECTION\x10\b\x12\x1e\n" +
 	"\x1aSCOPE_TYPE_OBSERVATION_RUN\x10\n" +
-	"\"\x04\b\x05\x10\x05\"\x04\b\t\x10\t*\"SCOPE_TYPE_CONFIG_VERIFICATION_RUN*\x1fSCOPE_TYPE_RESOURCE_REFRESH_RUN*\xbc\x05\n" +
+	"\x12\x1b\n" +
+	"\x17SCOPE_TYPE_DAILY_REPORT\x10\v\"\x04\b\x05\x10\x05\"\x04\b\t\x10\t*\"SCOPE_TYPE_CONFIG_VERIFICATION_RUN*\x1fSCOPE_TYPE_RESOURCE_REFRESH_RUN*\xbc\x05\n" +
 	"\x11TerminationReason\x12\"\n" +
 	"\x1eTERMINATION_REASON_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aTERMINATION_REASON_TIMEOUT\x10\x01\x12#\n" +

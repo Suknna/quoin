@@ -994,6 +994,9 @@ CREATE TABLE inspection_daily_report_configs (
   trigger_time   TEXT NOT NULL,         -- 本地 wall clock 'HH:MM'
   plan_keys_json TEXT NOT NULL CHECK (json_valid(plan_keys_json) AND json_type(plan_keys_json) = 'array'
                     AND json_array_length(plan_keys_json) >= 1), -- 参与计划 key，非空
+  -- 可选的人类期望输出（管理员撰写，有界纯文本）：封存/重分析时逐版本冻结，
+  -- 只作为总结的期望说明渲染（XML 转义），绝不扩展模型工具/授权边界。
+  report_instructions TEXT CHECK (report_instructions IS NULL OR length(report_instructions) BETWEEN 1 AND 4000),
   row_version    INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
   created_by     INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at     TEXT NOT NULL,
@@ -1018,6 +1021,7 @@ CREATE TABLE inspection_daily_reports (
   scheduled_for      TEXT,               -- UTC 触发边界；manual 为 NULL
   cutoff_at          TEXT NOT NULL,      -- 采证截止 = 触发 + 2h（ADR-0014）
   contributions_json TEXT NOT NULL CHECK (json_valid(contributions_json) AND json_type(contributions_json) = 'array'),
+  expected_output    TEXT CHECK (expected_output IS NULL OR length(expected_output) BETWEEN 1 AND 4000), -- 触发时冻结的期望输出
   state              TEXT NOT NULL CHECK (state IN ('Collecting','Sealed')),
   sealed_at          TEXT,
   row_version        INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
@@ -1032,7 +1036,7 @@ CREATE INDEX idx_inspection_daily_reports_config ON inspection_daily_reports (co
 -- 走封存转换，人工补跑不能偷换原日期窗口。
 CREATE TRIGGER trg_inspection_daily_reports_identity_immutable BEFORE UPDATE OF
   config_id, config_key, config_row_version, local_date, timezone, window_start_utc, window_end_utc,
-  trigger_kind, scheduled_for, cutoff_at, contributions_json, created_at ON inspection_daily_reports
+  trigger_kind, scheduled_for, cutoff_at, contributions_json, expected_output, created_at ON inspection_daily_reports
 BEGIN SELECT RAISE(ABORT, 'daily report identity and frozen window are immutable'); END;
 
 -- 日报版本：append-only。v1 = 到期封存；人工重分析追加新版本，绝不改写旧版本
@@ -1042,6 +1046,8 @@ CREATE TABLE inspection_daily_report_versions (
   report_id  INTEGER NOT NULL REFERENCES inspection_daily_reports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   version    INTEGER NOT NULL CHECK (version >= 1),
   content    TEXT NOT NULL CHECK (json_valid(content) AND length(content) BETWEEN 1 AND 4000000),
+  -- 该版本分析所用的期望输出（v1 = 报告行冻结值；人工重分析 = 届时配置值）。
+  expected_output TEXT CHECK (expected_output IS NULL OR length(expected_output) BETWEEN 1 AND 4000),
   created_at TEXT NOT NULL,
   UNIQUE (report_id, version)
 ) STRICT;
@@ -1049,6 +1055,7 @@ CREATE TRIGGER trg_inspection_daily_report_versions_immutable BEFORE UPDATE ON i
 BEGIN SELECT RAISE(ABORT, 'daily report versions are immutable'); END;
 CREATE TRIGGER trg_inspection_daily_report_versions_no_delete BEFORE DELETE ON inspection_daily_report_versions
 BEGIN SELECT RAISE(ABORT, 'daily report versions are append-only'); END;
+
 
 -- ============================================================================
 -- 7.5 来源级观测（ADR-0004）：接入即有界观测，身份 = 接入 + 对象类型 + 规范来源身份
@@ -1155,9 +1162,9 @@ CREATE TABLE execution_attempts (
   initiator_id              INTEGER,
   attempt_type              TEXT NOT NULL CHECK (attempt_type IN
                               ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','embedding',
-                               'inspection_collection','connection_probe')),
+                               'inspection_collection','connection_probe','inspection_daily_analysis')),
   scope_type                TEXT NOT NULL CHECK (scope_type IN
-                               ('analysis','investigation','run','knowledge_import_batch','embedding_generation','connection','run_check','observation_run')),
+                               ('analysis','investigation','run','knowledge_import_batch','embedding_generation','connection','run_check','observation_run','daily_report')),
   scope_id                  INTEGER NOT NULL,
   check_key                 TEXT,   -- run_check 子 Attempt 非空；其它 scope 为空
   discovery_key             TEXT,   -- observation_run 子 Attempt 必填；其它 scope 为空
@@ -1200,7 +1207,7 @@ CREATE TABLE execution_attempts (
   CHECK (
     runtime_slot IS NULL
     OR (attempt_type = 'inspection_collection' AND scope_type IN ('run_check','observation_run') AND runtime_slot = 'plinth')
-    OR (attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','embedding','connection_probe') AND runtime_slot = 'plinth')
+    OR (attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','embedding','connection_probe','inspection_daily_analysis') AND runtime_slot = 'plinth')
   ),
   CHECK (
     (attempt_type = 'initial_analysis' AND scope_type = 'analysis')
@@ -1210,6 +1217,7 @@ CREATE TABLE execution_attempts (
     OR (attempt_type = 'embedding' AND scope_type = 'embedding_generation')
     OR (attempt_type = 'connection_probe' AND scope_type = 'connection')
     OR (attempt_type = 'inspection_collection' AND scope_type IN ('run_check','observation_run'))
+    OR (attempt_type = 'inspection_daily_analysis' AND scope_type = 'daily_report')
   )
 ) STRICT;
 CREATE TRIGGER execution_attempts_correlation_immutable BEFORE UPDATE ON execution_attempts
@@ -1259,6 +1267,7 @@ CREATE TABLE attempt_input_items (
   knowledge_version_id              INTEGER REFERENCES knowledge_versions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   inspection_run_id                 INTEGER REFERENCES inspection_runs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   inspection_check_result_id        INTEGER REFERENCES inspection_check_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  inspection_daily_report_id        INTEGER REFERENCES inspection_daily_reports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   source_material_id                INTEGER REFERENCES source_materials(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   knowledge_import_batch_id         INTEGER REFERENCES knowledge_import_batches(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   embedding_generation_id           INTEGER REFERENCES embedding_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -1267,8 +1276,8 @@ CREATE TABLE attempt_input_items (
   CHECK (
     (occurrence_id IS NOT NULL) + (initial_analysis_id IS NOT NULL) + (investigation_message_id IS NOT NULL) +
     (evidence_id IS NOT NULL) + (artifact_id IS NOT NULL) + (knowledge_version_id IS NOT NULL) +
-    (inspection_run_id IS NOT NULL) + (inspection_check_result_id IS NOT NULL) + (source_material_id IS NOT NULL) +
-    (knowledge_import_batch_id IS NOT NULL) + (embedding_generation_id IS NOT NULL) +
+    (inspection_run_id IS NOT NULL) + (inspection_check_result_id IS NOT NULL) + (inspection_daily_report_id IS NOT NULL) +
+    (source_material_id IS NOT NULL) + (knowledge_import_batch_id IS NOT NULL) + (embedding_generation_id IS NOT NULL) +
     (connection_revision_id IS NOT NULL) = 1
   )
 ) STRICT;
@@ -3137,6 +3146,7 @@ WHEN NOT EXISTS (
       WHEN 'initial_analysis' THEN 'initial_analysis_v1'
       WHEN 'investigation' THEN 'investigation_v1'
       WHEN 'inspection_analysis' THEN 'inspection_analysis_v1'
+      WHEN 'inspection_daily_analysis' THEN 'inspection_daily_analysis_v1'
       WHEN 'knowledge_extraction' THEN 'knowledge_extraction_v1'
       WHEN 'embedding' THEN 'embedding_v1'
       WHEN 'inspection_collection' THEN CASE a.scope_type
@@ -3150,7 +3160,7 @@ WHEN NOT EXISTS (
       END
       WHEN 'connection_probe' THEN 'connection_probe_v1'
     END)
-  OR (NEW.schema_kind = 'inspection_analysis_v1') <> (NEW.inspection_report_version IS NOT NULL)
+  OR (NEW.schema_kind IN ('inspection_analysis_v1','inspection_daily_analysis_v1')) <> (NEW.inspection_report_version IS NOT NULL)
 BEGIN SELECT RAISE(ABORT, 'attempt input snapshot schema_kind must match the versioned schema of the same Queued Attempt type'); END;
 CREATE TRIGGER trg_attempt_input_item_closure BEFORE INSERT ON attempt_input_items
 WHEN NOT EXISTS (
@@ -3188,7 +3198,7 @@ WHEN OLD.state = 'Queued' AND NEW.state = 'Assigned' AND (
                AND NOT EXISTS (SELECT 1 FROM attempt_artifact_grants g
                                WHERE g.attempt_id = NEW.id AND g.artifact_id = i.artifact_id AND g.source_kind = 'input_snapshot' AND g.source_id = s.id))
   OR NEW.quoin_release_version = ''
-  OR (NEW.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction')
+  OR (NEW.attempt_type IN ('initial_analysis','investigation','inspection_analysis','inspection_daily_analysis','knowledge_extraction')
       AND (NEW.runtime_slot <> 'plinth' OR NEW.agent_version IS NULL OR NOT EXISTS (
         SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.purpose = 'chat_model')))
   OR (NEW.attempt_type = 'embedding' AND (NEW.runtime_slot <> 'plinth' OR NEW.agent_version IS NOT NULL OR NOT EXISTS (
@@ -3402,7 +3412,7 @@ CREATE TRIGGER trg_model_call_operation_attempt BEFORE INSERT ON model_calls
 WHEN NOT EXISTS (
   SELECT 1 FROM execution_attempts a WHERE a.id = NEW.attempt_id AND a.state = 'Running'
     AND ((NEW.operation = 'embedding' AND a.attempt_type IN ('embedding','connection_probe'))
-      OR (NEW.operation = 'chat' AND a.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','connection_probe')))
+      OR (NEW.operation = 'chat' AND a.attempt_type IN ('initial_analysis','investigation','inspection_analysis','inspection_daily_analysis','knowledge_extraction','connection_probe')))
 )
 BEGIN SELECT RAISE(ABORT, 'model call operation must match a Running fixed Plinth work mode'); END;
 CREATE TRIGGER trg_model_call_input_item_closure BEFORE INSERT ON model_call_input_items
@@ -3450,14 +3460,14 @@ BEGIN SELECT RAISE(ABORT, 'model call context item must belong to the same Attem
 -- resurrect retired tool names. Per-agent catalog membership is enforced by
 -- Quoin before this insert; this trigger seals the global name set.
 CREATE TRIGGER trg_tool_call_fixed_name BEFORE INSERT ON tool_calls
-WHEN NEW.tool_name NOT IN ('bash','read','write','grep','artifact_read','artifact_grep','alerts_recent','thanos_query','knowledge_search','knowledge_get')
+WHEN NEW.tool_name NOT IN ('bash','read','write','grep','artifact_read','artifact_grep','alerts_recent','thanos_query','knowledge_search','knowledge_get','daily_report_get')
 BEGIN SELECT RAISE(ABORT, 'tool call name is not in the frozen catalog'); END;
 CREATE TRIGGER trg_tool_call_closure BEFORE INSERT ON tool_calls
 WHEN NEW.status <> 'pending' OR NOT EXISTS (
   SELECT 1 FROM model_calls m JOIN execution_attempts a ON a.id = m.attempt_id
   WHERE m.id = NEW.model_call_id AND m.attempt_id = NEW.attempt_id AND m.call_seq = NEW.call_seq AND m.status = 'succeeded'
     AND EXISTS (SELECT 1 FROM model_call_outputs o WHERE o.model_call_id = m.id AND o.complete = 1)
-    AND a.state = 'Running' AND a.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction','connection_probe')
+    AND a.state = 'Running' AND a.attempt_type IN ('initial_analysis','investigation','inspection_analysis','inspection_daily_analysis','knowledge_extraction','connection_probe')
 )
 BEGIN SELECT RAISE(ABORT, 'tool call must be inserted pending after a successful model call in the same Running Attempt'); END;
 CREATE TRIGGER trg_tool_call_proposal_closure BEFORE INSERT ON tool_calls
@@ -3514,6 +3524,7 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
   OR (NEW.attempt_type = 'investigation' AND NOT EXISTS (
       SELECT 1 FROM investigation_messages m WHERE m.attempt_id = NEW.id AND m.role = 'assistant' AND m.status = 'active'))
   OR (NEW.attempt_type = 'inspection_analysis' AND NOT EXISTS (SELECT 1 FROM inspection_reports r WHERE r.attempt_id = NEW.id))
+  OR (NEW.attempt_type = 'inspection_daily_analysis' AND NOT EXISTS (SELECT 1 FROM inspection_daily_report_analyses x WHERE x.attempt_id = NEW.id))
   OR (NEW.attempt_type = 'knowledge_extraction' AND NOT EXISTS (
       SELECT 1 FROM knowledge_import_batches b WHERE b.id = NEW.scope_id AND b.state = 'AwaitingConfirmation'
         AND EXISTS (SELECT 1 FROM knowledge_candidates c WHERE c.import_batch_id = b.id AND c.generation = b.generation)))
@@ -3537,7 +3548,7 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
       WHERE p.attempt_id = NEW.id AND p.connection_id = NEW.scope_id
         AND ((p.connection_type = 'model_provider' AND EXISTS (SELECT 1 FROM model_provider_connection_probe_results m WHERE m.probe_result_id = p.id))
           OR (p.connection_type IN ('prometheus','thanos') AND EXISTS (SELECT 1 FROM thanos_connection_probe_results t WHERE t.probe_result_id = p.id)))))
-  OR (NEW.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction') AND (
+  OR (NEW.attempt_type IN ('initial_analysis','investigation','inspection_analysis','inspection_daily_analysis','knowledge_extraction') AND (
       NOT EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = NEW.id AND m.status = 'succeeded')
       OR EXISTS (
         SELECT 1 FROM model_calls m
@@ -3712,6 +3723,89 @@ WHEN NEW.attempt_type='inspection_analysis' AND NEW.scope_type='run' AND NOT EXI
   SELECT 1 FROM inspection_runs r WHERE r.id=NEW.scope_id AND r.state IN ('Completed','CompletedWithGaps')
 )
 BEGIN SELECT RAISE(ABORT, 'inspection analysis requires a collection-complete Inspection Run'); END;
+
+-- 日报 Agent 分析（ADR-0014）：对已封存日报版本的模型总结。分析只读封存
+-- 事实（模型经 Quoin 只读工具 daily_report_get 获取冻结版本详情），结论
+-- 作为版本化分析追加，绝不改写日报事实文档；缺模型时保留事实，恢复后
+-- 重试创建。ResultProposal 账本是唯一入口：AFTER INSERT 触发器在同一外层
+-- 事务创建版本化分析行与 Attempt 成功终态。
+CREATE TABLE inspection_daily_analysis_ledgers (
+  attempt_id      INTEGER PRIMARY KEY REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  daily_report_id INTEGER NOT NULL REFERENCES inspection_daily_reports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  report_version  INTEGER NOT NULL CHECK (report_version >= 1),
+  model_call_id   INTEGER NOT NULL REFERENCES model_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  result_digest   BLOB NOT NULL CHECK (length(result_digest) = 32),
+  content         TEXT NOT NULL CHECK (length(content) BETWEEN 1 AND 1000000),
+  prompt_digest   TEXT NOT NULL CHECK (length(prompt_digest) = 64 AND prompt_digest NOT GLOB '*[^0-9a-f]*'),
+  created_at      TEXT NOT NULL
+) STRICT;
+
+-- 版本化分析读模型：append-only；人工重分析/补跑只追加新版本，旧版本
+-- 始终可读、可比较，事实文档永不被分析改写。
+CREATE TABLE inspection_daily_report_analyses (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  report_id        INTEGER NOT NULL REFERENCES inspection_daily_reports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  analysis_version INTEGER NOT NULL CHECK (analysis_version >= 1),
+  attempt_id       INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  report_version   INTEGER NOT NULL CHECK (report_version >= 1),
+  model_id         TEXT NOT NULL,
+  content          TEXT NOT NULL CHECK (length(content) BETWEEN 1 AND 1000000),
+  prompt_digest    TEXT NOT NULL CHECK (length(prompt_digest) = 64 AND prompt_digest NOT GLOB '*[^0-9a-f]*'),
+  created_at       TEXT NOT NULL,
+  UNIQUE (report_id, analysis_version)
+) STRICT;
+CREATE TRIGGER trg_inspection_daily_analysis_requires_sealed_report BEFORE INSERT ON execution_attempts
+WHEN NEW.attempt_type='inspection_daily_analysis' AND NOT EXISTS (
+  SELECT 1 FROM inspection_daily_reports r
+  WHERE r.id=NEW.scope_id AND r.state='Sealed'
+    AND EXISTS (SELECT 1 FROM inspection_daily_report_versions v WHERE v.report_id=r.id)
+)
+BEGIN SELECT RAISE(ABORT, 'daily report analysis requires a sealed daily report'); END;
+
+CREATE TRIGGER trg_inspection_daily_analysis_result_closure BEFORE INSERT ON inspection_daily_analysis_ledgers
+WHEN NOT EXISTS (
+  SELECT 1 FROM execution_attempts a
+  WHERE a.id=NEW.attempt_id AND a.attempt_type='inspection_daily_analysis' AND a.scope_type='daily_report'
+    AND a.scope_id=NEW.daily_report_id AND a.state='Running' AND a.accepted_at IS NOT NULL
+)
+OR NOT EXISTS (SELECT 1 FROM model_calls m WHERE m.id=NEW.model_call_id AND m.attempt_id=NEW.attempt_id AND m.status='succeeded' AND m.prompt_digest=NEW.prompt_digest)
+OR NOT EXISTS (
+  SELECT 1 FROM inspection_daily_report_versions v
+  WHERE v.report_id=NEW.daily_report_id AND v.version=NEW.report_version
+)
+OR NOT EXISTS (
+  SELECT 1 FROM attempt_input_snapshots s JOIN attempt_input_items i ON i.snapshot_id=s.id
+  WHERE s.attempt_id=NEW.attempt_id AND s.inspection_report_version=NEW.report_version
+    AND i.inspection_daily_report_id=NEW.daily_report_id
+)
+OR NEW.report_version <> (SELECT COALESCE(MAX(s.inspection_report_version), 0) FROM attempt_input_snapshots s WHERE s.attempt_id=NEW.attempt_id)
+OR NEW.result_digest <> sha256('inspection_daily_analysis_result_v1|' || NEW.attempt_id || '|' || NEW.daily_report_id || '|' || NEW.model_call_id || '|success|' || NEW.content || '|' || NEW.prompt_digest)
+BEGIN SELECT RAISE(ABORT, 'daily analysis ResultProposal must close one running sealed-report analysis at its frozen version'); END;
+
+CREATE TRIGGER trg_inspection_daily_analysis_result_commit AFTER INSERT ON inspection_daily_analysis_ledgers
+BEGIN
+  INSERT INTO inspection_daily_report_analyses(report_id,analysis_version,attempt_id,report_version,model_id,content,prompt_digest,created_at)
+  SELECT NEW.daily_report_id,
+         (SELECT COUNT(*) FROM inspection_daily_report_analyses x WHERE x.report_id=NEW.daily_report_id) + 1,
+         NEW.attempt_id, NEW.report_version, m.model_id, NEW.content, NEW.prompt_digest, NEW.created_at
+  FROM model_calls m WHERE m.id=NEW.model_call_id AND m.attempt_id=NEW.attempt_id AND m.status='succeeded';
+  UPDATE execution_attempts SET state='Succeeded',ended_at=NEW.created_at,row_version=row_version+1
+  WHERE id=NEW.attempt_id AND state='Running';
+END;
+
+CREATE TRIGGER trg_inspection_daily_analysis_success_ledger BEFORE UPDATE OF state ON execution_attempts
+WHEN OLD.state='Running' AND NEW.state='Succeeded' AND NEW.attempt_type='inspection_daily_analysis'
+  AND NOT EXISTS (SELECT 1 FROM inspection_daily_analysis_ledgers l WHERE l.attempt_id=NEW.id)
+BEGIN SELECT RAISE(ABORT, 'Succeeded daily analysis Attempt must atomically commit its immutable analysis ledger'); END;
+
+CREATE TRIGGER trg_inspection_daily_analysis_ledgers_immutable BEFORE UPDATE ON inspection_daily_analysis_ledgers
+BEGIN SELECT RAISE(ABORT, 'daily analysis ResultProposal ledger is immutable'); END;
+CREATE TRIGGER trg_inspection_daily_analysis_ledgers_no_delete BEFORE DELETE ON inspection_daily_analysis_ledgers
+BEGIN SELECT RAISE(ABORT, 'daily analysis ResultProposal ledger is append-only'); END;
+CREATE TRIGGER trg_inspection_daily_report_analyses_immutable BEFORE UPDATE ON inspection_daily_report_analyses
+BEGIN SELECT RAISE(ABORT, 'daily report analyses are immutable'); END;
+CREATE TRIGGER trg_inspection_daily_report_analyses_no_delete BEFORE DELETE ON inspection_daily_report_analyses
+BEGIN SELECT RAISE(ABORT, 'daily report analyses are append-only'); END;
 
 CREATE TRIGGER trg_inspection_report_evidence_ledger_closure BEFORE INSERT ON inspection_report_evidence
 WHEN NOT EXISTS (

@@ -56,7 +56,7 @@ var enumLabelValues = map[string][]string{
 	"runtime_slot":        {"plinth"},
 	"attempt_type": {
 		"connection_probe", "embedding", "initial_analysis",
-		"inspection_analysis", "inspection_collection", "investigation", "knowledge_extraction",
+		"inspection_analysis", "inspection_collection", "inspection_daily_analysis", "investigation", "knowledge_extraction",
 	},
 	"maintenance_reason": {"restore", "root_key_rebind", "upgrade"},
 	"attempt_termination_reason": {
