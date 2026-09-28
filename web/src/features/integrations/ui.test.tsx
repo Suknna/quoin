@@ -1044,3 +1044,536 @@ describe("integration workbench", () => {
 		fetchMock.mockRestore();
 	});
 });
+
+describe("generic HTTP connection plugins (#110)", () => {
+	// 合成插件目录 fixture：三个稳定身份互不相同 —— 插件 ID ≠ sourceKind（如
+	// 同时具备）≠ connectionKind。前端不做品牌分支；目录声明什么就用什么。
+	const httpPlugin = {
+		id: "synthetic-plugin",
+		connectionKind: "synthetic-http",
+		connectionAuthModes: ["none", "basic", "bearer"],
+		connectionProbePath: "/health",
+		displayName: "合成 HTTP 平台",
+		description: "用于验收的受控 HTTP 连接插件",
+		enabled: true,
+		version: "1",
+		capabilities: ["http_connection"],
+	};
+
+	/** Fetch mock with explicit routes; unmatched requests fail loudly. */
+	function mockFetch(
+		routes: (url: string, init?: RequestInit) => Response | undefined,
+	) {
+		return vi
+			.spyOn(globalThis, "fetch")
+			.mockImplementation(async (input, init) => {
+				const url = String(input);
+				const matched = routes(url, init as RequestInit | undefined);
+				if (matched) return matched;
+				return Response.json(
+					{ message: `unexpected request ${url}` },
+					{ status: 500 },
+				);
+			});
+	}
+
+	async function pickAuthOption(label: string) {
+		// Radix Select opens from the keyboard in jsdom; pointer events need APIs
+		// the environment does not implement.
+		fireEvent.keyDown(screen.getByRole("combobox", { name: "认证方式" }), {
+			key: "ArrowDown",
+		});
+		fireEvent.click(await screen.findByRole("option", { name: label }));
+	}
+
+	const connectionProjection = (
+		overrides: Record<string, unknown> = {},
+	) => ({
+		id: "9",
+		name: "edge-http",
+		type: "synthetic-http",
+		enabled: false,
+		rowVersion: 1,
+		config: {
+			type: "synthetic-http",
+			baseUrl: "https://edge.example",
+			authType: "none",
+		},
+		...overrides,
+	});
+
+	it("offers configuration for an enabled plugin whose connection kind differs from its id", async () => {
+		mockFetch((url) =>
+			url.endsWith("/api/v1/integrations/plugins")
+				? Response.json({ items: [httpPlugin] })
+				: undefined,
+		);
+		render(<IntegrationView />);
+		expect(await screen.findByText("HTTP 连接")).toBeInTheDocument();
+		expect(
+			screen.getByRole("button", { name: "配置 合成 HTTP 平台" }),
+		).toBeEnabled();
+	});
+
+	it("creates, probes and enables a synthetic HTTP connection with the plugin-declared contract", async () => {
+		const fetchMock = mockFetch((url, init) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [httpPlugin] });
+			if (url === "/api/v1/connections" && init?.method === "POST")
+				return Response.json(connectionProjection(), { status: 201 });
+			if (url === "/api/v1/connections?limit=100")
+				return Response.json({
+					items: [
+						connectionProjection({ enabled: true, rowVersion: 2 }),
+					],
+				});
+			if (url.endsWith("/connections/edge-http/probe"))
+				return Response.json({ id: "probe-9" }, { status: 202 });
+			if (url.endsWith("/connections/edge-http/probe-attempts/probe-9"))
+				return Response.json({
+					state: "Succeeded",
+					endedAt: "2026-09-28T00:00:00Z",
+				});
+			if (url.includes("/connections/edge-http/probe-results"))
+				return Response.json({
+					items: [
+						{ id: "result-9", attemptId: "probe-9", outcome: "passed" },
+					],
+				});
+			if (url.endsWith("/connections/edge-http/enable"))
+				return Response.json(
+					connectionProjection({ enabled: true, rowVersion: 2 }),
+				);
+			return undefined;
+		});
+		render(
+			<IntegrationView route="/settings/platform/integrations/synthetic-plugin" />,
+		);
+		await screen.findByRole("heading", { name: "配置 合成 HTTP 平台" });
+		fireEvent.change(screen.getByLabelText("实例名称"), {
+			target: { value: "edge-http" },
+		});
+		fireEvent.change(screen.getByLabelText("端点 URL"), {
+			target: { value: "https://edge.example" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "创建、验证并启用" }));
+		// 启用成功后实例列表刷新出现该连接。
+		expect(await screen.findByText("edge-http")).toBeInTheDocument();
+		expect(screen.getByText("已启用")).toBeInTheDocument();
+		const createCall = fetchMock.mock.calls.find(
+			([url, init]) =>
+				String(url) === "/api/v1/connections" &&
+				(init as RequestInit | undefined)?.method === "POST",
+		);
+		const createBody = JSON.parse(String(createCall?.[1]?.body));
+		expect(createBody).toMatchObject({ name: "edge-http" });
+		expect(createBody.connection).toMatchObject({
+			type: "synthetic-http",
+			baseUrl: "https://edge.example",
+			authType: "none",
+		});
+		// 无认证不得携带任何凭据字段。
+		expect(createBody.connection).not.toHaveProperty("username");
+		expect(createBody.connection).not.toHaveProperty("password");
+		expect(createBody.connection).not.toHaveProperty("bearerToken");
+		const enableCall = fetchMock.mock.calls.find(([url]) =>
+			String(url).endsWith("/connections/edge-http/enable"),
+		);
+		expect(enableCall).toBeTruthy();
+		expect(JSON.parse(String(enableCall?.[1]?.body))).toMatchObject({
+			expectedRowVersion: 1,
+			qualifiedProbeResultId: "result-9",
+		});
+	});
+
+	it("offers only the plugin-declared auth modes and submits basic credentials", async () => {
+		const fetchMock = mockFetch((url, init) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({
+					items: [{ ...httpPlugin, connectionAuthModes: ["basic", "bearer"] }],
+				});
+			if (url === "/api/v1/connections" && init?.method === "POST")
+				return Response.json(
+					connectionProjection({
+						config: {
+							type: "synthetic-http",
+							baseUrl: "https://edge.example",
+							authType: "basic",
+							username: "edge-user",
+						},
+					}),
+					{ status: 201 },
+				);
+			if (url.endsWith("/connections/edge-http/probe"))
+				return Response.json({ id: "probe-basic" }, { status: 202 });
+			if (url.includes("probe-attempts/probe-basic"))
+				return Response.json({ state: "Failed" });
+			if (url.includes("/connections/edge-http/probe-results"))
+				return Response.json({
+					items: [
+						{
+							id: "result-basic",
+							attemptId: "probe-basic",
+							outcome: "failed",
+							details: { reason: "invalid_response" },
+						},
+					],
+				});
+			return undefined;
+		});
+		render(
+			<IntegrationView route="/settings/platform/integrations/synthetic-plugin" />,
+		);
+		await screen.findByRole("heading", { name: "配置 合成 HTTP 平台" });
+		fireEvent.keyDown(screen.getByRole("combobox", { name: "认证方式" }), {
+			key: "ArrowDown",
+		});
+		expect(
+			await screen.findByRole("option", { name: "HTTP Basic" }),
+		).toBeInTheDocument();
+		expect(
+			screen.queryByRole("option", { name: "无认证" }),
+		).not.toBeInTheDocument();
+		fireEvent.click(screen.getByRole("option", { name: "HTTP Basic" }));
+		fireEvent.change(screen.getByLabelText("实例名称"), {
+			target: { value: "edge-http" },
+		});
+		fireEvent.change(screen.getByLabelText("端点 URL"), {
+			target: { value: "https://edge.example" },
+		});
+		fireEvent.change(screen.getByLabelText("用户名"), {
+			target: { value: "edge-user" },
+		});
+		fireEvent.change(screen.getByLabelText("密码"), {
+			target: { value: "edge-pass" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "创建、验证并启用" }));
+		await waitFor(() =>
+			expect(screen.getByText(/连通性验证未通过/)).toBeInTheDocument(),
+		);
+		const createCall = fetchMock.mock.calls.find(
+			([url, init]) =>
+				String(url) === "/api/v1/connections" &&
+				(init as RequestInit | undefined)?.method === "POST",
+		);
+		const body = JSON.parse(String(createCall?.[1]?.body));
+		expect(body.connection).toMatchObject({
+			type: "synthetic-http",
+			authType: "basic",
+			username: "edge-user",
+			password: "edge-pass",
+		});
+		expect(body.connection).not.toHaveProperty("bearerToken");
+	});
+
+	it("never echoes submitted credentials in lifecycle error messages", async () => {
+		mockFetch((url, init) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [httpPlugin] });
+			if (url === "/api/v1/connections" && init?.method === "POST")
+				return Response.json(
+					connectionProjection({
+						config: {
+							type: "synthetic-http",
+							baseUrl: "https://edge.example",
+							authType: "bearer",
+						},
+					}),
+					{ status: 201 },
+				);
+			if (url.endsWith("/connections/edge-http/probe"))
+				return Response.json({ id: "probe-secret" }, { status: 202 });
+			if (url.includes("probe-attempts/probe-secret"))
+				return Response.json({ state: "Failed" });
+			if (url.includes("/connections/edge-http/probe-results"))
+				return Response.json({
+					items: [
+						{
+							id: "result-secret",
+							attemptId: "probe-secret",
+							outcome: "failed",
+							details: {
+								error: "credential unavailable: gateway denied",
+							},
+						},
+					],
+				});
+			return undefined;
+		});
+		render(
+			<IntegrationView route="/settings/platform/integrations/synthetic-plugin" />,
+		);
+		await screen.findByRole("heading", { name: "配置 合成 HTTP 平台" });
+		fireEvent.change(screen.getByLabelText("实例名称"), {
+			target: { value: "edge-http" },
+		});
+		fireEvent.change(screen.getByLabelText("端点 URL"), {
+			target: { value: "https://edge.example" },
+		});
+		await pickAuthOption("Bearer Token");
+		fireEvent.change(screen.getByLabelText("Bearer Token"), {
+			target: { value: "super-secret-token-value" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "创建、验证并启用" }));
+		expect(await screen.findByText(/连通性验证未通过/)).toBeInTheDocument();
+		// 诊断原文可见，但秘密永不回显。
+		expect(document.body.textContent).toContain("gateway denied");
+		expect(document.body.textContent).not.toContain(
+			"super-secret-token-value",
+		);
+	});
+
+	it("fails closed for disabled or unknown connection plugins", async () => {
+		mockFetch((url) =>
+			url.endsWith("/api/v1/integrations/plugins")
+				? Response.json({ items: [{ ...httpPlugin, enabled: false }] })
+				: undefined,
+		);
+		for (const route of [
+			"/settings/platform/integrations/synthetic-plugin",
+			"/settings/platform/integrations/no-such-plugin",
+			"/settings/platform/integrations/synthetic-http/edge-http",
+		]) {
+			render(<IntegrationView route={route} />);
+			expect(await screen.findByText("找不到此页面")).toBeInTheDocument();
+			cleanup();
+		}
+	});
+
+	it("keeps webhook-source and HTTP connection affordances side by side", async () => {
+		mockFetch((url) =>
+			url.endsWith("/api/v1/integrations/plugins")
+				? Response.json({
+						items: [
+							{
+								...httpPlugin,
+								id: "dual-plugin",
+								sourceKind: "dual-hook",
+								connectionKind: "dual-http",
+								capabilities: [
+									"event_source",
+									"alert_normalizer",
+									"http_connection",
+								],
+							},
+						],
+					})
+				: undefined,
+		);
+		render(
+			<IntegrationView route="/settings/platform/integrations/dual-plugin" />,
+		);
+		expect(
+			await screen.findByRole("heading", { name: "配置 合成 HTTP 平台" }),
+		).toBeInTheDocument();
+		expect(
+			screen.getByRole("heading", { name: "HTTP 连接" }),
+		).toBeInTheDocument();
+		expect(
+			screen.getByRole("heading", { name: "事件接入" }),
+		).toBeInTheDocument();
+		expect(screen.getByLabelText("实例名称")).toBeInTheDocument();
+		expect(screen.getByLabelText("来源键")).toBeInTheDocument();
+	});
+
+	it("creates a connection without a declared probe path but never offers enablement", async () => {
+		let probes = 0;
+		let enables = 0;
+		const fetchMock = mockFetch((url, init) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({
+					items: [{ ...httpPlugin, connectionProbePath: undefined }],
+				});
+			if (url === "/api/v1/connections" && init?.method === "POST")
+				return Response.json(connectionProjection(), { status: 201 });
+			if (url === "/api/v1/connections?limit=100")
+				return Response.json({ items: [connectionProjection()] });
+			if (url.endsWith("/probe")) {
+				probes += 1;
+				return Response.json({ id: "probe-x" }, { status: 202 });
+			}
+			if (url.endsWith("/enable")) {
+				enables += 1;
+				return Response.json(connectionProjection());
+			}
+			return undefined;
+		});
+		render(
+			<IntegrationView route="/settings/platform/integrations/synthetic-plugin" />,
+		);
+		await screen.findByRole("heading", { name: "配置 合成 HTTP 平台" });
+		expect(
+			screen.getByText(/未声明探测路径，新实例无法启用/),
+		).toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText("实例名称"), {
+			target: { value: "edge-http" },
+		});
+		fireEvent.change(screen.getByLabelText("端点 URL"), {
+			target: { value: "https://edge.example" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "创建（保持停用）" }));
+		await waitFor(() =>
+			expect(
+				fetchMock.mock.calls.some(
+					([url, init]) =>
+						String(url) === "/api/v1/connections" &&
+						(init as RequestInit | undefined)?.method === "POST",
+					),
+			).toBe(true),
+		);
+		expect(probes).toBe(0);
+		expect(enables).toBe(0);
+	});
+
+	it("lists synthetic HTTP instances beside the other integrations and opens the drawer", async () => {
+		const fetchMock = mockFetch((url) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [httpPlugin] });
+			if (url === "/api/v1/connections?limit=100")
+				return Response.json({ items: [connectionProjection()] });
+			if (url.startsWith("/api/v1/alert-sources"))
+				return Response.json({ items: [] });
+			return undefined;
+		});
+		render(
+			<IntegrationView route="/settings/platform/integrations/instances" />,
+		);
+		expect(await screen.findByText("edge-http")).toBeInTheDocument();
+		expect(screen.getByText(/synthetic-http/)).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: /edge-http/ }));
+		await waitFor(() =>
+			expect(props.navigate).toHaveBeenCalledWith(
+				"/settings/platform/integrations?platform=synthetic-http&instance=edge-http",
+			),
+		);
+		// 列表读取只用了稳定的 name，不使用数字 id。
+		expect(
+			fetchMock.mock.calls.some(([url]) => String(url).includes("/9")),
+		).toBe(false);
+	});
+
+	it("manages a synthetic HTTP connection lifecycle in the drawer with confirmed disable", async () => {
+		let enabled = true;
+		const projection = () =>
+			connectionProjection({ enabled, rowVersion: enabled ? 3 : 4 });
+		const fetchMock = mockFetch((url) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [httpPlugin] });
+			if (url === "/api/v1/connections/edge-http")
+				return Response.json(projection());
+			if (url.endsWith("/connections/edge-http/disable")) {
+				enabled = false;
+				return Response.json(projection());
+			}
+			return undefined;
+		});
+		render(
+			<IntegrationView route="/settings/platform/integrations?platform=synthetic-http&instance=edge-http" />,
+		);
+		expect(await screen.findByText("已启用")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "验证并启用" })).toBeDisabled();
+		fireEvent.click(screen.getByRole("button", { name: "停用接入" }));
+		fireEvent.click(screen.getByRole("button", { name: "确认" }));
+		await waitFor(() =>
+			expect(
+				fetchMock.mock.calls.some(([url]) =>
+					String(url).endsWith("/connections/edge-http/disable"),
+				),
+			).toBe(true),
+		);
+		const disableBody = JSON.parse(
+			String(
+				fetchMock.mock.calls.find(([url]) =>
+					String(url).endsWith("/connections/edge-http/disable"),
+				)?.[1]?.body,
+			),
+		);
+		expect(disableBody).toMatchObject({ expectedRowVersion: 3 });
+		fireEvent.click(screen.getByRole("button", { name: "轮换凭据" }));
+		await waitFor(() =>
+			expect(props.navigate).toHaveBeenCalledWith(
+				"/settings/platform/integrations/synthetic-http/edge-http",
+			),
+		);
+	});
+
+	it("rotates a synthetic HTTP connection with prefilled non-secrets and clears the new secret", async () => {
+		const fetchMock = mockFetch((url) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [httpPlugin] });
+			if (url === "/api/v1/connections/edge-http")
+				return Response.json(
+					connectionProjection({
+						enabled: true,
+						rowVersion: 3,
+						config: {
+							type: "synthetic-http",
+							baseUrl: "https://edge.example",
+							authType: "none",
+							tlsServerName: "edge.internal",
+							tlsSkipVerify: true,
+						},
+					}),
+				);
+			if (url.endsWith("/connections/edge-http/rotate"))
+				return Response.json(
+					connectionProjection({
+						enabled: true,
+						rowVersion: 4,
+						config: {
+							type: "synthetic-http",
+							baseUrl: "https://replacement.example",
+							authType: "bearer",
+							tlsServerName: "edge.internal",
+							tlsSkipVerify: true,
+						},
+					}),
+				);
+			return undefined;
+		});
+		render(
+			<IntegrationView route="/settings/platform/integrations/synthetic-http/edge-http" />,
+		);
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "保存新版本" })).toBeEnabled(),
+		);
+		expect(screen.getByLabelText("端点 URL")).toHaveValue(
+			"https://edge.example",
+		);
+		expect(screen.getByLabelText("TLS Server Name（可选）")).toHaveValue(
+			"edge.internal",
+		);
+		await pickAuthOption("Bearer Token");
+		fireEvent.change(screen.getByLabelText("端点 URL"), {
+			target: { value: "https://replacement.example" },
+		});
+		fireEvent.change(screen.getByLabelText("Bearer Token"), {
+			target: { value: "rotation-secret" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "保存新版本" }));
+		await waitFor(() =>
+			expect(props.navigate).toHaveBeenCalledWith(
+				"/settings/platform/integrations?platform=synthetic-http&instance=edge-http",
+			),
+		);
+		const payload = JSON.parse(
+			String(
+				fetchMock.mock.calls.find(([url]) =>
+					String(url).endsWith("/connections/edge-http/rotate"),
+				)?.[1]?.body,
+			),
+		);
+		expect(payload).toMatchObject({
+			expectedRowVersion: 3,
+			connection: {
+				type: "synthetic-http",
+				baseUrl: "https://replacement.example",
+				authType: "bearer",
+				bearerToken: "rotation-secret",
+				tlsServerName: "edge.internal",
+				tlsSkipVerify: true,
+			},
+		});
+		expect(screen.getByLabelText("Bearer Token")).toHaveValue("");
+	});
+});
