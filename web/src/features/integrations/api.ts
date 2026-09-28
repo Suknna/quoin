@@ -9,7 +9,11 @@ import {
 	enableConnection,
 	rotateConnection,
 } from "@/features/settings/platform/connections/api";
-import type { IntegrationCatalogItem, IntegrationInstance } from "./types";
+import type {
+	ConnectionAuthMode,
+	IntegrationCatalogItem,
+	IntegrationInstance,
+} from "./types";
 
 export async function listIntegrationPlugins(): Promise<
 	IntegrationCatalogItem[]
@@ -41,7 +45,16 @@ export async function replayPluginEventDeadletter(deliveryId: number, clientComm
 }
 
 export type MetricsPlatform = "prometheus" | "thanos";
-export type MetricsAuthMode = "none" | "basic" | "bearer";
+export type MetricsAuthMode = ConnectionAuthMode;
+
+/** One terminal observation of a real connection probe. The typed result
+ * carries the concrete failure diagnostic; secrets never appear in it. */
+export interface ConnectionProbeObservation {
+	id?: string;
+	outcome: "passed" | "failed" | "cancelled" | "interrupted";
+	finishedAt?: string;
+	details?: Record<string, unknown>;
+}
 
 /** Non-secret metrics projection. The server intentionally never returns passwords or bearer tokens. */
 export interface MetricsInstance extends IntegrationInstance {
@@ -56,12 +69,7 @@ export interface MetricsInstance extends IntegrationInstance {
 	tlsCaPem?: string;
 	tlsServerName?: string;
 	tlsSkipVerify: boolean;
-	lastProbe?: {
-		id?: string;
-		outcome: "passed" | "failed" | "cancelled" | "interrupted";
-		finishedAt?: string;
-		details?: Record<string, unknown>;
-	};
+	lastProbe?: ConnectionProbeObservation;
 }
 
 /** Matches the frozen connectionConfigInput contract for Prometheus and Thanos. */
@@ -90,21 +98,11 @@ function metricsInstance(value: object): MetricsInstance {
 		displayName: String(projection.name ?? projection.id),
 		// A rotated metrics connection can remain enabled while intentionally
 		// withheld from dispatch until a fresh exact-pair probe requalifies it.
-		status:
-			projection.revalidationRequired === true
-				? "revalidation_required"
-				: projection.enabled === true
-					? "active"
-					: "disabled",
+		status: parseStatus(projection),
 		revalidationRequired: projection.revalidationRequired === true,
 		rowVersion: Number(projection.rowVersion ?? 0),
 		endpoint: typeof config?.baseUrl === "string" ? config.baseUrl : undefined,
-		authType:
-			config?.authType === "basic"
-				? "basic"
-				: config?.authType === "bearer"
-					? "bearer"
-					: "none",
+		authType: parseAuthType(config?.authType),
 		username:
 			typeof config?.username === "string" ? config.username : undefined,
 		tlsCaPem:
@@ -116,6 +114,17 @@ function metricsInstance(value: object): MetricsInstance {
 		tlsSkipVerify: config?.tlsSkipVerify === true,
 		lastProbe: projection.lastProbe as MetricsInstance["lastProbe"],
 	};
+}
+
+function parseStatus(value: Record<string, unknown>): MetricsInstance["status"] {
+	// A rotated metrics connection can remain enabled while intentionally
+	// withheld from dispatch until a fresh exact-pair probe requalifies it.
+	if (value.revalidationRequired === true) return "revalidation_required";
+	return value.enabled === true ? "active" : "disabled";
+}
+
+function parseAuthType(value: unknown): MetricsAuthMode {
+	return value === "basic" ? "basic" : value === "bearer" ? "bearer" : "none";
 }
 
 export async function listMetricsInstances(
@@ -157,10 +166,11 @@ export async function createMetricsInstance(
 	);
 }
 
-/** Polls the authoritative attempt endpoint only until its terminal state is visible. */
-export async function probeMetricsInstance(
+/** Polls the authoritative attempt endpoint only until its terminal state is visible.
+ * Shared by the specialized metrics forms and the generic plugin HTTP connections. */
+async function pollConnectionProbe(
 	name: string,
-): Promise<MetricsInstance["lastProbe"]> {
+): Promise<ConnectionProbeObservation> {
 	const attempt = await request<{ id: string }>(
 		`/api/v1/connections/${encodeURIComponent(name)}/probe`,
 		{
@@ -181,12 +191,12 @@ export async function probeMetricsInstance(
 		) {
 			const outcome =
 				detail.state === "Succeeded"
-					? "passed"
+					? ("passed" as const)
 					: detail.state === "Cancelled"
-						? "cancelled"
+						? ("cancelled" as const)
 						: detail.state === "Interrupted"
-							? "interrupted"
-							: "failed";
+							? ("interrupted" as const)
+							: ("failed" as const);
 			if (outcome !== "passed") {
 				// The typed result carries the concrete failure diagnostic (e.g. the
 				// gateway error string); the attempt's terminationReason is only the
@@ -222,6 +232,13 @@ export async function probeMetricsInstance(
 		await new Promise((resolve) => setTimeout(resolve, 500));
 	}
 	throw new Error("验证仍在进行，可稍后在接入详情查看结果；本次等待结束不代表验证失败。");
+}
+
+/** Polls the authoritative attempt endpoint only until its terminal state is visible. */
+export async function probeMetricsInstance(
+	name: string,
+): Promise<MetricsInstance["lastProbe"]> {
+	return pollConnectionProbe(name);
 }
 
 /** Reads the typed probe-result details of one attempt; undefined when absent. */
@@ -277,6 +294,157 @@ export async function rotateMetricsInstance(
 	connection: MetricsConnectionInput,
 ): Promise<MetricsInstance> {
 	return metricsInstance(
+		await rotateConnection(instance.displayName, instance.rowVersion, {
+			...connection,
+		}),
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Generic plugin HTTP connections (#110, ADR-0014): every registry-declared
+// connection kind whose plugin catalog entry carries the http_connection
+// capability shares this bounded CRUD surface over /api/v1/connections. The
+// server fails closed on unknown or revoked (plugin disabled) kinds; the UI
+// mirrors that by deriving the kind from the enabled catalog only.
+// ---------------------------------------------------------------------------
+
+/** Non-secret projection of one generic plugin HTTP connection instance.
+ * `platform` is the plugin-registered connection kind — never the plugin ID. */
+export interface HttpConnectionInstance {
+	id: string;
+	platform: string;
+	displayName: string;
+	status: "active" | "revalidation_required" | "disabled";
+	revalidationRequired: boolean;
+	rowVersion: number;
+	endpoint?: string;
+	authType: ConnectionAuthMode;
+	username?: string;
+	tlsCaPem?: string;
+	tlsServerName?: string;
+	tlsSkipVerify: boolean;
+	lastProbe?: ConnectionProbeObservation;
+}
+
+function httpConnectionInstance(value: object): HttpConnectionInstance {
+	const projection = value as Record<string, unknown>;
+	const config = projection.config as Record<string, unknown> | undefined;
+	return {
+		id: String(projection.id ?? projection.name),
+		platform: String(projection.type ?? ""),
+		displayName: String(projection.name ?? projection.id),
+		status: parseStatus(projection),
+		revalidationRequired: projection.revalidationRequired === true,
+		rowVersion: Number(projection.rowVersion ?? 0),
+		endpoint: typeof config?.baseUrl === "string" ? config.baseUrl : undefined,
+		authType: parseAuthType(config?.authType),
+		username:
+			typeof config?.username === "string" ? config.username : undefined,
+		tlsCaPem:
+			typeof config?.tlsCaPem === "string" ? config.tlsCaPem : undefined,
+		tlsServerName:
+			typeof config?.tlsServerName === "string"
+				? config.tlsServerName
+				: undefined,
+		tlsSkipVerify: config?.tlsSkipVerify === true,
+		lastProbe: projection.lastProbe as HttpConnectionInstance["lastProbe"],
+	};
+}
+
+/** Lists the generic HTTP connection instances of the given plugin-declared
+ * kinds; the kinds always come from the enabled server catalog. */
+export async function listHttpConnectionInstances(
+	connectionKinds: string[],
+): Promise<HttpConnectionInstance[]> {
+	if (connectionKinds.length === 0) return [];
+	const page = await request<{ items?: Record<string, unknown>[] }>(
+		"/api/v1/connections?limit=100",
+	);
+	return (page.items ?? [])
+		.filter((item) => connectionKinds.includes(String(item.type)))
+		.map(httpConnectionInstance);
+}
+
+export async function fetchHttpConnectionInstance(
+	name: string,
+): Promise<HttpConnectionInstance> {
+	return httpConnectionInstance(
+		await request<Record<string, unknown>>(
+			`/api/v1/connections/${encodeURIComponent(name)}`,
+		),
+	);
+}
+
+/** Matches the frozen connectionConfigInput contract for registry-declared
+ * HTTP kinds: credentials ride request-only and the server re-verifies the
+ * auth-mode membership against the plugin declaration. */
+export interface HttpConnectionInput {
+	type: string;
+	baseUrl: string;
+	authType: ConnectionAuthMode;
+	username?: string;
+	password?: string;
+	bearerToken?: string;
+	tlsCaPem?: string;
+	tlsServerName?: string;
+	tlsSkipVerify?: boolean;
+}
+
+/** Creates a disabled connection of one generic kind. Callers must run the
+ * plugin-declared probe and explicitly enable it; a kind without a declared
+ * probe path can never enable new instances. */
+export async function createHttpConnectionInstance(
+	name: string,
+	connection: HttpConnectionInput,
+): Promise<HttpConnectionInstance> {
+	return httpConnectionInstance(
+		await request<Record<string, unknown>>("/api/v1/connections", {
+			method: "POST",
+			body: JSON.stringify({
+				clientCommandId: newClientCommandId(),
+				name,
+				connection,
+			}),
+		}),
+	);
+}
+
+export async function probeHttpConnectionInstance(
+	name: string,
+): Promise<ConnectionProbeObservation> {
+	return pollConnectionProbe(name);
+}
+
+/** Reuses the shared connection command wrappers, preserving row-version fencing. */
+export async function enableHttpConnectionInstance(
+	instance: HttpConnectionInstance,
+	qualifiedProbeResultId: string,
+): Promise<HttpConnectionInstance> {
+	return httpConnectionInstance(
+		(await enableConnection(
+			instance.displayName,
+			instance.rowVersion,
+			qualifiedProbeResultId,
+		)) as unknown as Record<string, unknown>,
+	);
+}
+
+export async function disableHttpConnectionInstance(
+	instance: HttpConnectionInstance,
+): Promise<HttpConnectionInstance> {
+	return httpConnectionInstance(
+		(await disableConnection(
+			instance.displayName,
+			instance.rowVersion,
+		)) as unknown as Record<string, unknown>,
+	);
+}
+
+export async function rotateHttpConnectionInstance(
+	instance: HttpConnectionInstance,
+	connection: HttpConnectionInput,
+): Promise<HttpConnectionInstance> {
+	return httpConnectionInstance(
 		await rotateConnection(instance.displayName, instance.rowVersion, {
 			...connection,
 		}),

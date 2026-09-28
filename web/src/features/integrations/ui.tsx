@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import {
 	type FormEvent,
+	type ReactNode,
 	useCallback,
 	useEffect,
 	useMemo,
@@ -84,36 +85,50 @@ import {
 	type IntakeIssue,
 } from "@/features/alerts/api";
 import {
+	type ConnectionProbeObservation,
 	type EventSourceCredential,
 	type EventSourceInstance,
+	type HttpConnectionInput,
+	type HttpConnectionInstance,
 	alertmanagerReceiverYaml,
 	createEventSourceInstance,
+	createHttpConnectionInstance,
 	createMetricsInstance,
 	disableEventSourceInstance,
+	disableHttpConnectionInstance,
 	disableMetricsInstance,
+	enableHttpConnectionInstance,
 	enableMetricsInstance,
 	fetchEventSourceInstance,
+	fetchHttpConnectionInstance,
 	fetchMetricsInstance,
 	fetchPublicReceiverEndpoint,
 	listEventSourceCredentials,
 	listEventSourceInstances,
+	listHttpConnectionInstances,
 	listIntegrationPlugins,
 	listPluginEventDeadletters,
 	listMetricsInstances,
 	type MetricsConnectionInput,
 	type MetricsInstance,
 	probeDiagnostic,
+	probeHttpConnectionInstance,
 	probeMetricsInstance,
 	replayPluginEventDeadletter,
 	retireEventSourceCredential,
 	revealEventSourceCredential,
 	rotateEventSourceCredential,
+	rotateHttpConnectionInstance,
 	rotateMetricsInstance,
 } from "./api";
 import {
 	EVENT_SOURCE_CAPABILITY,
+	HTTP_CONNECTION_CAPABILITY,
 	type IntegrationCatalogItem,
 	type IntegrationPlatform,
+	allowedAuthModes,
+	genericHttpConnectionKinds,
+	isHttpConnectionCatalogItem,
 	isSpecializedPlatform,
 } from "./types";
 
@@ -132,7 +147,7 @@ function routeParts(route: string) {
 	return sub.split("/").filter(Boolean);
 }
 function integrationRoute(
-	platform?: IntegrationPlatform | "instances",
+	platform?: IntegrationPlatform | "instances" | string,
 	instanceId?: string,
 ) {
 	return [INTEGRATIONS_BASE, platform, instanceId].filter(Boolean).join("/");
@@ -156,7 +171,8 @@ function CatalogCard({
 		item.id === "thanos" ||
 		item.id === "alertmanager" ||
 		(Boolean(item.sourceKind) && item.capabilities.includes("event_source") &&
-			item.capabilities.includes("alert_normalizer"));
+			item.capabilities.includes("alert_normalizer")) ||
+		isHttpConnectionCatalogItem(item);
 	return (
 		<Card className="flex flex-col">
 			<CardHeader>
@@ -167,6 +183,9 @@ function CatalogCard({
 				<div className="flex flex-wrap gap-2">
 					{item.capabilities.includes("event_source") && (
 						<Badge variant="secondary">事件接入</Badge>
+					)}
+					{item.capabilities.includes(HTTP_CONNECTION_CAPABILITY) && (
+						<Badge variant="secondary">HTTP 连接</Badge>
 					)}
 					{item.capabilities.includes("discover") && (
 						<Badge variant="secondary">自动观测</Badge>
@@ -343,17 +362,25 @@ function Instances({
 	suspended,
 }: Pick<WorkspaceModuleProps, "navigate" | "suspended">) {
 	const [query, setQuery] = useState("");
-	// 指标连接不分页、告警事件源分页：第一页 = 全部指标连接 + 事件源第一页，
-	// 后续页只有事件源（指标连接已在第一页完整展示）。
-	const list = useCursorPages<EventSourceInstance | MetricsInstance>(
+	// 指标连接不分页、告警事件源分页：第一页 = 全部指标连接 + 通用 HTTP 连接 +
+	// 事件源第一页，后续页只有事件源（已完整展示的连接不在后续页重复）。
+	// 通用 HTTP 连接的 kind 来自已启用插件目录；目录读取失败不拖垮列表，
+	// 只是这一页暂不包含通用连接。
+	const list = useCursorPages<
+		EventSourceInstance | MetricsInstance | HttpConnectionInstance
+	>(
 		async (cursor) => {
 			if (cursor) return listEventSourceInstances(cursor);
-			const [events, metrics] = await Promise.all([
+			const [events, metrics, catalog] = await Promise.all([
 				listEventSourceInstances(),
 				listMetricsInstances(),
+				listIntegrationPlugins().catch(() => []),
 			]);
+			const generic = await listHttpConnectionInstances(
+				genericHttpConnectionKinds(catalog),
+			);
 			return {
-				items: [...(events.items ?? []), ...metrics],
+				items: [...(events.items ?? []), ...metrics, ...generic],
 				nextCursor: events.nextCursor,
 			};
 		},
@@ -374,10 +401,24 @@ function Instances({
 					? "Thanos"
 					: platform;
 	const isMetrics = (
-		item: EventSourceInstance | MetricsInstance,
+		item:
+			| EventSourceInstance
+			| MetricsInstance
+			| HttpConnectionInstance,
 	): item is MetricsInstance =>
 		item.platform === "prometheus" || item.platform === "thanos";
-	const statusLabel = (item: EventSourceInstance | MetricsInstance) =>
+	const isHttpConnection = (
+		item:
+			| EventSourceInstance
+			| MetricsInstance
+			| HttpConnectionInstance,
+	): item is HttpConnectionInstance => "authType" in item;
+	const statusLabel = (
+		item:
+			| EventSourceInstance
+			| MetricsInstance
+			| HttpConnectionInstance,
+	) =>
 		item.status === "active"
 			? "已启用"
 			: item.status === "revalidation_required"
@@ -414,7 +455,9 @@ function Instances({
 					title: item.displayName,
 					subtitle: isMetrics(item)
 						? `${platformName(item.platform)} · ${item.endpoint ?? "—"}`
-						: `${platformName(item.platform)} · ${formatEventTime(item.latestValidEventAt)}`,
+						: isHttpConnection(item)
+							? `${item.platform} · ${authModeLabel[item.authType]} · ${item.endpoint ?? "—"}`
+							: `${platformName(item.platform)} · ${formatEventTime(item.latestValidEventAt)}`,
 					badge: {
 						text: statusLabel(item),
 						variant:
@@ -1796,19 +1839,19 @@ function IntegrationNotFound() {
 	);
 }
 
-/** Generic admin route for any catalog plugin with the event-source
- * capability that has no specialized brand workbench. The kind is validated
- * against the server catalog before the form renders; the catalog also
- * supplies the display name, so no per-brand route entries exist. */
-function GenericEventSourceRoute({
-	kind,
-	navigate,
-	suspended,
-}: {
-	kind: string;
-	navigate: (to: string) => void;
-	suspended: boolean;
-}) {
+/** Loads the server plugin catalog and resolves one entry; shared by every
+ * catalog-validated generic route. Plugin-id routes resolve by `id`, the
+ * connection rotate/detail routes resolve by the registered connectionKind —
+ * three distinct identities (#110) that must never collapse into each other. */
+function useCatalogEntry(
+	kind: string,
+	by: "id" | "connectionKind",
+): {
+	ready: boolean;
+	item?: IntegrationCatalogItem;
+	error: string;
+	retry: () => void;
+} {
 	const [catalog, setCatalog] = useState<IntegrationCatalogItem[]>();
 	const [error, setError] = useState("");
 	const [revision, setRevision] = useState(0);
@@ -1825,20 +1868,36 @@ function GenericEventSourceRoute({
 			active = false;
 		};
 	}, [revision]);
-	const item = catalog?.find((candidate) => candidate.id === kind);
-	if (!catalog) {
-		return error ? (
+	const item = catalog?.find((candidate) =>
+		by === "id" ? candidate.id === kind : candidate.connectionKind === kind,
+	);
+	return {
+		ready: Boolean(catalog),
+		item,
+		error,
+		retry: () => {
+			setError("");
+			setRevision((value) => value + 1);
+		},
+	};
+}
+
+/** Shared gate for catalog-validated routes: loading/error states, then the
+ * not-found view when the entry is missing or fails its capability check. */
+function CatalogGate({
+	entry,
+	children,
+}: {
+	entry: ReturnType<typeof useCatalogEntry>;
+	children: (item: IntegrationCatalogItem) => ReactNode;
+}) {
+	if (!entry.ready) {
+		return entry.error ? (
 			<section className="flex flex-col gap-4">
 				<Alert variant="destructive">
 					<AlertTitle>无法加载插件目录</AlertTitle>
-					<AlertDescription>{error}</AlertDescription>
-					<Button
-						variant="outline"
-						onClick={() => {
-							setError("");
-							setRevision((value) => value + 1);
-						}}
-					>
+					<AlertDescription>{entry.error}</AlertDescription>
+					<Button variant="outline" onClick={entry.retry}>
 						重试
 					</Button>
 				</Alert>
@@ -1850,17 +1909,543 @@ function GenericEventSourceRoute({
 			/>
 		);
 	}
-	if (
-		!item ||
-		!item.enabled ||
-		!item.sourceKind ||
-		!item.capabilities.includes(EVENT_SOURCE_CAPABILITY) ||
-		!item.capabilities.includes("alert_normalizer")
-	) {
-		return <IntegrationNotFound />;
-	}
+	if (!entry.item) return <IntegrationNotFound />;
+	return <>{children(entry.item)}</>;
+}
+
+/** Generic admin route for any catalog plugin that has no specialized brand
+ * workbench. The plugin id is validated against the server catalog before any
+ * form renders: event-source-only plugins get the source form, http_connection
+ * plugins get the connection manager, and a plugin with both keeps both
+ * affordances side by side. Everything else fails closed. */
+function GenericPluginRoute({
+	kind,
+	navigate,
+	suspended,
+}: {
+	kind: string;
+	navigate: (to: string) => void;
+	suspended: boolean;
+}) {
+	const entry = useCatalogEntry(kind, "id");
 	return (
-		<EventSourceForm item={item} kind={item.sourceKind} navigate={navigate} suspended={suspended} />
+		<CatalogGate entry={entry}>
+			{(item) => {
+				const eventSourceReady =
+					item.enabled &&
+					Boolean(item.sourceKind) &&
+					item.capabilities.includes(EVENT_SOURCE_CAPABILITY) &&
+					item.capabilities.includes("alert_normalizer");
+				const httpReady = isHttpConnectionCatalogItem(item);
+				if (eventSourceReady && httpReady)
+					return (
+						<CombinedPluginRoute
+							item={item}
+							navigate={navigate}
+							suspended={suspended}
+						/>
+					);
+				if (httpReady)
+					return (
+						<HttpConnectionManager
+							item={item}
+							navigate={navigate}
+							suspended={suspended}
+						/>
+					);
+				if (eventSourceReady)
+					return (
+						<EventSourceForm
+							item={item}
+							kind={item.sourceKind as string}
+							navigate={navigate}
+							suspended={suspended}
+						/>
+					);
+				return <IntegrationNotFound />;
+			}}
+		</CatalogGate>
+	);
+}
+
+/** A plugin that both receives events and owns an HTTP connection kind keeps
+ * both affordances on one page; neither replaces the other (#110). */
+function CombinedPluginRoute({
+	item,
+	navigate,
+	suspended,
+}: {
+	item: IntegrationCatalogItem;
+	navigate: (to: string) => void;
+	suspended: boolean;
+}) {
+	return (
+		<section className="flex flex-col gap-8">
+			<div>
+				<h1 className="text-2xl font-semibold tracking-tight">
+					配置 {item.displayName}
+				</h1>
+				<p className="mt-1 text-sm text-muted-foreground">
+					该插件同时提供事件接入与受控 HTTP
+					连接；两类能力独立配置、互不替代。
+				</p>
+			</div>
+			<HttpConnectionManager
+				item={item}
+				navigate={navigate}
+				suspended={suspended}
+				embedded
+			/>
+			<Separator />
+			<EventSourceForm
+				item={item}
+				kind={item.sourceKind as string}
+				navigate={navigate}
+				suspended={suspended}
+				embedded
+			/>
+		</section>
+	);
+}
+
+/** Request body for one generic HTTP connection; mirrors the shared bounded
+ * HTTP contract (credentials ride request-only and never echo back). */
+function httpConnectionPayload(
+	kind: string,
+	baseUrl: string,
+	authType: AuthType,
+	username: string,
+	password: string,
+	bearerToken: string,
+	tlsCaPem: string,
+	tlsServerName: string,
+	tlsSkipVerify: boolean,
+): HttpConnectionInput {
+	return {
+		type: kind,
+		baseUrl: baseUrl.trim(),
+		authType,
+		...(authType === "basic" ? { username: username.trim(), password } : {}),
+		...(authType === "bearer" ? { bearerToken } : {}),
+		...(tlsCaPem.trim() ? { tlsCaPem } : {}),
+		...(tlsServerName.trim() ? { tlsServerName: tlsServerName.trim() } : {}),
+		...(tlsSkipVerify ? { tlsSkipVerify: true } : {}),
+	};
+}
+
+/** Full management page for one generic HTTP connection kind: the existing
+ * independent instances plus the create → probe → enable lifecycle (#110).
+ * Enablement always requires a passed real probe over the current pair; a
+ * kind without a declared probe path cannot enable new instances at all. */
+function HttpConnectionManager({
+	item,
+	navigate,
+	suspended,
+	embedded = false,
+}: {
+	item: IntegrationCatalogItem;
+	navigate: (to: string) => void;
+	suspended: boolean;
+	embedded?: boolean;
+}) {
+	const kind = item.connectionKind as string;
+	const modes = allowedAuthModes(item.connectionAuthModes);
+	const canEnable = Boolean(item.connectionProbePath);
+	const [instances, setInstances] = useState<HttpConnectionInstance[]>([]);
+	const [instancesLoading, setInstancesLoading] = useState(true);
+	const [instancesError, setInstancesError] = useState("");
+	const [instancesRevision, setInstancesRevision] = useState(0);
+	const [name, setName] = useState("");
+	const [baseUrl, setBaseUrl] = useState("");
+	const [authType, setAuthType] = useState<AuthType>(modes[0] ?? "none");
+	const [username, setUsername] = useState("");
+	const [password, setPassword] = useState("");
+	const [bearerToken, setBearerToken] = useState("");
+	const [tlsCaPem, setTlsCaPem] = useState("");
+	const [tlsServerName, setTlsServerName] = useState("");
+	const [tlsSkipVerify, setTlsSkipVerify] = useState(false);
+	const [created, setCreated] = useState<HttpConnectionInstance>();
+	const [saving, setSaving] = useState(false);
+	const [error, setError] = useState("");
+	const [result, setResult] = useState<ConnectionProbeObservation>();
+	const loadInstances = useCallback(async () => {
+		setInstancesLoading(true);
+		try {
+			setInstances(await listHttpConnectionInstances([kind]));
+			setInstancesError("");
+		} catch (reason) {
+			setInstancesError(messageOf(reason, "暂时无法完成操作，请重试。"));
+		} finally {
+			setInstancesLoading(false);
+		}
+	}, [kind]);
+	useEffect(() => {
+		if (!suspended) void loadInstances();
+	}, [loadInstances, suspended, instancesRevision]);
+	useEffect(() => {
+		if (suspended) {
+			setPassword("");
+			setBearerToken("");
+		}
+	}, [suspended]);
+	function resetForm() {
+		setName("");
+		setBaseUrl("");
+		setUsername("");
+		setTlsCaPem("");
+		setTlsServerName("");
+		setTlsSkipVerify(false);
+		setCreated(undefined);
+		setResult(undefined);
+	}
+	async function submit(event: FormEvent) {
+		event.preventDefault();
+		if (suspended) return;
+		setSaving(true);
+		setError("");
+		setResult(undefined);
+		try {
+			let instance = created;
+			if (!instance) {
+				const payload = httpConnectionPayload(
+					kind,
+					baseUrl,
+					authType,
+					username,
+					password,
+					bearerToken,
+					tlsCaPem,
+					tlsServerName,
+					tlsSkipVerify,
+				);
+				const creating = createHttpConnectionInstance(name.trim(), payload);
+				setPassword("");
+				setBearerToken("");
+				instance = await creating;
+				setCreated(instance);
+			}
+			if (!canEnable) {
+				// Fail closed in the UI: without a plugin-declared probe path the
+				// server refuses to qualify this kind, so the instance stays
+				// disabled instead of pretending to be a complete integration.
+				resetForm();
+				setInstancesRevision((value) => value + 1);
+				notify.success("连接已创建并保持停用");
+				return;
+			}
+			const probe = await probeHttpConnectionInstance(instance.displayName);
+			if (!probe) throw new Error("未收到连通性验证结果。");
+			setResult(probe);
+			if (probe.outcome !== "passed" || !probe.id) {
+				const diagnostic = probeDiagnostic(probe.details);
+				throw new Error(
+					`连通性验证未通过${diagnostic ? `：${diagnostic}` : ""}。已创建的接入保持停用；修正服务端或网络后可重新验证，不会再次创建。`,
+				);
+			}
+			await enableHttpConnectionInstance(instance, probe.id);
+			resetForm();
+			setInstancesRevision((value) => value + 1);
+			notify.success("接入已启用");
+		} catch (reason) {
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+		} finally {
+			setSaving(false);
+			setPassword("");
+			setBearerToken("");
+		}
+	}
+	const resultDiagnostic = probeDiagnostic(result?.details);
+	const heading = embedded ? (
+		<h2 className="text-base font-semibold">HTTP 连接</h2>
+	) : (
+		<div>
+			<h1 className="text-2xl font-semibold tracking-tight">
+				配置 {item.displayName}
+			</h1>
+			<p className="mt-1 text-sm text-muted-foreground">
+				创建多个相互独立的 HTTP 连接实例；启用前必须通过插件声明的只读探测。
+			</p>
+		</div>
+	);
+	return (
+		<section className="flex flex-col gap-6">
+			{heading}
+			<section className="flex flex-col gap-3">
+				<div>
+					<h3 className="text-sm font-medium">已创建的连接实例</h3>
+					<p className="mt-1 text-xs text-muted-foreground">
+						同一连接类型可创建多个相互独立的实例；点击查看状态、停用或轮换。
+					</p>
+				</div>
+				{instancesLoading ? (
+					<DetailSkeleton
+						label="正在加载连接实例"
+						rows={["line", "line", "line"]}
+					/>
+				) : instancesError ? (
+					<Alert variant="destructive">
+						<AlertDescription>{instancesError}</AlertDescription>
+					</Alert>
+				) : instances.length === 0 ? (
+					<Empty className="min-h-32">
+						<EmptyHeader>
+							<EmptyTitle>尚未创建连接实例</EmptyTitle>
+							<EmptyDescription>
+								使用下方表单创建第一个连接。
+							</EmptyDescription>
+						</EmptyHeader>
+					</Empty>
+				) : (
+					<EntityList
+						items={instances.map((instance) => ({
+							id: instance.id,
+							title: instance.displayName,
+							subtitle: `${authModeLabel[instance.authType]} · ${instance.endpoint ?? "—"}`,
+							badge: {
+								text:
+									instance.status === "active"
+										? "已启用"
+										: instance.status === "revalidation_required"
+											? "需要重新验证"
+											: "已停用",
+								variant:
+									instance.status === "active"
+										? ("secondary" as const)
+										: ("outline" as const),
+							},
+							item: instance,
+						}))}
+						columns={["title", "subtitle", "status"]}
+						onSelect={(row) =>
+							navigate(
+								instanceSheetRoute(
+									row.item.platform,
+									row.item.displayName,
+								),
+							)
+						}
+						emptyTitle="尚未创建连接实例"
+					/>
+				)}
+			</section>
+			<form onSubmit={submit}>
+				<Card>
+					<CardHeader>
+						<CardTitle>{created ? "重新验证" : "新建连接"}</CardTitle>
+						<CardDescription>
+							{created
+								? `“${created.displayName}” 已创建且保持停用。重新验证不会再次创建。`
+								: canEnable
+									? `创建后保持停用；通过插件声明的只读探测（GET ${item.connectionProbePath}，期望 200）后才能启用。`
+									: "该连接类型未声明探测路径，新实例无法启用；创建仅用于已有授权消费的停用配置。"}
+						</CardDescription>
+					</CardHeader>
+					<CardContent>
+						<FieldGroup>
+							{error && (
+								<Alert variant="destructive">
+									<AlertTitle>无法完成接入生命周期</AlertTitle>
+									<AlertDescription>{error}</AlertDescription>
+								</Alert>
+							)}
+							{result && (
+								<Alert>
+									<AlertTitle>
+										{result.outcome === "passed"
+											? "验证通过，正在启用或已启用"
+											: "验证未通过"}
+									</AlertTitle>
+									<AlertDescription>
+										{result.finishedAt
+											? `完成时间：${formatTime(result.finishedAt)}`
+											: "可在修正后重新验证。"}
+										{resultDiagnostic && (
+											<span className="block break-all">
+												诊断：{resultDiagnostic}
+											</span>
+										)}
+									</AlertDescription>
+								</Alert>
+							)}
+							<Field>
+								<FieldLabel htmlFor="http-connection-name">
+									实例名称
+								</FieldLabel>
+								<Input
+									id="http-connection-name"
+									value={name}
+									onChange={(event) => setName(event.target.value)}
+									required
+									maxLength={200}
+									disabled={saving || suspended || Boolean(created)}
+									autoFocus
+								/>
+								<FieldDescription>
+									用于稳定识别该实例；同一连接类型可创建多个实例，不能重名。
+								</FieldDescription>
+							</Field>
+							<Field>
+								<FieldLabel htmlFor="http-connection-url">
+									端点 URL
+								</FieldLabel>
+								<Input
+									id="http-connection-url"
+									type="url"
+									value={baseUrl}
+									onChange={(event) => setBaseUrl(event.target.value)}
+									required
+									disabled={saving || suspended || Boolean(created)}
+									placeholder="https://platform.example"
+								/>
+								<FieldDescription>
+									该连接类型绑定的外部平台受控端点。
+								</FieldDescription>
+							</Field>
+							<Field>
+								<FieldLabel>认证方式</FieldLabel>
+								<AuthTypeSelect
+									value={authType}
+									onChange={setAuthType}
+									disabled={saving || suspended || Boolean(created)}
+									modes={modes}
+								/>
+								<FieldDescription>
+									仅提供插件声明支持的认证方式。
+								</FieldDescription>
+							</Field>
+							{authType === "basic" && (
+								<>
+									<Field>
+										<FieldLabel htmlFor="http-connection-username">
+											用户名
+										</FieldLabel>
+										<Input
+											id="http-connection-username"
+											value={username}
+											onChange={(event) => setUsername(event.target.value)}
+											required
+											disabled={saving || suspended || Boolean(created)}
+										/>
+									</Field>
+									<Field>
+										<FieldLabel htmlFor="http-connection-password">
+											密码
+										</FieldLabel>
+										<Input
+											id="http-connection-password"
+											type="password"
+											value={password}
+											onChange={(event) => setPassword(event.target.value)}
+											required
+											disabled={saving || suspended || Boolean(created)}
+										/>
+										<FieldDescription>
+											提交即清除；不会写入 URL、浏览器存储或响应显示。
+										</FieldDescription>
+									</Field>
+								</>
+							)}
+							{authType === "bearer" && (
+								<Field>
+									<FieldLabel htmlFor="http-connection-token">
+										Bearer Token
+									</FieldLabel>
+									<Input
+										id="http-connection-token"
+										type="password"
+										value={bearerToken}
+										onChange={(event) => setBearerToken(event.target.value)}
+										required
+										disabled={saving || suspended || Boolean(created)}
+									/>
+									<FieldDescription>
+										提交即清除；不会写入 URL、浏览器存储或响应显示。
+									</FieldDescription>
+								</Field>
+							)}
+							<Separator />
+							<Field>
+								<FieldLabel htmlFor="http-connection-ca">
+									自定义 CA（可选）
+								</FieldLabel>
+								<Textarea
+									id="http-connection-ca"
+									value={tlsCaPem}
+									onChange={(event) => setTlsCaPem(event.target.value)}
+									disabled={saving || suspended || Boolean(created)}
+								/>
+							</Field>
+							<Field>
+								<FieldLabel htmlFor="http-connection-server-name">
+									TLS Server Name（可选）
+								</FieldLabel>
+								<Input
+									id="http-connection-server-name"
+									value={tlsServerName}
+									onChange={(event) => setTlsServerName(event.target.value)}
+									disabled={saving || suspended || Boolean(created)}
+								/>
+							</Field>
+							<label className="flex items-start gap-2 text-sm">
+								<input
+									type="checkbox"
+									checked={tlsSkipVerify}
+									onChange={(event) => setTlsSkipVerify(event.target.checked)}
+									disabled={saving || suspended || Boolean(created)}
+								/>
+								<span>
+									跳过 TLS 证书校验（仅限已知受控环境；默认严格验证）
+								</span>
+							</label>
+							<Button
+								type="submit"
+								disabled={
+									!name.trim() ||
+									!baseUrl.trim() ||
+									saving ||
+									suspended ||
+									(!created &&
+										authType === "basic" &&
+										(!username.trim() || !password)) ||
+									(!created && authType === "bearer" && !bearerToken)
+								}
+							>
+								{saving && (
+									<LoaderCircle
+										className="animate-spin"
+										data-icon="inline-start"
+									/>
+								)}
+								{saving
+									? "处理中…"
+									: created
+										? "重新验证并启用"
+										: canEnable
+											? "创建、验证并启用"
+											: "创建（保持停用）"}
+							</Button>
+						</FieldGroup>
+					</CardContent>
+				</Card>
+			</form>
+			<aside className="flex flex-col gap-4">
+				<h2 className="text-base font-semibold">配置说明</h2>
+				<ol className="flex flex-col gap-3 text-sm text-muted-foreground">
+					<li>1. 创建后接入保持停用，避免未经验证即被业务使用。</li>
+					<li>
+						2. 探测地址由插件声明冻结（只读 GET），不能由实例配置修改；
+						未声明探测路径的类型不能启用新实例。
+					</li>
+					<li>
+						3. 启用必须引用当前 revision 与凭据代次的通过结果；轮换后需重新验证。
+					</li>
+				</ol>
+				<Separator />
+				<p className="text-sm text-muted-foreground">
+					凭据仅用于本次提交，服务端加密保存后立即丢弃；页面与错误信息不会回显任何秘密。
+				</p>
+			</aside>
+		</section>
 	);
 }
 
@@ -1873,11 +2458,14 @@ function EventSourceForm({
 	kind,
 	navigate,
 	suspended,
+	embedded = false,
 }: {
 	item: IntegrationCatalogItem;
 	kind: string;
 	navigate: (to: string) => void;
 	suspended: boolean;
+	/** Demoted heading when rendered below the combined-plugin page title. */
+	embedded?: boolean;
 }) {
 	const [key, setKey] = useState("");
 	const [createdKey, setCreatedKey] = useState("");
@@ -1924,14 +2512,18 @@ function EventSourceForm({
 	}
 	return (
 		<section className="flex flex-col gap-6">
-			<div>
-				<h1 className="text-2xl font-semibold tracking-tight">
-					配置 {item.displayName}
-				</h1>
-				<p className="mt-1 text-sm text-muted-foreground">
-					创建逻辑事件源，生成面向部署公共入口的接收地址与一次性凭据。
-				</p>
-			</div>
+			{embedded ? (
+				<h2 className="text-base font-semibold">事件接入</h2>
+			) : (
+				<div>
+					<h1 className="text-2xl font-semibold tracking-tight">
+						配置 {item.displayName}
+					</h1>
+					<p className="mt-1 text-sm text-muted-foreground">
+						创建逻辑事件源，生成面向部署公共入口的接收地址与一次性凭据。
+					</p>
+				</div>
+			)}
 			<div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,.75fr)]">
 				<form onSubmit={submit}>
 					<Card>
@@ -2016,6 +2608,513 @@ function EventSourceForm({
 	);
 }
 
+/** Drawer detail for one generic HTTP connection instance: status, real-probe
+ * verification, explicit enablement and confirmed disable/rotate (#110). */
+function HttpConnectionDetail({
+	id,
+	navigate,
+	suspended,
+}: {
+	id: string;
+	navigate: (to: string) => void;
+	suspended: boolean;
+}) {
+	const [item, setItem] = useState<HttpConnectionInstance>();
+	const [loading, setLoading] = useState(true);
+	const [busy, setBusy] = useState("");
+	const [error, setError] = useState("");
+	const load = useCallback(async () => {
+		setLoading(true);
+		try {
+			setItem(await fetchHttpConnectionInstance(id));
+			setError("");
+		} catch (reason) {
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+		} finally {
+			setLoading(false);
+		}
+	}, [id]);
+	useEffect(() => {
+		if (!suspended) void load();
+	}, [load, suspended]);
+	async function action(kind: "probe" | "enable" | "disable") {
+		if (!item) return;
+		setBusy(kind);
+		setError("");
+		try {
+			if (kind === "probe" || kind === "enable") {
+				const result = await probeHttpConnectionInstance(item.displayName);
+				if (!result || result.outcome !== "passed" || !result.id) {
+					const diagnostic = probeDiagnostic(result?.details);
+					throw new Error(
+						`连通性验证未通过${diagnostic ? `：${diagnostic}` : ""}或未生成可启用的验证结果，接入保持当前状态。`,
+					);
+				}
+				if (kind === "enable")
+					setItem(await enableHttpConnectionInstance(item, result.id));
+			} else setItem(await disableHttpConnectionInstance(item));
+			if (kind === "enable") notify.success("接入已启用");
+			else if (kind === "disable") notify.success("接入已停用");
+			else notify.success("验证通过");
+			await load();
+		} catch (reason) {
+			notify.error(reason, "暂时无法完成操作，请重试。");
+		} finally {
+			setBusy("");
+		}
+	}
+	if (loading)
+		return (
+			<DetailSkeleton
+				label="正在加载连接实例"
+				rows={["title", "line", "card", "card", "card"]}
+			/>
+		);
+	if (!item)
+		return (
+			<section className="flex flex-col gap-4">
+				<Alert variant="destructive">
+					<AlertTitle>无法加载接入实例</AlertTitle>
+					<AlertDescription>
+						{error || "该实例不存在或暂时无法读取。"}
+					</AlertDescription>
+				</Alert>
+			</section>
+		);
+	const needsRevalidation = item.revalidationRequired;
+	const statusLabel =
+		item.status === "active"
+			? "已启用"
+			: needsRevalidation
+				? "需要重新验证"
+				: "已停用";
+	return (
+		<section className="flex flex-col gap-6">
+			{/* 抽屉头部（DetailSheet）负责实例名标题。 */}
+			{error && (
+				<Alert variant="destructive">
+					<AlertDescription>{error}</AlertDescription>
+				</Alert>
+			)}
+			<Card>
+				<CardHeader>
+					<div className="flex flex-wrap items-center justify-between gap-3">
+						<div>
+							<CardTitle>接入状态</CardTitle>
+							<CardDescription>
+								端点和凭据不回显；轮换会创建新配置与凭据代次。
+							</CardDescription>
+						</div>
+						<Badge
+							variant={item.status === "active" ? "secondary" : "outline"}
+						>
+							{statusLabel}
+						</Badge>
+					</div>
+				</CardHeader>
+				<CardContent className="flex flex-col gap-5">
+					<PropertyList
+						layout="grid-2"
+						entries={[
+							{
+								label: "连接类型",
+								value: <span className="font-medium">{item.platform}</span>,
+							},
+							{
+								label: "端点",
+								value: (
+									<span className="break-all font-medium">
+										{item.endpoint ?? "—"}
+									</span>
+								),
+							},
+							{
+								label: "认证方式",
+								value: (
+									<span className="font-medium">
+										{authModeLabel[item.authType]}
+									</span>
+								),
+							},
+							{
+								label: "最近验证",
+								value: (
+									<span className="font-medium">
+										{item.lastProbe ? item.lastProbe.outcome : "尚未记录"}
+									</span>
+								),
+							},
+						]}
+					/>
+					{needsRevalidation && (
+						<Alert>
+							<AlertTitle>需要重新验证</AlertTitle>
+							<AlertDescription>
+								凭据已轮换。请执行验证并启用，以当前 revision
+								和凭据代次的通过结果恢复使用。
+							</AlertDescription>
+						</Alert>
+					)}
+					<Separator />
+					<div className="flex flex-wrap gap-2">
+						<Button
+							variant="outline"
+							disabled={suspended || Boolean(busy)}
+							onClick={() => void action("probe")}
+						>
+							<RefreshCw data-icon="inline-start" />
+							{busy === "probe" ? "验证中…" : "验证连通性"}
+						</Button>
+						<Button
+							disabled={
+								suspended ||
+								(item.status === "active" && !needsRevalidation) ||
+								Boolean(busy)
+							}
+							onClick={() => void action("enable")}
+						>
+							{needsRevalidation ? "重新验证并启用" : "验证并启用"}
+						</Button>
+						<ConfirmAction
+							title={`停用 ${item.displayName}？`}
+							description="停用后不再开始新的观测、查询和巡检；配置和历史不会删除。"
+							disabled={
+								suspended || item.status === "disabled" || Boolean(busy)
+							}
+							destructive
+							onConfirm={() => void action("disable")}
+						>
+							{busy === "disable" ? "停用中…" : "停用接入"}
+						</ConfirmAction>
+						<Button
+							variant="outline"
+							disabled={suspended || Boolean(busy)}
+							onClick={() =>
+								navigate(integrationRoute(item.platform, item.displayName))
+							}
+						>
+							<RotateCw data-icon="inline-start" />
+							轮换凭据
+						</Button>
+					</div>
+				</CardContent>
+			</Card>
+		</section>
+	);
+}
+
+/** Drawer dispatcher for non-specialized instance platforms (#110): an
+ * enabled http_connection catalog kind renders the connection detail;
+ * everything else — registered generic event sources, unknown kinds, and
+ * catalog outages — keeps the long-standing event-source detail, whose
+ * server reads fail closed on their own. */
+function GenericInstanceDetailRoute({
+	kind,
+	id,
+	navigate,
+	suspended,
+}: {
+	kind: string;
+	id: string;
+	navigate: (to: string) => void;
+	suspended: boolean;
+}) {
+	const entry = useCatalogEntry(kind, "connectionKind");
+	if (entry.ready && entry.item && isHttpConnectionCatalogItem(entry.item))
+		return (
+			<HttpConnectionDetail
+				id={id}
+				navigate={navigate}
+				suspended={suspended}
+			/>
+		);
+	return <EventSourceDetail kind={kind} id={id} suspended={suspended} />;
+}
+
+/** Rotation form for one generic HTTP connection: non-secret fields prefill,
+ * secrets never echo; submit creates a new revision/generation pair and the
+ * connection stays withheld until a fresh exact-pair probe requalifies it. */
+function HttpConnectionRotate({
+	kind,
+	id,
+	navigate,
+	suspended,
+}: {
+	kind: string;
+	id: string;
+	navigate: (to: string) => void;
+	suspended: boolean;
+}) {
+	const [item, setItem] = useState<HttpConnectionInstance>();
+	const [baseUrl, setBaseUrl] = useState("");
+	const [authType, setAuthType] = useState<AuthType>("none");
+	const [authModes, setAuthModes] = useState<AuthType[]>([
+		"none",
+		"basic",
+		"bearer",
+	]);
+	const [username, setUsername] = useState("");
+	const [password, setPassword] = useState("");
+	const [bearerToken, setBearerToken] = useState("");
+	const [tlsCaPem, setTlsCaPem] = useState("");
+	const [tlsServerName, setTlsServerName] = useState("");
+	const [tlsSkipVerify, setTlsSkipVerify] = useState(false);
+	const [saving, setSaving] = useState(false);
+	const [error, setError] = useState("");
+	useEffect(() => {
+		let active = true;
+		void (async () => {
+			try {
+				const [current, catalog] = await Promise.all([
+					fetchHttpConnectionInstance(id),
+					listIntegrationPlugins(),
+				]);
+				if (!active) return;
+				setItem(current);
+				setBaseUrl(current.endpoint ?? "");
+				setAuthType(current.authType);
+				setUsername(current.username ?? "");
+				setTlsCaPem(current.tlsCaPem ?? "");
+				setTlsServerName(current.tlsServerName ?? "");
+				setTlsSkipVerify(current.tlsSkipVerify);
+				const owner = catalog.find(
+					(candidate) => candidate.connectionKind === kind,
+				);
+				const declared = allowedAuthModes(owner?.connectionAuthModes);
+				if (declared.length > 0) setAuthModes(declared);
+			} catch (reason) {
+				if (active)
+					setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			}
+		})();
+		return () => {
+			active = false;
+		};
+	}, [id, kind]);
+	useEffect(() => {
+		if (suspended) {
+			setPassword("");
+			setBearerToken("");
+		}
+	}, [suspended]);
+	async function submit(event: FormEvent) {
+		event.preventDefault();
+		if (!item || suspended) return;
+		setSaving(true);
+		setError("");
+		try {
+			const payload = httpConnectionPayload(
+				kind,
+				baseUrl,
+				authType,
+				username,
+				password,
+				bearerToken,
+				tlsCaPem,
+				tlsServerName,
+				tlsSkipVerify,
+			);
+			const rotating = rotateHttpConnectionInstance(item, payload);
+			setPassword("");
+			setBearerToken("");
+			await rotating;
+			notify.success("已保存");
+			navigate(instanceSheetRoute(kind, id));
+		} catch (reason) {
+			notify.error(reason, "暂时无法完成操作，请重试。");
+		} finally {
+			setSaving(false);
+			setPassword("");
+			setBearerToken("");
+		}
+	}
+	return (
+		<section className="flex flex-col gap-6">
+			<div>
+				<h1 className="text-2xl font-semibold tracking-tight">编辑 {id}</h1>
+				<p className="mt-1 text-sm text-muted-foreground">
+					提交将创建新配置与凭据代次；已保存的非秘密字段已预填，旧秘密不会回显。
+				</p>
+			</div>
+			<form onSubmit={submit}>
+				<Card>
+					<CardHeader>
+						<CardTitle>接入信息</CardTitle>
+						<CardDescription>
+							可修正端点或 TLS 配置后重新验证。认证方式仅限插件声明的范围；切换到
+							Basic 或 Bearer 时必须提供新秘密。
+						</CardDescription>
+					</CardHeader>
+					<CardContent>
+						<FieldGroup>
+							{error && (
+								<Alert variant="destructive">
+									<AlertDescription>{error}</AlertDescription>
+								</Alert>
+							)}
+							<Field>
+								<FieldLabel htmlFor="http-rotate-url">端点 URL</FieldLabel>
+								<Input
+									id="http-rotate-url"
+									type="url"
+									value={baseUrl}
+									onChange={(event) => setBaseUrl(event.target.value)}
+									required
+									disabled={saving || suspended}
+								/>
+							</Field>
+							<Field>
+								<FieldLabel>认证方式</FieldLabel>
+								<AuthTypeSelect
+									value={authType}
+									onChange={setAuthType}
+									disabled={saving || suspended}
+									modes={authModes}
+								/>
+							</Field>
+							{authType === "basic" && (
+								<>
+									<Field>
+										<FieldLabel htmlFor="http-rotate-username">
+											用户名
+										</FieldLabel>
+										<Input
+											id="http-rotate-username"
+											value={username}
+											onChange={(event) => setUsername(event.target.value)}
+											required
+											disabled={saving || suspended}
+										/>
+									</Field>
+									<Field>
+										<FieldLabel htmlFor="http-rotate-password">
+											密码
+										</FieldLabel>
+										<Input
+											id="http-rotate-password"
+											type="password"
+											value={password}
+											onChange={(event) => setPassword(event.target.value)}
+											required
+											disabled={saving || suspended}
+										/>
+										<FieldDescription>
+											旧密码不会回显；提交即清除新密码。
+										</FieldDescription>
+									</Field>
+								</>
+							)}
+							{authType === "bearer" && (
+								<Field>
+									<FieldLabel htmlFor="http-rotate-token">
+										Bearer Token
+									</FieldLabel>
+									<Input
+										id="http-rotate-token"
+										type="password"
+										value={bearerToken}
+										onChange={(event) => setBearerToken(event.target.value)}
+										required
+										disabled={saving || suspended}
+									/>
+									<FieldDescription>
+										旧 Token 不会回显；提交即清除新 Token。
+									</FieldDescription>
+								</Field>
+							)}
+							<Separator />
+							<Field>
+								<FieldLabel htmlFor="http-rotate-ca">
+									自定义 CA（可选）
+								</FieldLabel>
+								<Textarea
+									id="http-rotate-ca"
+									value={tlsCaPem}
+									onChange={(event) => setTlsCaPem(event.target.value)}
+									disabled={saving || suspended}
+								/>
+							</Field>
+							<Field>
+								<FieldLabel htmlFor="http-rotate-server-name">
+									TLS Server Name（可选）
+								</FieldLabel>
+								<Input
+									id="http-rotate-server-name"
+									value={tlsServerName}
+									onChange={(event) => setTlsServerName(event.target.value)}
+									disabled={saving || suspended}
+								/>
+							</Field>
+							<label className="flex items-start gap-2 text-sm">
+								<input
+									type="checkbox"
+									checked={tlsSkipVerify}
+									onChange={(event) => setTlsSkipVerify(event.target.checked)}
+									disabled={saving || suspended}
+								/>
+								<span>跳过 TLS 证书校验（仅限已知受控环境）</span>
+							</label>
+							<Button
+								type="submit"
+								disabled={
+									!item ||
+									!baseUrl.trim() ||
+									saving ||
+									suspended ||
+									(authType === "basic" &&
+										(!username.trim() || !password)) ||
+									(authType === "bearer" && !bearerToken)
+								}
+							>
+								{saving && (
+									<LoaderCircle
+										className="animate-spin"
+										data-icon="inline-start"
+										aria-hidden="true"
+									/>
+								)}
+								{saving ? "保存中…" : "保存新版本"}
+							</Button>
+						</FieldGroup>
+					</CardContent>
+				</Card>
+			</form>
+		</section>
+	);
+}
+
+/** Catalog-validated rotate route for one connection kind; unknown, disabled
+ * or specialized kinds fail closed. */
+function GenericConnectionRotateRoute({
+	kind,
+	name,
+	navigate,
+	suspended,
+}: {
+	kind: string;
+	name: string;
+	navigate: (to: string) => void;
+	suspended: boolean;
+}) {
+	const entry = useCatalogEntry(kind, "connectionKind");
+	return (
+		<CatalogGate entry={entry}>
+			{(item) =>
+				isHttpConnectionCatalogItem(item) ? (
+					<HttpConnectionRotate
+						kind={kind}
+						id={name}
+						navigate={navigate}
+						suspended={suspended}
+					/>
+				) : (
+					<IntegrationNotFound />
+				)
+			}
+		</CatalogGate>
+	);
+}
+
 /** The integration workbench has a deliberately small routing surface: two
  * specialized brand workbenches plus one catalog-driven generic route, rather
  * than a per-brand route table. */
@@ -2036,6 +3135,7 @@ export function useIntegrationsModule(
 			),
 		};
 	const [platform, id] = routeParts(props.route);
+	const third = routeParts(props.route)[2];
 	const routeQuery = parseRoute(props.route).searchParams;
 	// 实例列表与实例详情是接入管理页上同一个右侧抽屉内的两个视图（与告警一致），
 	// 由 query 标志驱动、可深链；旧 /instances 路径照常渲染目录页并打开抽屉。
@@ -2066,9 +3166,9 @@ export function useIntegrationsModule(
 						? detailRef.platform === "alertmanager"
 							? "Alertmanager 告警来源。"
 							: detailRef.platform === "prometheus" ||
-								 detailRef.platform === "thanos"
+									 detailRef.platform === "thanos"
 							? `${instancePlatformName(detailRef.platform)} 指标接入。`
-							: "事件接入来源实例。"
+							: "接入实例。"
 						: "所有已接入实例。"
 				}
 			>
@@ -2087,16 +3187,25 @@ export function useIntegrationsModule(
 								返回实例列表
 							</Button>
 							{detailRef.platform === "prometheus" ||
-							detailRef.platform === "thanos" ? (
+								detailRef.platform === "thanos" ? (
 								<MetricsDetail
 									id={decodeURIComponent(detailRef.name)}
 									navigate={props.navigate}
 									suspended={props.suspended}
 								/>
-							) : (
+							) : detailRef.platform === "alertmanager" ? (
 								<EventSourceDetail
 									kind={detailRef.platform}
 									id={decodeURIComponent(detailRef.name)}
+									suspended={props.suspended}
+								/>
+							) : (
+								// 通用平台先按连接类型目录分派：HTTP 连接实例走连接详情；
+								// 其余保持既有事件源详情，服务端读取自身失败关闭。
+								<GenericInstanceDetailRoute
+									kind={detailRef.platform}
+									id={decodeURIComponent(detailRef.name)}
+									navigate={props.navigate}
 									suspended={props.suspended}
 								/>
 							)}
@@ -2131,12 +3240,21 @@ export function useIntegrationsModule(
 				/>
 			)
 		) : platform && platform !== "instances" && !isSpecializedPlatform(platform) && !id ? (
-			// Any other first segment is a generic source kind resolved against
-			// the server catalog; unregistered or disabled kinds render the
+			// Any other first segment is a catalog plugin id resolved against
+			// the server catalog; unregistered or disabled plugins render the
 			// shared not-found view. Only the bare /integrations root (and the
 			// legacy /instances path) show the catalog.
-			<GenericEventSourceRoute
+			<GenericPluginRoute
 				kind={platform}
+				navigate={props.navigate}
+				suspended={props.suspended}
+			/>
+		) : platform && platform !== "instances" && !isSpecializedPlatform(platform) && id && !third ? (
+			// {connectionKind}/{name}: catalog-validated rotation page for one
+			// generic HTTP connection instance.
+			<GenericConnectionRotateRoute
+				kind={platform}
+				name={decodeURIComponent(id)}
 				navigate={props.navigate}
 				suspended={props.suspended}
 			/>
@@ -2195,24 +3313,44 @@ function integrationCrumbs(route: string) {
 			];
 		return [catalog, { label: `配置 ${name}` }];
 	}
-	// Generic source kinds: the display name lives in the async catalog, so
-	// the trail stays on the stable kind id (the form's heading carries the
-	// display name).
+	// Generic plugin ids stay on the stable kind (the form's heading carries
+	// the display name); {connectionKind}/{name} is the rotation page.
 	if (!id) return [catalog, { label: `配置 ${platform}` }];
+	if (!segments[2])
+		return [
+			catalog,
+			instances,
+			{
+				label: decodeURIComponent(id),
+				to: instanceSheetRoute(platform, decodeURIComponent(id)),
+			},
+			{ label: "编辑接入" },
+		];
 	return undefined;
 }
 
 type AuthType = "none" | "basic" | "bearer";
 
-/** Shared authentication-mode picker for Alertmanager metrics endpoints. */
+export const authModeLabel: Record<AuthType, string> = {
+	none: "无认证",
+	basic: "HTTP Basic",
+	bearer: "Bearer Token",
+};
+
+/** Shared authentication-mode picker; `modes` restricts the options to the
+ * plugin-declared vocabulary (#110) and defaults to the full set. */
 function AuthTypeSelect({
 	value,
 	onChange,
 	disabled,
+	modes = ["none", "basic", "bearer"],
+	ariaLabel = "认证方式",
 }: {
 	value: AuthType;
 	onChange: (value: AuthType) => void;
 	disabled?: boolean;
+	modes?: AuthType[];
+	ariaLabel?: string;
 }) {
 	return (
 		<Select
@@ -2220,13 +3358,15 @@ function AuthTypeSelect({
 			onValueChange={(next) => onChange(next as AuthType)}
 			disabled={disabled}
 		>
-			<SelectTrigger aria-label="认证方式" className="w-full">
+			<SelectTrigger aria-label={ariaLabel} className="w-full">
 				<SelectValue />
 			</SelectTrigger>
 			<SelectContent>
-				<SelectItem value="none">无认证</SelectItem>
-				<SelectItem value="basic">HTTP Basic</SelectItem>
-				<SelectItem value="bearer">Bearer Token</SelectItem>
+				{modes.map((mode) => (
+					<SelectItem key={mode} value={mode}>
+						{authModeLabel[mode]}
+					</SelectItem>
+				))}
 			</SelectContent>
 		</Select>
 	);
