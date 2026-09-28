@@ -44,13 +44,14 @@ func TestGrantFulfillmentFences(t *testing.T) {
 	service, _, attemptID, grantID, boot, epoch := grantFixture(t)
 	ctx := context.Background() // grant fulfillment is a fenced read, not a command
 
-	// Correct binding decrypts the typed secret.
+	// Correct binding decrypts the typed secret. ADR-0014: new seals carry
+	// the shared HTTP carrier, so the legacy Thanos alias stays nil.
 	payload, err := service.FulfillGrant(ctx, grantID, attemptID, boot, epoch)
 	if err != nil {
 		t.Fatalf("correct binding must fulfill: %v", err)
 	}
-	if payload.Thanos == nil || payload.Thanos.Password != "grant-secret-password" {
-		t.Fatalf("thanos secret not decrypted: %+v", payload.Thanos)
+	if payload.Metrics == nil || payload.Metrics.Password != "grant-secret-password" {
+		t.Fatalf("thanos secret not decrypted: %+v", payload.Metrics)
 	}
 	if payload.ConnectionType != connections.TypeThanos || payload.RevisionConfigJSON == nil {
 		t.Fatalf("payload projection incomplete: %+v", payload)

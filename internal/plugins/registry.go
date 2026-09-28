@@ -54,6 +54,7 @@ type Registry struct {
 	entries map[string]ToolEntry
 	owners  map[string][]string
 	sources map[string]string // event-source kind -> plugin ID
+	kinds   map[string]string // connection kind -> plugin ID
 	frozen  bool
 }
 
@@ -64,6 +65,7 @@ func NewRegistry() *Registry {
 		entries: map[string]ToolEntry{},
 		owners:  map[string][]string{},
 		sources: map[string]string{},
+		kinds:   map[string]string{},
 	}
 }
 
@@ -77,6 +79,9 @@ func (r *Registry) Register(plugin Plugin) error {
 		return fmt.Errorf("%w: plugin %s rejected", ErrRegistryFrozen, plugin.ID)
 	}
 	if err := validatePlugin(plugin); err != nil {
+		return err
+	}
+	if err := validateConnectionDeclaration(plugin); err != nil {
 		return err
 	}
 	if _, exists := r.plugins[plugin.ID]; exists {
@@ -97,6 +102,12 @@ func (r *Registry) freeze() error {
 	sort.Strings(ids)
 	for _, id := range ids {
 		plugin := r.plugins[id]
+		if plugin.ConnectionKind != "" {
+			if owner, exists := r.kinds[plugin.ConnectionKind]; exists {
+				return fmt.Errorf("connection kind %q declared by both %s and %s", plugin.ConnectionKind, owner, id)
+			}
+			r.kinds[plugin.ConnectionKind] = id
+		}
 		if plugin.EventSource != nil {
 			kind := plugin.EventSource.Kind()
 			if owner, exists := r.sources[kind]; exists {
@@ -263,6 +274,22 @@ func (r *Registry) AlertIdentity(kind string) (string, bool) {
 	}
 	r.mu.Unlock()
 	return mode, ok && mode != ""
+}
+
+// defaultEnabledIDs returns the DefaultEnabled plugin IDs of the frozen
+// assembly (the silent-deployment default of ResolveEnabled).
+func (r *Registry) defaultEnabledIDs() []string {
+	r.mu.Lock()
+	r.ensureFrozen()
+	ids := make([]string, 0, len(r.plugins))
+	for id, plugin := range r.plugins {
+		if plugin.DefaultEnabled {
+			ids = append(ids, id)
+		}
+	}
+	r.mu.Unlock()
+	sort.Strings(ids)
+	return ids
 }
 
 // validatePlugin checks one registration in isolation.

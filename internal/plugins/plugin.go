@@ -52,8 +52,20 @@ type Plugin struct {
 	Description string
 	// ConnectionKind names the external platform kind every instance binds
 	// to (e.g. "prometheus"). Empty means the plugin needs no platform
-	// connection.
+	// connection. A declared kind must pair with the transport and auth-mode
+	// declaration below (ADR-0014): it joins the trusted HTTP connection-kind
+	// class the Quoin connections domain and the Stele gateway resolve
+	// through this registry instead of host-side type switches.
 	ConnectionKind string
+	// ConnectionTransport declares the connection transport. Only
+	// ConnectionTransportHTTP exists; any other value fails registration.
+	// Required (exactly "http") whenever ConnectionKind is set.
+	ConnectionTransport string
+	// ConnectionAuthModes is the bounded auth-mode subset (none/basic/
+	// bearer) instances of this connection kind accept. Required and
+	// non-empty whenever ConnectionKind is set; credential material never
+	// appears here.
+	ConnectionAuthModes []string
 	// DefaultEnabled is the enablement default when deployment config is
 	// silent; plugins backing the default mainline set true.
 	DefaultEnabled bool

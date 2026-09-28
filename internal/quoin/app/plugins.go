@@ -35,6 +35,10 @@ func (application *apiServer) configurePlugins(configured []string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
+	// The resolved enablement is also the connection-kind trust boundary:
+	// a plugin outside it has its connection kinds revoked everywhere
+	// (create and gateway material acquire fail closed).
+	application.connectionKinds.SetEnabled(enabled)
 	catalogs, err := attempt.BuildCatalogs(application.pluginRegistry, enabled)
 	if err != nil {
 		return nil, err

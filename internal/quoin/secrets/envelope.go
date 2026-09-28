@@ -24,16 +24,22 @@ type Envelope struct {
 
 // TypedSecret is the decrypted connection secret in supervisor memory only.
 type TypedSecret struct {
-	Type string `json:"type"` // prometheus | thanos | model_provider
-	// Exactly one carrier is set per type; raw values never persist.
+	Type string `json:"type"` // the connection kind identity (connections.type)
+	// Exactly one carrier is set per type; raw values never persist. Every
+	// trusted HTTP connection kind (ADR-0014) seals the shared HTTP carrier;
+	// Prometheus/Thanos remain legacy read-only carriers so envelopes sealed
+	// before the shared carrier still decrypt. The AAD already binds the
+	// connection kind, so the carrier shape never crosses kinds.
+	HTTP          *MetricsSecret       `json:"http,omitempty"`
 	Prometheus    *MetricsSecret       `json:"prometheus,omitempty"`
 	Thanos        *MetricsSecret       `json:"thanos,omitempty"`
 	ModelProvider *ModelProviderSecret `json:"model_provider,omitempty"`
 }
 
-// MetricsSecret is shared only as an encrypted carrier. The connection type
-// retains the Prometheus/Thanos distinction; the auth scheme is derived from
-// the non-secret revision and selects exactly one secret representation.
+// MetricsSecret is the bounded HTTP credential carrier (username/password/
+// bearerToken) shared by every trusted HTTP connection kind. The connection
+// kind retains its own identity; the auth scheme is derived from the
+// non-secret revision and selects exactly one secret representation.
 type MetricsSecret struct {
 	Username    string `json:"username,omitempty"`
 	Password    string `json:"password,omitempty"`

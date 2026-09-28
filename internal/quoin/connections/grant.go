@@ -178,20 +178,21 @@ func (service *Service) fulfillGrantOn(ctx context.Context, tx *execution.Tx, gr
 	if err != nil {
 		return GrantPayload{}, err
 	}
-	switch {
-	case secret.Prometheus != nil:
-		payload.Metrics = &MetricsCredentialSecret{Username: secret.Prometheus.Username, Password: secret.Prometheus.Password, BearerToken: secret.Prometheus.BearerToken}
-	case secret.Thanos != nil:
-		payload.Metrics = &MetricsCredentialSecret{Username: secret.Thanos.Username, Password: secret.Thanos.Password, BearerToken: secret.Thanos.BearerToken}
-		payload.Thanos = payload.Metrics
-	case secret.ModelProvider != nil:
+	if carrier := httpCredentialCarrier(secret); carrier != nil {
+		payload.Metrics = carrier
+		// The Thanos alias only mirrors the legacy per-kind Thanos carrier;
+		// new seals use the shared HTTP carrier with no alias.
+		if secret.Thanos != nil {
+			payload.Thanos = payload.Metrics
+		}
+	} else if secret.ModelProvider != nil {
 		payload.ModelProvider = &ModelProviderCredentialSecret{APIKey: secret.ModelProvider.APIKey}
-	case connectionType == TypePrometheus || connectionType == TypeThanos:
-		// Metrics endpoints may run without auth. The explicit empty carrier
+	} else if _, isHTTP := service.httpKind(connectionType); isHTTP {
+		// HTTP endpoints may run without auth. The explicit empty carrier
 		// is still a valid grant so every connection retains an independent
 		// credential generation and dispatch snapshot.
 		payload.Metrics = &MetricsCredentialSecret{}
-	default:
+	} else {
 		return GrantPayload{}, fmt.Errorf("sealed secret carries no typed variant for %q", connectionType)
 	}
 	return payload, nil

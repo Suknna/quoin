@@ -724,7 +724,7 @@ CREATE TABLE source_materials (
 CREATE TABLE connections (
   id                                INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   name                              TEXT NOT NULL UNIQUE,  -- 稳定用户 key，退役不复用
-  type                              TEXT NOT NULL CHECK (type IN ('prometheus','thanos','model_provider')),
+  type                              TEXT NOT NULL,  -- 连接种类身份：受信 HTTP 连接种类（冻结插件注册表声明，ADR-0014）或核心自治的 model_provider；词表归注册表，不进 schema 枚举，写入侧由 connections 域 fail-closed 把关
   enabled                           INTEGER NOT NULL CHECK (enabled IN (0,1)),
   row_version                       INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- enable/disable/rotate 命令并发前提（DATA-CONN-005）
   revalidation_required             INTEGER NOT NULL DEFAULT 0 CHECK (revalidation_required IN (0,1)),
@@ -763,7 +763,7 @@ CREATE TABLE connection_probe_results (
   id                            INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   attempt_id                    INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_id                 INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  connection_type               TEXT NOT NULL CHECK (connection_type IN ('model_provider','prometheus','thanos')),
+  connection_type               TEXT NOT NULL,  -- 探测时连接的种类身份镜像（来源 connections.type，词表归注册表）；只有具备冻结 action set 的类型可走到收口，写入侧 fail-closed
   connection_revision_id        INTEGER NOT NULL REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   credential_generation_id      INTEGER NOT NULL REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   root_binding_revision         INTEGER NOT NULL CHECK (root_binding_revision >= 1),
