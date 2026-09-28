@@ -311,7 +311,7 @@ func (dispatcher *Dispatcher) deliver(ctx context.Context, delivery dueDelivery)
 	}
 	handlerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dispatcher.handlerTimeout)
 	defer cancel()
-	err := handler.HandlePostCommitFact(handlerCtx, delivery.fact)
+	err := invokeSubscriber(handler, handlerCtx, delivery.fact)
 	if err == nil {
 		dispatcher.transition(ctx, delivery, stateDelivered, "")
 		return
@@ -321,6 +321,18 @@ func (dispatcher *Dispatcher) deliver(ctx context.Context, delivery dueDelivery)
 		return
 	}
 	dispatcher.transition(ctx, delivery, statePending, err.Error())
+}
+
+// A compiled plugin is trusted code, not a sandbox, but a bug in an optional
+// subscriber must not crash Quoin or retroactively change the committed fact.
+// Never persist the panic value: it may contain sensitive implementation data.
+func invokeSubscriber(handler plugins.PostCommitHandler, ctx context.Context, fact plugins.PostCommitFact) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("subscriber_panic")
+		}
+	}()
+	return handler.HandlePostCommitFact(ctx, fact)
 }
 
 // transition persists one delivery-state change as a short audited runner

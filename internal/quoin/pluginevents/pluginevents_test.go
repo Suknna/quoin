@@ -33,6 +33,26 @@ type recordingSubscriber struct {
 	failWith    error
 }
 
+type panickingSubscriber struct{}
+
+func (panickingSubscriber) HandlePostCommitFact(context.Context, plugins.PostCommitFact) error {
+	panic("must not escape optional subscriber")
+}
+
+func TestSubscriberPanicBecomesRetryableDeliveryFailure(t *testing.T) {
+	fixture := newFixture(t, []string{"watcher"}, []string{"watcher"})
+	fixture.dispatcher.handlers["watcher"] = panickingSubscriber{}
+	fixture.dispatcher.maxAttempts = 1
+	eventID := fixture.emit(t, sampleFact())
+	drainUntil(t, fixture.dispatcher, func() bool {
+		state, _, _ := deliveryState(t, fixture.db, eventID)
+		return state == stateDeadletter
+	})
+	if state, attempts, _ := deliveryState(t, fixture.db, eventID); state != stateDeadletter || attempts != 1 {
+		t.Fatalf("panic did not become a bounded delivery failure: %s/%d", state, attempts)
+	}
+}
+
 func TestPublisherRejectsMissingAuthorityTransaction(t *testing.T) {
 	publisher := NewPublisher(plugins.NewRegistry(), nil)
 	if _, err := publisher.Emit(context.Background(), nil, Fact{Type: plugins.FactAlertObservationCommitted}); err == nil {
