@@ -324,6 +324,13 @@ func TestDailySealAggregatesWindowFactsWithoutFabricatingHealth(t *testing.T) {
 	if _, err := h.service.CancelRun(commandContext(t), h.principal, "cancel-window-run", cancelledRun.RunID, cancelledRun.RowVersion); err != nil {
 		t.Fatal(err)
 	}
+	// CancelRun 的子 Attempt 终结时间写的是 attempt 服务的真实时钟；本测试
+	// 的封存边界是虚构日期，把子 Attempt 的 ended_at 归一到固定时钟——取消
+	// 发生在采证截止之前，日报必须按当时的终态事实命名 run_cancelled。
+	if _, err := h.db.Exec(`UPDATE execution_attempts SET ended_at=?, row_version=row_version+1 WHERE scope_type='run_check' AND scope_id=? AND state='Cancelled'`,
+		day.Format(time.RFC3339Nano), cancelledRun.RunID); err != nil {
+		t.Fatal(err)
+	}
 	h.seedDailyConfig(t, dailyTestConfigInput("core-daily", "plan-ok", "plan-gap", "plan-pending", "plan-cancelled", "plan-disabled"))
 
 	boundary := time.Date(2026, time.September, 28, 6, 0, 0, 0, time.UTC)
@@ -603,6 +610,145 @@ func TestDailyReportRerunAppendsVersionAndKeepsOldReadable(t *testing.T) {
 	}
 	if collected != 2 {
 		t.Fatalf("version rows = %d, want exactly 2", collected)
+	}
+}
+
+// TestDelayedRunTerminalAfterCutoffSealsCutoffTruth pins the cutoff-time
+// semantics of run terminal states: a run still pending at the frozen cutoff
+// must be reported as cutoff_exceeded with its missing checks enumerated,
+// even when it was cancelled/failed only AFTER the cutoff (delayed seal or
+// rerun replay). The strict policy stays intact: no late result ever enters
+// any report version, and the replay derives identical content from the
+// immutable facts.
+func TestDelayedRunTerminalAfterCutoffSealsCutoffTruth(t *testing.T) {
+	h := newTestHarness(t)
+	for _, planKey := range []string{"plan-delayed-cancel", "plan-delayed-fail"} {
+		h.seedPlan(t, planKey)
+	}
+	day := time.Date(2026, time.September, 27, 10, 0, 0, 0, time.UTC)
+	h.pinDailyNow(t, day)
+	runs := map[string]RunDetail{}
+	for _, planKey := range []string{"plan-delayed-cancel", "plan-delayed-fail"} {
+		detail, err := h.service.CreatePlanRun(commandContext(t), h.principal, "delayed-run-"+planKey, planKey)
+		if err != nil {
+			t.Fatalf("create delayed run for %s: %v", planKey, err)
+		}
+		runs[planKey] = detail
+	}
+	h.seedDailyConfig(t, dailyTestConfigInput("delayed-seal", "plan-delayed-cancel", "plan-delayed-fail"))
+
+	boundary := time.Date(2026, time.September, 28, 6, 0, 0, 0, time.UTC)
+	cutoff := boundary.Add(2 * time.Hour)
+	if err := h.service.CreateScheduledDailyReport(context.Background(), DailyReportConfig{ConfigKey: "delayed-seal", Timezone: "UTC"}, boundary); err != nil {
+		t.Fatal(err)
+	}
+	// 截止封存 v1：两个 Run 仍 Running → cutoff_exceeded + 逐检查缺口枚举。
+	h.pinDailyNow(t, cutoff)
+	if err := h.service.SealDueDailyReports(context.Background(), cutoff); err != nil {
+		t.Fatal(err)
+	}
+	first, err := h.service.GetDailyReport(context.Background(), "delayed-seal", "2026-09-27")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Latest == nil || first.LatestVersion != 1 {
+		t.Fatalf("v1 summary = %+v", first.DailyReportSummary)
+	}
+	v1Raw, err := h.service.GetDailyReportVersion(context.Background(), "delayed-seal", "2026-09-27", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCutoffExceeded := func(content *dailyReportContent, stage string) {
+		t.Helper()
+		sources := map[string]dailySourceReport{}
+		for _, source := range content.Sources {
+			sources[source.PlanKey] = source
+		}
+		for _, planKey := range []string{"plan-delayed-cancel", "plan-delayed-fail"} {
+			source, ok := sources[planKey]
+			if !ok {
+				t.Fatalf("%s: source %s missing", stage, planKey)
+			}
+			if source.Status != "gap" || len(source.GapReasons) != 1 || source.GapReasons[0] != dailyGapCutoffExceeded {
+				t.Fatalf("%s: %s = %+v, want exactly the cutoff_exceeded gap, never a post-cutoff terminal state", stage, planKey, source)
+			}
+			if len(source.Checks) != 1 || source.Checks[0].GapReason == nil || *source.Checks[0].GapReason != dailyGapCutoffExceeded {
+				t.Fatalf("%s: %s checks = %+v, want the missing check enumerated as a cutoff gap", stage, planKey, source.Checks)
+			}
+		}
+		if content.Totals.ChecksOK != 0 || content.Totals.ChecksGap != 2 || content.Totals.SourcesGap != 2 {
+			t.Fatalf("%s: totals = %+v, want two gap checks across two gap sources", stage, content.Totals)
+		}
+	}
+	assertCutoffExceeded(first.Latest, "v1")
+
+	// 截止之后、封存重放之前：一个 Run 被取消，另一个失败——子 Attempt
+	// 都在截止之后才终结。这两次终态转换绝不许追认进已冻结的截止事实。
+	afterCutoff := "2026-09-28T09:00:00Z"
+	if _, err := h.service.CancelRun(commandContext(t), h.principal, "delayed-cancel-cmd", runs["plan-delayed-cancel"].RunID, runs["plan-delayed-cancel"].RowVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.db.Exec(`UPDATE execution_attempts SET ended_at=?, row_version=row_version+1
+		WHERE scope_type='run_check' AND scope_id=? AND state='Cancelled'`, afterCutoff, runs["plan-delayed-cancel"].RunID); err != nil {
+		t.Fatal(err)
+	}
+	// 失败路径沿合法状态机走（触发器强制逐态递进）：派发后租约丢失，
+	// 子 Attempt 在截止之后才终结。
+	for _, stage := range []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE execution_attempts SET state='Assigned', runtime_slot='plinth', boot_id='boot', connection_epoch=1, lease_until=?, runtime_release_version='tool-test', row_version=row_version+1
+			WHERE scope_type='run_check' AND scope_id=? AND state='Queued'`, []any{afterCutoff, runs["plan-delayed-fail"].RunID}},
+		{`UPDATE execution_attempts SET state='Running', accepted_at=?, row_version=row_version+1
+			WHERE scope_type='run_check' AND scope_id=? AND state='Assigned'`, []any{afterCutoff, runs["plan-delayed-fail"].RunID}},
+		{`UPDATE execution_attempts SET state='Interrupted', ended_at=?, termination_reason='lease_expired', row_version=row_version+1
+			WHERE scope_type='run_check' AND scope_id=? AND state='Running'`, []any{afterCutoff, runs["plan-delayed-fail"].RunID}},
+	} {
+		if _, err := h.db.Exec(stage.query, stage.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.db.Exec(`UPDATE inspection_runs SET state='Failed', row_version=row_version+1 WHERE id=?`, runs["plan-delayed-fail"].RunID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 人工重分析 v2：同一冻结截止重放，截止时未收敛的事实不变——绝不改写
+	// 为 run_cancelled / run_failed，缺失检查继续枚举。
+	ctx := commandContext(t)
+	h.pinDailyNow(t, cutoff.Add(2*time.Hour))
+	summary, err := h.service.RerunDailyReport(ctx, h.principal, "delayed-rerun-1", "delayed-seal", "2026-09-27")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.LatestVersion != 2 {
+		t.Fatalf("rerun summary = %+v, want version 2", summary)
+	}
+	second, err := h.service.GetDailyReport(context.Background(), "delayed-seal", "2026-09-27")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCutoffExceeded(second.Latest, "v2")
+	// 重放确定性：同一截止 + 同一不可变事实 → 检查内容逐字节一致（除封存时刻）。
+	for index := range first.Latest.Sources {
+		v1Checks, err := json.Marshal(first.Latest.Sources[index].Checks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v2Checks, err := json.Marshal(second.Latest.Sources[index].Checks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(v1Checks) != string(v2Checks) {
+			t.Fatalf("replayed check content drifted for %s", first.Latest.Sources[index].PlanKey)
+		}
+	}
+	v1After, err := h.service.GetDailyReportVersion(context.Background(), "delayed-seal", "2026-09-27", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v1After != v1Raw {
+		t.Fatal("v1 content changed after the rerun")
 	}
 }
 
