@@ -8,7 +8,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +24,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/execution"
+	"github.com/Suknna/quoin/internal/stele"
 	_ "github.com/Suknna/quoin/plugins/alertmanager"
 	"github.com/Suknna/quoin/test/support"
 	"google.golang.org/grpc"
@@ -134,6 +138,18 @@ func (syntheticAlertNormalizer) NormalizeAlert([]byte) ([]plugins.NormalizedAler
 	return []plugins.NormalizedAlert{{Severity: plugins.SeverityHigh, Title: "Synthetic source", Resource: "test-host"}}, nil
 }
 
+type syntheticCredentialLookup struct {
+	sourceID, credentialID int64
+}
+
+func (syntheticCredentialLookup) Ready() bool { return true }
+func (lookup syntheticCredentialLookup) Credential(bearer, kind string) (int64, int64, uint64, bool) {
+	if bearer != "synthetic-source-secret" || kind != "synthetic" {
+		return 0, 0, 0, false
+	}
+	return lookup.sourceID, lookup.credentialID, 1, true
+}
+
 func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	ctx := context.Background()
 	harness := newRelayHarness(t)
@@ -176,10 +192,31 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	}
 	accepted := runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_ACCEPTED
 	rejected := runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED
-	if got := send("synthetic-1", "synthetic", "alerts.batch", body); got != accepted {
-		t.Fatalf("synthetic batch: %s", got)
+	queue, err := stele.OpenQueue(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := send("synthetic-1", "synthetic", "alerts.batch", body); got != accepted {
+	t.Cleanup(func() { _ = queue.Close() })
+	webhook := stele.NewWebhook(queue, syntheticCredentialLookup{source.SourceID, source.CredentialID}, registry, stele.NewMetrics())
+	req := httptest.NewRequest(http.MethodPost, "/webhook/synthetic", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer synthetic-source-secret")
+	writer := httptest.NewRecorder()
+	webhook.Handler().ServeHTTP(writer, req)
+	if writer.Code != http.StatusAccepted {
+		t.Fatalf("synthetic webhook status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	queued, err := queue.FetchDueBatch(ctx, 10, time.Now().UTC())
+	if err != nil || len(queued) != 1 {
+		t.Fatalf("Stele outbox entries=%d err=%v", len(queued), err)
+	}
+	response, err := client.DeliverEvents(ctx, &runtimev1.DeliverEventsRequest{
+		ContractFingerprint: contract.ProtoAuthorityFingerprint,
+		Events:              []*runtimev1.RelayEvent{queued[0].RelayEvent()},
+	})
+	if err != nil || len(response.GetResults()) != 1 || response.GetResults()[0] != accepted {
+		t.Fatalf("queued relay status=%v err=%v", response.GetResults(), err)
+	}
+	if got := send(queued[0].ID, "synthetic", "alerts.batch", body); got != accepted {
 		t.Fatalf("replayed event: %s", got)
 	}
 	secondIdentity := []byte(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-2","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
