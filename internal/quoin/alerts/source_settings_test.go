@@ -281,6 +281,18 @@ func TestSetSourceSettingsFencesAndAdvancesSnapshot(t *testing.T) {
 	if snapshotVersion < 2 || len(sources) != 1 || string(sources[0].Settings) != `{"filter":["noise"],"site":"us"}` {
 		t.Fatalf("snapshot did not invalidate on settings change: version=%d sources=%+v", snapshotVersion, sources)
 	}
+	noOp, replayed, err := service.SetSourceSettings(ctx, "settings-noop-0004", "settings-src", []byte(`{ "site": "us", "filter": ["noise"] }`), updated.RowVersion)
+	if err != nil || replayed || noOp.RowVersion != updated.RowVersion {
+		t.Fatalf("semantic no-op changed the source: %+v replayed=%v err=%v", noOp, replayed, err)
+	}
+	noOpVersion, _, err := service.CredentialSnapshot(ctx)
+	if err != nil || noOpVersion != snapshotVersion {
+		t.Fatalf("semantic no-op changed Stele snapshot: %d -> %d err=%v", snapshotVersion, noOpVersion, err)
+	}
+	var historyRows int
+	if err := database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_source_settings_history WHERE source_id=?`, created.SourceID).Scan(&historyRows); err != nil || historyRows != 2 {
+		t.Fatalf("semantic no-op appended a new settings revision: rows=%d err=%v", historyRows, err)
+	}
 }
 
 func TestTwoInstancesSameKindKeepIndependentSettings(t *testing.T) {

@@ -308,9 +308,9 @@ func (service *Service) SetSourceSettings(ctx context.Context, clientCommandID, 
 	command.Digest = auth.DigestCommand(opSetSourceSettings, map[string]any{"sourceKey": sourceKey, "settings": string(settings), "expectedRowVersion": expectedRowVersion})
 	outcome, err := execution.Run(ctx, service.runner, service.ops.settings, command,
 		func(tx *execution.Tx) (SourceDetail, execution.Change, error) {
-			var sourceID int64
-			var protocol string
-			if err := tx.QueryRowContext(ctx, `SELECT id, protocol FROM alert_sources WHERE source_key=?`, sourceKey).Scan(&sourceID, &protocol); err != nil {
+			var sourceID, currentRowVersion int64
+			var protocol, currentSettings string
+			if err := tx.QueryRowContext(ctx, `SELECT id, protocol, settings_json, row_version FROM alert_sources WHERE source_key=?`, sourceKey).Scan(&sourceID, &protocol, &currentSettings, &currentRowVersion); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return SourceDetail{}, execution.Unchanged, &execution.Rejection{Code: CodeNotFound, Detail: "告警源不存在"}
 				}
@@ -319,6 +319,13 @@ func (service *Service) SetSourceSettings(ctx context.Context, clientCommandID, 
 			settingsJSON, err := canonicalSourceSettings(service.sources, protocol, settings)
 			if err != nil {
 				return SourceDetail{}, execution.Unchanged, err
+			}
+			if currentRowVersion != expectedRowVersion {
+				return SourceDetail{}, execution.Unchanged, &execution.Rejection{Code: CodeRowVersionConflict, Detail: "告警源已变化", ObjectID: sourceID}
+			}
+			if currentSettings == string(settingsJSON) {
+				detail, err := sourceDetailOn(ctx, tx, sourceKey)
+				return detail, execution.Unchanged, err
 			}
 			var settingsVersion int64
 			if err := nextSourceSettingsVersion(ctx, tx, &settingsVersion); err != nil {
