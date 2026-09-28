@@ -806,6 +806,21 @@ CREATE TABLE thanos_connection_probe_results (
   detail_json     TEXT NOT NULL CHECK (json_valid(detail_json))
 ) STRICT;
 
+-- Registry-backed HTTP 连接种类（ADR-0014）共享同一封闭的只读探测 typed
+-- child：一次冻结声明的 GET 请求与期望 2xx 状态。请求形状（method/path/
+-- expected）是插件编译声明的冻结副本，Quoin 写入侧按注册表复核逐字段一致；
+-- observed_status = 0 表示请求从未产生 HTTP 响应（网关不可达等），由
+-- outcome=false 表达探测失败。核心三种类型（model_provider/prometheus/
+-- thanos）不落本表，各自保持专属 typed child。
+CREATE TABLE http_connection_probe_results (
+  probe_result_id INTEGER PRIMARY KEY REFERENCES connection_probe_results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  request_method  TEXT NOT NULL CHECK (request_method = 'GET'),
+  request_path    TEXT NOT NULL CHECK (length(request_path) BETWEEN 1 AND 2048 AND substr(request_path, 1, 1) = '/' AND request_path NOT GLOB '*[^!-~]*'),
+  expected_status INTEGER NOT NULL CHECK (expected_status = 200),
+  observed_status INTEGER NOT NULL CHECK (observed_status >= 0),
+  detail_json     TEXT NOT NULL CHECK (json_valid(detail_json))
+) STRICT;
+
 -- Model Provider 每次 disabled->enabled 都追加一个显式 qualification 事件；connections 不保存
 -- "current/latest qualification" 指针。后续 grant 只可复制与当前 enabled row_version 对应的 immutable probe_result_id。
 CREATE TABLE connection_enable_qualifications (
@@ -1278,7 +1293,11 @@ CREATE TABLE attempt_input_items (
 CREATE TABLE attempt_connection_grants (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   attempt_id                INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  purpose                   TEXT NOT NULL CHECK (purpose IN ('chat_model','embedding','thanos_query','config_thanos_query','model_probe_chat','model_probe_embedding','prometheus_probe','thanos_probe')),
+  purpose                   TEXT NOT NULL CHECK (purpose IN ('chat_model','embedding','thanos_query','config_thanos_query','model_probe_chat','model_probe_embedding','prometheus_probe','thanos_probe')
+                                               OR (purpose GLOB '*_probe' AND purpose NOT IN ('model_probe_chat','model_probe_embedding'))
+                                               -- 注册制 HTTP 连接种类（ADR-0014）按 <kind>_probe 生成探测 purpose；
+                                               -- 词表在 CHECK 放开，授权闭包仍由 grant/probe/enable 触发器按连接自身 type 精确复核。
+                                              ),
   connection_id             INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_revision_id    INTEGER NOT NULL REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   credential_generation_id  INTEGER NOT NULL REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -1289,7 +1308,8 @@ CREATE TABLE attempt_connection_grants (
       (purpose = 'thanos_query' AND created_by_tool_call_id IS NOT NULL AND qualified_probe_result_id IS NULL)
       OR (purpose = 'config_thanos_query' AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL)
       OR (purpose IN ('chat_model','embedding') AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NOT NULL)
-      OR (purpose IN ('model_probe_chat','model_probe_embedding','prometheus_probe','thanos_probe') AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL))
+      OR (purpose IN ('model_probe_chat','model_probe_embedding','prometheus_probe','thanos_probe') AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL)
+      OR (purpose GLOB '*_probe' AND purpose NOT IN ('model_probe_chat','model_probe_embedding') AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL))
 ) STRICT;
 CREATE UNIQUE INDEX ux_attempt_connection_grant_binding ON attempt_connection_grants
   (attempt_id, purpose, connection_id, connection_revision_id, credential_generation_id);
@@ -3204,6 +3224,8 @@ WHEN OLD.state = 'Queued' AND NEW.state = 'Assigned' AND (
             AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = 'prometheus_probe'))
           OR (c.type = 'thanos'
             AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = 'thanos_probe'))
+          OR (c.type NOT IN ('model_provider','prometheus','thanos')
+            AND EXISTS (SELECT 1 FROM attempt_connection_grants g WHERE g.attempt_id = NEW.id AND g.connection_id = c.id AND g.purpose = c.type || '_probe'))
         )
       )))
 )
@@ -3261,6 +3283,7 @@ WHEN NOT EXISTS (
           WHEN 'model_provider' THEN 'model_probe_chat'
           WHEN 'prometheus' THEN 'prometheus_probe'
           WHEN 'thanos' THEN 'thanos_probe'
+          ELSE c.type || '_probe'
         END)
 )
 BEGIN SELECT RAISE(ABORT, 'connection probe result must close over its Running supervisor probe Attempt and exact connection binding'); END;
@@ -3282,7 +3305,9 @@ WHEN OLD.attempt_type = 'connection_probe' AND NEW.state IN ('Succeeded','Failed
       AND ((p.connection_type = 'model_provider' AND EXISTS (
               SELECT 1 FROM model_provider_connection_probe_results x WHERE x.probe_result_id = p.id))
         OR (p.connection_type IN ('prometheus','thanos') AND EXISTS (
-              SELECT 1 FROM thanos_connection_probe_results x WHERE x.probe_result_id = p.id)))
+              SELECT 1 FROM thanos_connection_probe_results x WHERE x.probe_result_id = p.id))
+        OR (p.connection_type NOT IN ('model_provider','prometheus','thanos') AND EXISTS (
+              SELECT 1 FROM http_connection_probe_results x WHERE x.probe_result_id = p.id)))
   )
 BEGIN SELECT RAISE(ABORT, 'connection probe Attempt terminal state requires one matching immutable typed result'); END;
 CREATE TRIGGER trg_model_provider_connection_probe_results_closure BEFORE INSERT ON model_provider_connection_probe_results
@@ -3304,6 +3329,9 @@ BEGIN SELECT RAISE(ABORT, 'model-provider probe child must match its header, pro
 CREATE TRIGGER trg_thanos_connection_probe_results_closure BEFORE INSERT ON thanos_connection_probe_results
 WHEN NOT EXISTS (SELECT 1 FROM connection_probe_results p WHERE p.id = NEW.probe_result_id AND p.connection_type IN ('prometheus','thanos'))
 BEGIN SELECT RAISE(ABORT, 'metrics probe child must match a Prometheus-compatible probe header'); END;
+CREATE TRIGGER trg_http_connection_probe_results_closure BEFORE INSERT ON http_connection_probe_results
+WHEN NOT EXISTS (SELECT 1 FROM connection_probe_results p WHERE p.id = NEW.probe_result_id AND p.connection_type NOT IN ('model_provider','prometheus','thanos'))
+BEGIN SELECT RAISE(ABORT, 'http probe child must match a registry-declared HTTP probe header'); END;
 CREATE TRIGGER trg_connections_model_provider_insert_disabled BEFORE INSERT ON connections
 WHEN NEW.type = 'model_provider' AND NEW.enabled = 1
 BEGIN SELECT RAISE(ABORT, 'model_provider must be created disabled until its revision and credential pass the real capability probe'); END;
@@ -3320,7 +3348,9 @@ WHEN NOT EXISTS (
   JOIN connection_probe_results p ON p.id = NEW.probe_result_id AND p.connection_id = c.id
   JOIN credential_generations g ON g.id = p.credential_generation_id
   JOIN root_key_state k ON k.id = 1 AND k.binding_revision = g.key_binding_revision
-  WHERE c.id = NEW.connection_id AND c.type IN ('model_provider','prometheus','thanos') AND c.enabled = 0
+  WHERE c.id = NEW.connection_id AND c.enabled = 0
+    -- 核心三种类型的资格闭包保持专属 child 形状；注册制 HTTP 连接种类
+    -- （ADR-0014）走共享 http child 且要求观测状态与冻结期望一致。
     AND NEW.enabled_row_version = c.row_version + 1
     AND p.connection_revision_id = c.current_revision_id
     AND p.credential_generation_id = c.current_credential_generation_id
@@ -3337,6 +3367,9 @@ WHEN NOT EXISTS (
       OR (c.type IN ('prometheus','thanos') AND EXISTS (
         SELECT 1 FROM thanos_connection_probe_results metrics
         WHERE metrics.probe_result_id = p.id))
+      OR (c.type NOT IN ('model_provider','prometheus','thanos') AND EXISTS (
+        SELECT 1 FROM http_connection_probe_results h
+        WHERE h.probe_result_id = p.id AND h.observed_status = h.expected_status))
     ))
 BEGIN SELECT RAISE(ABORT, 'enable qualification must select a passed probe for the exact current model-provider binding'); END;
 CREATE TRIGGER trg_connections_enable_requires_probe BEFORE UPDATE OF enabled, current_revision_id, current_credential_generation_id ON connections
@@ -3360,7 +3393,8 @@ WHEN NOT EXISTS (
         AND NEW.qualified_probe_result_id IS NULL
         AND ((c.type = 'model_provider' AND NEW.purpose IN ('model_probe_chat','model_probe_embedding'))
           OR (c.type = 'prometheus' AND NEW.purpose = 'prometheus_probe')
-          OR (c.type = 'thanos' AND NEW.purpose = 'thanos_probe')))
+          OR (c.type = 'thanos' AND NEW.purpose = 'thanos_probe')
+          OR (c.type NOT IN ('model_provider','prometheus','thanos') AND NEW.purpose = c.type || '_probe')))
       OR (c.enabled = 1 AND c.revalidation_required = 0 AND (
         (NEW.purpose IN ('chat_model','embedding') AND c.type = 'model_provider'
           AND EXISTS (
@@ -3535,8 +3569,11 @@ WHEN NEW.state = 'Succeeded' AND OLD.state <> 'Succeeded' AND (
   OR (NEW.attempt_type = 'connection_probe' AND NOT EXISTS (
     SELECT 1 FROM connection_probe_results p
       WHERE p.attempt_id = NEW.id AND p.connection_id = NEW.scope_id
-        AND ((p.connection_type = 'model_provider' AND EXISTS (SELECT 1 FROM model_provider_connection_probe_results m WHERE m.probe_result_id = p.id))
-          OR (p.connection_type IN ('prometheus','thanos') AND EXISTS (SELECT 1 FROM thanos_connection_probe_results t WHERE t.probe_result_id = p.id)))))
+        AND (
+          (p.connection_type = 'model_provider' AND EXISTS (SELECT 1 FROM model_provider_connection_probe_results m WHERE m.probe_result_id = p.id))
+          OR (p.connection_type IN ('prometheus','thanos') AND EXISTS (SELECT 1 FROM thanos_connection_probe_results t WHERE t.probe_result_id = p.id))
+          OR (p.connection_type NOT IN ('model_provider','prometheus','thanos') AND EXISTS (SELECT 1 FROM http_connection_probe_results h WHERE h.probe_result_id = p.id))
+        )))
   OR (NEW.attempt_type IN ('initial_analysis','investigation','inspection_analysis','knowledge_extraction') AND (
       NOT EXISTS (SELECT 1 FROM model_calls m WHERE m.attempt_id = NEW.id AND m.status = 'succeeded')
       OR EXISTS (
@@ -3734,3 +3771,7 @@ WHEN NOT EXISTS (
   WHERE r.id=NEW.report_id
 )
 BEGIN SELECT RAISE(ABORT, 'inspection Report Knowledge reference must exactly match its immutable ResultProposal ledger'); END;
+CREATE TRIGGER trg_http_connection_probe_results_no_update BEFORE UPDATE ON http_connection_probe_results
+BEGIN SELECT RAISE(ABORT, 'http_connection_probe_results is append-only'); END;
+CREATE TRIGGER trg_http_connection_probe_results_no_delete BEFORE DELETE ON http_connection_probe_results
+BEGIN SELECT RAISE(ABORT, 'http_connection_probe_results is append-only'); END;

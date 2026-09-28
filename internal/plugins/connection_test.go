@@ -61,6 +61,10 @@ func TestHTTPConnectionKindDeclarationValidation(t *testing.T) {
 		{"duplicate mode", httpKindPlugin("p", "k", plugins.AuthModeBasic, plugins.AuthModeBasic), "twice"},
 		{"bad kind name", httpKindPlugin("p", "Prometheus"), "is not [a-z][a-z0-9-]*"},
 		{"orphan transport", plugins.Plugin{ID: "p", Version: "1", ConnectionTransport: plugins.ConnectionTransportHTTP, ConnectionAuthModes: []string{plugins.AuthModeBasic}}, "without a connection kind"},
+		{"probe path without kind", plugins.Plugin{ID: "p", Version: "1", ConnectionTransport: plugins.ConnectionTransportHTTP, ConnectionAuthModes: []string{plugins.AuthModeBasic}, ConnectionProbePath: "/health"}, "probe path without a connection kind"},
+		{"relative probe path", httpKindPluginWithProbe("p", "k", "health"), "must be absolute"},
+		{"oversized probe path", httpKindPluginWithProbe("p", "k", "/"+strings.Repeat("a", 2049)), "exceeds 2048 bytes"},
+		{"probe path with space", httpKindPluginWithProbe("p", "k", "/hea lth"), "printable ASCII"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -70,6 +74,47 @@ func TestHTTPConnectionKindDeclarationValidation(t *testing.T) {
 				t.Fatalf("register err = %v, want containing %q", err, testCase.message)
 			}
 		})
+	}
+}
+
+// httpKindPluginWithProbe declares a trusted HTTP kind with a bounded probe
+// path (see httpKindPlugin for the base declaration).
+func httpKindPluginWithProbe(id, kind, probePath string) plugins.Plugin {
+	plugin := httpKindPlugin(id, kind)
+	plugin.ConnectionProbePath = probePath
+	return plugin
+}
+
+// TestHTTPProbeContractResolution proves the frozen probe contract rides the
+// declaration: kinds with a probe path resolve a bounded GET contract, kinds
+// without one resolve Probe=nil (gateway-executable, never probeable), and
+// revocation removes both.
+func TestHTTPProbeContractResolution(t *testing.T) {
+	registry := plugins.NewRegistry()
+	if err := registry.Register(httpKindPluginWithProbe("synthmetrics", "synth-http", "/health?deep=true")); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(httpKindPlugin("bare", "bare-kind")); err != nil {
+		t.Fatal(err)
+	}
+	declaration, _, ok := registry.HTTPConnectionKind("synth-http")
+	if !ok || declaration.Probe == nil {
+		t.Fatalf("synth-http declaration = %+v ok=%v, want a probe contract", declaration, ok)
+	}
+	if declaration.Probe.Method != "GET" || declaration.Probe.Path != "/health?deep=true" || declaration.Probe.ExpectStatus != 200 {
+		t.Fatalf("probe contract = %+v, want the bounded GET/200 shape", declaration.Probe)
+	}
+	bare, _, ok := registry.HTTPConnectionKind("bare-kind")
+	if !ok || bare.Probe != nil {
+		t.Fatalf("bare-kind declaration = %+v, want Probe=nil", bare)
+	}
+	view := registry.ConnectionKindView()
+	if _, ok := view.LookupHTTPConnectionKind("synth-http"); !ok {
+		t.Fatal("default-enabled kind must resolve through the view")
+	}
+	view.SetEnabled([]string{"bare"})
+	if declaration, ok := view.LookupHTTPConnectionKind("synth-http"); ok {
+		t.Fatalf("revoked kind resolved = %+v", declaration)
 	}
 }
 

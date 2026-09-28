@@ -11,6 +11,7 @@ package plugins
 
 import (
 	"fmt"
+	"net/http"
 	"sort"
 	"sync"
 )
@@ -33,6 +34,23 @@ const (
 // (FetchCredentialGrant) and must never become gateway-executable.
 var reservedConnectionKinds = map[string]bool{"model_provider": true}
 
+// HTTPProbeContract is the frozen, bounded read-only probe contract of one
+// trusted HTTP connection kind: one GET request against a declared absolute
+// path, expected to answer with a single declared 2xx status. The contract is
+// compiled plugin declaration (never instance configuration); Quoin freezes
+// it into every probe attempt of the kind and executes it through the generic
+// gateway, so enabling a connection always rests on a real bounded request.
+type HTTPProbeContract struct {
+	// Method is fixed to GET — the probe vocabulary is read-only by
+	// construction; state-changing verbs need an explicit contract extension.
+	Method string
+	// Path is the absolute request path (starts with "/", may carry a query
+	// string, no spaces or control characters).
+	Path string
+	// ExpectStatus is the single 2xx status the probe treats as success.
+	ExpectStatus int
+}
+
 // HTTPConnectionKind is the frozen declaration of one trusted HTTP
 // connection kind: a plugin's promise that instances of this kind speak the
 // generic gateway HTTP contract within the declared auth modes.
@@ -44,6 +62,10 @@ type HTTPConnectionKind struct {
 	Transport string
 	// AuthModes is the closed auth-mode subset the kind accepts.
 	AuthModes []string
+	// Probe is the bounded read-only probe contract, when the plugin
+	// declares one. A kind without a probe contract is still gateway-
+	// executable for its tools but can never start or close a probe attempt.
+	Probe *HTTPProbeContract
 }
 
 // validAuthMode reports whether the mode is inside the bounded vocabulary.
@@ -51,10 +73,51 @@ func validAuthMode(mode string) bool {
 	return mode == AuthModeNone || mode == AuthModeBasic || mode == AuthModeBearer
 }
 
+// validateProbePath checks one probe-path declaration: it must be an
+// absolute path of bounded printable ASCII with no space or control byte,
+// suitable as a fixed URL path (+ optional query) appended to the connection
+// base URL. Credential material never belongs in a declaration; the check
+// keeps the probe deterministic and URL-safe rather than scanning secrets.
+func validateProbePath(plugin Plugin) error {
+	path := plugin.ConnectionProbePath
+	if path == "" {
+		return nil
+	}
+	if plugin.ConnectionKind == "" {
+		return fmt.Errorf("%w: %s declares a connection probe path without a connection kind", ErrInvalidPlugin, plugin.ID)
+	}
+	if len(path) > 2048 {
+		return fmt.Errorf("%w: %s connection probe path exceeds 2048 bytes", ErrInvalidPlugin, plugin.ID)
+	}
+	if path[0] != '/' {
+		return fmt.Errorf("%w: %s connection probe path %q must be absolute (start with '/')", ErrInvalidPlugin, plugin.ID, path)
+	}
+	for i := 0; i < len(path); i++ {
+		if path[i] <= 0x20 || path[i] == 0x7f {
+			return fmt.Errorf("%w: %s connection probe path must be printable ASCII without spaces or control characters", ErrInvalidPlugin, plugin.ID)
+		}
+	}
+	return nil
+}
+
+// probeDeclaration folds the plugin's declared probe path onto the frozen
+// contract shape (GET, expected status 200). The expected-status vocabulary
+// is exactly 200 — the bounded read-only probe asks the platform whether its
+// endpoint answers; any narrower acceptance is a future contract extension.
+func probeDeclaration(plugin Plugin) *HTTPProbeContract {
+	if plugin.ConnectionProbePath == "" {
+		return nil
+	}
+	return &HTTPProbeContract{Method: http.MethodGet, Path: plugin.ConnectionProbePath, ExpectStatus: http.StatusOK}
+}
+
 // validateConnectionDeclaration checks one plugin's connection declaration in
 // isolation. An empty kind means the plugin needs no platform connection and
 // imposes no requirements.
 func validateConnectionDeclaration(plugin Plugin) error {
+	if err := validateProbePath(plugin); err != nil {
+		return err
+	}
 	if plugin.ConnectionKind == "" {
 		if plugin.ConnectionTransport != "" || len(plugin.ConnectionAuthModes) > 0 {
 			return fmt.Errorf("%w: %s declares connection transport/auth modes without a connection kind", ErrInvalidPlugin, plugin.ID)
@@ -96,7 +159,7 @@ func (r *Registry) HTTPConnectionKind(kind string) (HTTPConnectionKind, string, 
 	var declaration HTTPConnectionKind
 	if ok {
 		plugin := r.plugins[owner]
-		declaration = HTTPConnectionKind{Kind: kind, Transport: plugin.ConnectionTransport, AuthModes: append([]string(nil), plugin.ConnectionAuthModes...)}
+		declaration = HTTPConnectionKind{Kind: kind, Transport: plugin.ConnectionTransport, AuthModes: append([]string(nil), plugin.ConnectionAuthModes...), Probe: probeDeclaration(plugin)}
 	}
 	r.mu.Unlock()
 	return declaration, owner, ok
@@ -110,7 +173,7 @@ func (r *Registry) HTTPConnectionKinds() []HTTPConnectionKind {
 	declarations := make([]HTTPConnectionKind, 0, len(r.kinds))
 	for kind, owner := range r.kinds {
 		plugin := r.plugins[owner]
-		declarations = append(declarations, HTTPConnectionKind{Kind: kind, Transport: plugin.ConnectionTransport, AuthModes: append([]string(nil), plugin.ConnectionAuthModes...)})
+		declarations = append(declarations, HTTPConnectionKind{Kind: kind, Transport: plugin.ConnectionTransport, AuthModes: append([]string(nil), plugin.ConnectionAuthModes...), Probe: probeDeclaration(plugin)})
 	}
 	r.mu.Unlock()
 	sort.Slice(declarations, func(i, j int) bool { return declarations[i].Kind < declarations[j].Kind })

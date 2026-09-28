@@ -63,6 +63,16 @@ var localMetricsToolEntry = func(name string) (plugins.ToolEntry, bool) {
 	return entry, ok
 }
 
+// httpProbeTimeout 是注册制 HTTP 连接种类只读探测的单次请求超时（与
+// metrics_probe 内部工具的上限一致）。
+const httpProbeTimeout = 15 * time.Second
+
+// newLocalProbeCaller 构造一次本地只读探测的网关调用方。变量形态仅为测试可
+// 注入（集成测试以假平台调用方替代真实 Stele 网关流）。
+var newLocalProbeCaller = func(service *RuntimeService, conn localConnection) plugins.PlatformCaller {
+	return &gatewayPlatformCaller{gateway: service.SteleGateway, conn: conn.Connection}
+}
+
 // isLocalExecutionBinding 识别本地执行的派发绑定（取消、对账与 Plinth 重连
 // 路径据此把这三类 attempt 排除出帧协议）。
 func isLocalExecutionBinding(boot sql.NullString) bool {
@@ -324,6 +334,7 @@ func (service *RuntimeService) executeLocalProbe(ctx context.Context, attemptID 
 	conn := plugins.Connection{ID: connectionID, RevisionID: revisionID, Type: connectionType, Settings: json.RawMessage(configJSON)}
 	outcome := "passed"
 	detail := map[string]any{"kind": connectionType, "query": "vector(1)"}
+	schemaKind := "connection_probe_" + connectionType + "_v1"
 	switch connectionType {
 	case connections.TypePrometheus, connections.TypeThanos:
 		raw, invokeErr := service.invokeLocalTool(ctx, "metrics_probe", struct{}{}, localConnection{conn})
@@ -350,10 +361,30 @@ func (service *RuntimeService) executeLocalProbe(ctx context.Context, attemptID 
 			}
 		}
 	default:
-		// model_provider 已在入口分流到 Plinth 派发；其余未知类型按确定性
-		// 失败收口，保持 attempt 与探测结果历史的诚实。
-		outcome = "failed"
-		detail["error"] = "该连接类型暂无本地探测执行器"
+		// model_provider 已在入口分流到 Plinth 派发；其余类型按注册制 HTTP
+		// 连接种类（ADR-0014）的封闭只读探测执行：请求形状来自插件的冻结
+		// 声明（HTTPProbeContract），经 Stele 网关出向（凭证注入在网关，本
+		// 侧只携带非秘密 revision config），期望状态与观测状态一起封存进
+		// 共享 http typed child。无冻结探测契约的未知类型仍按确定性失败收
+		// 口，保持 attempt 与探测结果历史的诚实。
+		contract, contractErr := service.Connections.HTTPProbeContract(connectionType)
+		if contractErr != nil {
+			outcome = "failed"
+			detail["error"] = contractErr.Error()
+			break
+		}
+		detail["method"] = contract.Method
+		detail["path"] = contract.Path
+		detail["expectedStatus"] = contract.ExpectStatus
+		observed := service.runReadOnlyHTTPProbe(ctx, contract, localConnection{conn})
+		detail["observedStatus"] = observed.status
+		if observed.err != nil {
+			detail["error"] = observed.err.Error()
+		}
+		if observed.status != contract.ExpectStatus {
+			outcome = "failed"
+		}
+		schemaKind = "connection_probe_http_v1"
 	}
 	finishedAt := time.Now().UTC()
 	detailJSON, _ := json.Marshal(detail)
@@ -364,7 +395,6 @@ func (service *RuntimeService) executeLocalProbe(ctx context.Context, attemptID 
 	if err != nil {
 		return err
 	}
-	schemaKind := "connection_probe_" + connectionType + "_v1"
 	if err := service.commitProbeResultPayload(ctx, attemptID, schemaKind, canonical, localExecutionBootID, localExecutionEpoch); err != nil {
 		// 提交被取消围栏抢先（晚到结果）是正常竞态：围栏路径负责终态。
 		if strings.Contains(err.Error(), "late") || strings.Contains(err.Error(), "not running") {
@@ -373,6 +403,31 @@ func (service *RuntimeService) executeLocalProbe(ctx context.Context, attemptID 
 		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
+}
+
+// httpProbeObservation 是一次只读 HTTP 探测的观测结果：无 HTTP 响应时
+// status 为 0，err 携带传输级失败原因（两者互斥出现）。
+type httpProbeObservation struct {
+	status int
+	err    error
+}
+
+// runReadOnlyHTTPProbe 执行注册制 HTTP 连接种类的封闭只读探测：一次冻结声
+// 明形状的 GET 请求经 Stele 网关出向（凭证注入、限流、传输都在网关），任何
+// 状态码都是传输成功，语义（是否等于期望状态）由调用方裁决。
+func (service *RuntimeService) runReadOnlyHTTPProbe(ctx context.Context, contract plugins.HTTPProbeContract, conn localConnection) httpProbeObservation {
+	probeCtx, cancel := context.WithTimeout(ctx, httpProbeTimeout)
+	defer cancel()
+	response, err := newLocalProbeCaller(service, conn).Call(probeCtx, plugins.PlatformRequest{
+		Method: contract.Method, Path: contract.Path, Timeout: httpProbeTimeout,
+	})
+	if err != nil {
+		return httpProbeObservation{status: 0, err: err}
+	}
+	if response == nil {
+		return httpProbeObservation{status: 0, err: errors.New("gateway returned no response")}
+	}
+	return httpProbeObservation{status: response.StatusCode}
 }
 
 // ---------------------------------------------------------------------------
