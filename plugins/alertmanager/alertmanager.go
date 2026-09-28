@@ -36,6 +36,11 @@ func (alertmanagerSource) VerifyAndParse(_ context.Context, req plugins.InboundR
 	if payload.Status == "" || len(payload.Alerts) == 0 {
 		return nil, errors.New("alertmanager webhook carries no alerts")
 	}
+	// A sender cannot opt out of Alertmanager's label/fingerprint consistency
+	// check by injecting the normalized identity field used by other sources.
+	for index := range payload.Alerts {
+		payload.Alerts[index].ExternalID = ""
+	}
 	normalized, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -102,5 +107,6 @@ func init() {
 		EventSource:     alertmanagerSource{},
 		EventTypes:      []string{"alerts.batch"},
 		AlertNormalizer: alertmanagerNormalizer{},
+		AlertIdentity:   plugins.AlertIdentityLabels,
 	})
 }

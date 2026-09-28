@@ -7,13 +7,17 @@ import "encoding/json"
 type AlertmanagerWebhook struct {
 	Status string `json:"status"`
 	Alerts []struct {
-		Status       string            `json:"status"`
-		Labels       map[string]string `json:"labels"`
-		Annotations  map[string]string `json:"annotations"`
-		StartsAt     string            `json:"startsAt"`
-		EndsAt       string            `json:"endsAt"`
-		Fingerprint  string            `json:"fingerprint"`
-		GeneratorURL string            `json:"generatorURL"`
+		Status      string            `json:"status"`
+		Labels      map[string]string `json:"labels"`
+		Annotations map[string]string `json:"annotations"`
+		StartsAt    string            `json:"startsAt"`
+		EndsAt      string            `json:"endsAt"`
+		Fingerprint string            `json:"fingerprint"`
+		// ExternalID is a stable identity supplied by other normalized alert
+		// sources. Alertmanager itself never owns this field; its plugin clears
+		// it before handing a batch to Quoin.
+		ExternalID   string `json:"externalId,omitempty"`
+		GeneratorURL string `json:"generatorURL"`
 	} `json:"alerts"`
 	GroupLabels       map[string]string `json:"groupLabels"`
 	CommonLabels      map[string]string `json:"commonLabels"`

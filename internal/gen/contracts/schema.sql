@@ -13,7 +13,7 @@
 --     connections.name、discovery/plan/check key 等）与复合领域身份
 --     （alert_occurrences 的 UNIQUE 约束）是相等性权威；
 --     locator 只承担 FK / URL / 审计引用。
---   * Alertmanager fingerprint 是上游 64-bit 无符号值的大端 8 字节 BLOB，
+--   * Alertmanager fingerprint 是上游 64-bit 无符号值的大端 8 字节 BLOB；其他来源的 externalId 使用 32 字节 SHA-256，
 --     不是有符号整数、不是 SHA-256。
 --   * 全部时间列 TEXT，RFC3339Nano UTC（来源时间无损规范化见 DATA-ALERT-*）。
 --   * 持久历史禁止级联删除：所有外键 ON UPDATE RESTRICT ON DELETE RESTRICT；
@@ -329,7 +329,8 @@ CREATE INDEX idx_alert_deliveries_source ON alert_deliveries (source_id, committ
 CREATE TABLE alert_occurrences (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   source_id            INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  fingerprint          BLOB NOT NULL CHECK (length(fingerprint) = 8), -- 上游 64-bit 无符号指纹，大端 8 字节
+  fingerprint          BLOB NOT NULL CHECK (length(fingerprint) IN (8,32)), -- Alertmanager 为 8 字节，规范外部 identity 为 SHA-256
+  external_identity    TEXT, -- 非 Alertmanager 来源的不可变原始身份，供碰撞/溯源复核
   starts_at            TEXT NOT NULL,                -- 规范化 startsAt（UTC RFC3339Nano，无损）
   state                TEXT NOT NULL CHECK (state IN ('Firing','Resolved')),
   row_version          INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
@@ -347,6 +348,7 @@ CREATE TABLE alert_occurrences (
   last_state_change_at TEXT NOT NULL,
   resolved_at          TEXT,
   UNIQUE (source_id, fingerprint, starts_at),
+  CHECK ((external_identity IS NULL AND length(fingerprint) = 8) OR (external_identity IS NOT NULL AND length(fingerprint) = 32 AND length(external_identity) BETWEEN 1 AND 512)),
   CHECK ((state = 'Resolved' AND resolved_at IS NOT NULL) OR (state = 'Firing' AND resolved_at IS NULL))
 ) STRICT;
 CREATE INDEX idx_alert_occurrences_firing ON alert_occurrences (state, last_state_change_at DESC);
@@ -487,7 +489,7 @@ CREATE TABLE alert_delivery_items (
   delivery_id      INTEGER NOT NULL REFERENCES alert_deliveries(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   item_index       INTEGER NOT NULL CHECK (item_index >= 0),
   status           TEXT NOT NULL CHECK (status IN ('ok','identity_conflict','fingerprint_mismatch')),
-  fingerprint      BLOB NOT NULL CHECK (length(fingerprint) = 8),
+  fingerprint      BLOB NOT NULL CHECK (length(fingerprint) IN (8,32)),
   starts_at        TEXT NOT NULL,                    -- 来源声明的 startsAt
   ends_at          TEXT,
   labels_canonical TEXT NOT NULL CHECK (json_valid(labels_canonical)),

@@ -49,3 +49,8 @@ type Event struct {
 	// the contract between this plugin's VerifyAndParse and Quoin's consumer.
 	Payload json.RawMessage
 }
+
+const (
+	AlertIdentityLabels   = "labels"
+	AlertIdentityExternal = "external"
+)

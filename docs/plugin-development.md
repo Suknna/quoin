@@ -44,6 +44,7 @@ func init() {
         ConfigSchema:   myConfigSchema, // 实例设置的封闭 JSON Schema（draft 2020-12）
         EventSource:    mySource{},     // 可选：入向能力
         EventTypes:     []string{"alerts.batch"}, // 入向类型必须显式声明
+        AlertIdentity:  plugins.AlertIdentityExternal, // 告警来源选一种固定身份模式
         Tools:          myTools{},      // 可选：出向能力
         // 可选声明目录（调度器消费，执行走内部工具）：
         // DiscoverObjects / InspectionTemplates
@@ -171,9 +172,10 @@ func init() {
 告警源创建、Quoin Relay 与告警列表/详情不再把 `alertmanager` 当作唯一来源：
 注册的 EventSource + AlertNormalizer 可以创建自己的来源；Relay 只接收其
 `alerts.batch` 事件，并在事务内核对事件来源与来源凭据的归属。接入侧需要将
-`alerts.batch` 的载荷转换为当前的 Alertmanager 兼容结构（含每条的完整 labels、
-startsAt、status，以及按 labels 计算的 fingerprint）；这只是过渡期的规范投影，
-**不代表**已完成任意外部 identity 的通用化、协议版本协商、
+`alerts.batch` 的载荷转换为当前的批次结构（含每条完整 labels、startsAt、status）；
+`AlertIdentityLabels` 要求 fingerprint 与 labels 一致，`AlertIdentityExternal` 要求每条携带
+非空的 `externalId`、不得同时携带 fingerprint。外部身份原文首观测冻结、SHA-256
+摘要用于来源内索引；缺失/冲突项不进入告警发生。此阶段**尚未完成**协议版本协商、
 订阅派发或跨来源日报。新平台若无法安全映射该身份模型，不应伪造标签以接入，
 应等待统一规范载荷的下一阶段实施。
 部署启用集合与来源实例的启用状态分别受控：未启用的插件不能创建新的告警源，

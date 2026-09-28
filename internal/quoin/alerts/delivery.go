@@ -3,6 +3,7 @@ package alerts
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
 
@@ -69,6 +71,7 @@ type prepared struct {
 	startsAt     string
 	endsAt       string
 	labels       map[string]string
+	externalID   string
 	canonical    string
 	digest       string
 	storedDigest string // identity_conflict: digest of the stored occurrence snapshot
@@ -246,8 +249,12 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 	}
 
 	preparedItems := make([]prepared, 0, len(webhook.Alerts))
+	identityMode, ok := service.sources.AlertIdentity(protocol)
+	if !ok {
+		return DeliveryResult{}, &execution.Rejection{Code: codeWebhookInvalid, Detail: "alert source has no identity contract"}
+	}
 	for index, rawItem := range webhook.Alerts {
-		item, prepErr := prepareItem(index, rawItem)
+		item, prepErr := prepareItem(index, rawItem, identityMode)
 		if prepErr != nil {
 			item.reason = prepErr.Error()
 			item.status = "fingerprint_mismatch"
@@ -388,8 +395,9 @@ func prepareItem(index int, rawItem struct {
 	StartsAt     string            `json:"startsAt"`
 	EndsAt       string            `json:"endsAt"`
 	Fingerprint  string            `json:"fingerprint"`
+	ExternalID   string            `json:"externalId,omitempty"`
 	GeneratorURL string            `json:"generatorURL"`
-},
+}, identityMode string,
 ) (prepared, error) {
 	wireStatus := rawItem.Status
 	if wireStatus != "firing" && wireStatus != "resolved" {
@@ -404,6 +412,20 @@ func prepareItem(index int, rawItem struct {
 	}
 	item.startsAt = normalized
 	item.endsAt = rawItem.EndsAt
+	if identityMode == plugins.AlertIdentityExternal {
+		if rawItem.Fingerprint != "" || strings.TrimSpace(rawItem.ExternalID) == "" || len(rawItem.ExternalID) > 512 || strings.IndexByte(rawItem.ExternalID, 0) >= 0 {
+			item.fingerprint = FingerprintOf(rawItem.Labels)
+			return item, fmt.Errorf("external identity must be 1–512 bytes and cannot be combined with fingerprint")
+		}
+		identity := sha256.Sum256([]byte(rawItem.ExternalID))
+		item.fingerprint = identity[:]
+		item.externalID = rawItem.ExternalID
+		return item, nil
+	}
+	if rawItem.ExternalID != "" {
+		item.fingerprint = FingerprintOf(rawItem.Labels)
+		return item, fmt.Errorf("label identity cannot carry externalId")
+	}
 	if rawItem.Fingerprint != "" {
 		declared, err := FingerprintFromHex(rawItem.Fingerprint)
 		if err == nil {
@@ -443,13 +465,17 @@ func (service *Service) classifyAndInsertItem(ctx context.Context, conn executio
 	}
 	var storedCanonical sql.NullString
 	var storedDigest sql.NullString
-	err = conn.QueryRowContext(ctx, `SELECT labels_canonical, labels_digest FROM alert_occurrences WHERE source_id=? AND fingerprint=? AND starts_at=?`,
-		sourceID, item.fingerprint, item.startsAt).Scan(&storedCanonical, &storedDigest)
+	var storedExternalID sql.NullString
+	err = conn.QueryRowContext(ctx, `SELECT labels_canonical, labels_digest, external_identity FROM alert_occurrences WHERE source_id=? AND fingerprint=? AND starts_at=?`,
+		sourceID, item.fingerprint, item.startsAt).Scan(&storedCanonical, &storedDigest, &storedExternalID)
 	status := "ok"
 	detail := ""
-	if err == nil && storedCanonical.Valid && storedCanonical.String != incomingCanonical {
+	if err == nil && (storedCanonical.Valid && storedCanonical.String != incomingCanonical || storedExternalID.String != item.externalID) {
 		status = "identity_conflict"
 		detail = "labels snapshot mismatch"
+		if storedExternalID.String != item.externalID {
+			detail = "external identity does not match its stored digest"
+		}
 		if storedDigest.Valid {
 			item.storedDigest = storedDigest.String
 		}
@@ -498,8 +524,12 @@ func (service *Service) applyItem(ctx context.Context, conn execution.Executor, 
 			initialState = "Resolved"
 			resolvedAt = committedAt
 		}
-		result, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_occurrences(source_id, fingerprint, starts_at, state, row_version, labels_canonical, labels_digest, severity, title, annotations_canonical, resource, first_seen_at, last_state_change_at, resolved_at) VALUES(?,?,?,?,1,?,?,?,?,?,?,?,?,?)`,
-			sourceID, item.fingerprint, item.startsAt, initialState, labelsCanonical, digest, severity, title, annotationsCanonical, resource, committedAt, committedAt, resolvedAt)
+		var externalIdentity any
+		if item.externalID != "" {
+			externalIdentity = item.externalID
+		}
+		result, insertErr := conn.ExecContext(ctx, `INSERT INTO alert_occurrences(source_id, fingerprint, external_identity, starts_at, state, row_version, labels_canonical, labels_digest, severity, title, annotations_canonical, resource, first_seen_at, last_state_change_at, resolved_at) VALUES(?,?,?,?,?,1,?,?,?,?,?,?,?,?,?)`,
+			sourceID, item.fingerprint, externalIdentity, item.startsAt, initialState, labelsCanonical, digest, severity, title, annotationsCanonical, resource, committedAt, committedAt, resolvedAt)
 		if insertErr != nil {
 			return nil, "", insertErr
 		}

@@ -16,7 +16,7 @@ func TestEventSourcePayloadIsIntakeWebhook(t *testing.T) {
 		t.Fatal("alertmanager event source missing")
 	}
 	events, err := source.VerifyAndParse(context.Background(), plugins.InboundRequest{Body: []byte(`{
-		"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"CPU"},"annotations":{"summary":"hot"},"startsAt":"2026-01-01T00:00:00Z","fingerprint":"0123456789abcdef"}],
+		"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"CPU"},"annotations":{"summary":"hot"},"startsAt":"2026-01-01T00:00:00Z","fingerprint":"0123456789abcdef","externalId":"forged-bypass"}],
 		"groupKey":"group","truncatedAlerts":2,"unknownField":"ignored"}`)})
 	if err != nil || len(events) != 1 {
 		t.Fatalf("event source result: %v, %v", events, err)
@@ -27,6 +27,9 @@ func TestEventSourcePayloadIsIntakeWebhook(t *testing.T) {
 	}
 	if webhook.GroupKey != "group" || webhook.TruncatedAlerts != 2 || len(webhook.Alerts) != 1 || webhook.Alerts[0].Annotations["summary"] != "hot" {
 		t.Fatalf("intake lost event fields: %+v", webhook)
+	}
+	if webhook.Alerts[0].ExternalID != "" {
+		t.Fatal("Alertmanager sender bypassed label/fingerprint verification with externalId")
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {

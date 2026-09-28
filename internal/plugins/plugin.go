@@ -74,6 +74,11 @@ type Plugin struct {
 	// alert semantics (severity/title/annotations). It requires EventSource
 	// (the payload comes from the source); Quoin's intake executes it.
 	AlertNormalizer AlertNormalizer
+	// AlertIdentity selects the stable identity supplied by an alert batch:
+	// labels (Alertmanager fingerprint checked against labels) or external
+	// (source-owned externalId, stored alongside its SHA-256). A plugin with an
+	// AlertNormalizer must declare one; the choice cannot vary per event.
+	AlertIdentity string
 	// Tools is the optional outbound capability: Quoin aggregates every
 	// provider's entries into the tool catalog and the dispatch table.
 	Tools ToolProvider

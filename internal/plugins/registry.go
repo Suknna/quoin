@@ -251,6 +251,20 @@ func (r *Registry) AlertNormalizer(kind string) (AlertNormalizer, string, bool) 
 	return normalizer, pluginID, ok
 }
 
+// AlertIdentity resolves a source's frozen alert identity contract. The
+// caller never chooses identity semantics from untrusted event contents.
+func (r *Registry) AlertIdentity(kind string) (string, bool) {
+	r.mu.Lock()
+	r.ensureFrozen()
+	pluginID, ok := r.sources[kind]
+	var mode string
+	if ok {
+		mode = r.plugins[pluginID].AlertIdentity
+	}
+	r.mu.Unlock()
+	return mode, ok && mode != ""
+}
+
 // validatePlugin checks one registration in isolation.
 func validatePlugin(plugin Plugin) error {
 	if !pluginIDPattern.MatchString(plugin.ID) {
@@ -279,6 +293,9 @@ func validatePlugin(plugin Plugin) error {
 	}
 	if plugin.AlertNormalizer != nil && plugin.EventSource == nil {
 		return fmt.Errorf("%w: %s provides an alert normalizer without its event source", ErrInvalidPlugin, plugin.ID)
+	}
+	if plugin.AlertNormalizer != nil && plugin.AlertIdentity != AlertIdentityLabels && plugin.AlertIdentity != AlertIdentityExternal || plugin.AlertNormalizer == nil && plugin.AlertIdentity != "" {
+		return fmt.Errorf("%w: %s must declare exactly one alert identity mode alongside its normalizer", ErrInvalidPlugin, plugin.ID)
 	}
 	return nil
 }

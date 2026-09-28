@@ -145,7 +145,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	if err := registry.Register(builtin); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.Register(plugins.Plugin{ID: "synthetic", Version: "1", EventSource: syntheticAlertSource{}, EventTypes: []string{"alerts.batch"}, AlertNormalizer: syntheticAlertNormalizer{}}); err != nil {
+	if err := registry.Register(plugins.Plugin{ID: "synthetic", Version: "1", EventSource: syntheticAlertSource{}, EventTypes: []string{"alerts.batch"}, AlertNormalizer: syntheticAlertNormalizer{}, AlertIdentity: plugins.AlertIdentityExternal}); err != nil {
 		t.Fatal(err)
 	}
 	if err := harness.alerts.UseSourceRegistry(registry); err != nil {
@@ -159,8 +159,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	}
 	clientFixture := startRelayServer(t, harness.alerts, harness.connection)
 	client := relayClient(t, clientFixture, &clientFixture.steleClient)
-	labels := map[string]string{"alertname": "Synthetic", "instance": "test-host"}
-	body := []byte(`{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z","fingerprint":"` + relayFingerprintHex(labels) + `"}]}`)
+	body := []byte(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-1","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
 	send := func(id, kind, eventType string, payload []byte) runtimev1.EventDeliveryStatus {
 		t.Helper()
 		response, err := client.DeliverEvents(ctx, &runtimev1.DeliverEventsRequest{
@@ -183,6 +182,18 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	if got := send("synthetic-1", "synthetic", "alerts.batch", body); got != accepted {
 		t.Fatalf("replayed event: %s", got)
 	}
+	secondIdentity := []byte(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-2","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
+	if got := send("synthetic-2", "synthetic", "alerts.batch", secondIdentity); got != accepted {
+		t.Fatalf("same labels with different external identity: %s", got)
+	}
+	conflictingLabels := []byte(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-1","labels":{"alertname":"Synthetic","instance":"other-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
+	if got := send("synthetic-conflict", "synthetic", "alerts.batch", conflictingLabels); got != accepted {
+		t.Fatalf("identity conflict must isolate the item: %s", got)
+	}
+	missingIdentity := []byte(`{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
+	if got := send("synthetic-missing-identity", "synthetic", "alerts.batch", missingIdentity); got != accepted {
+		t.Fatalf("bad item must be isolated without rejecting the delivery: %s", got)
+	}
 	if got := send("synthetic-wrong-event", "synthetic", "unhandled.event", body); got != rejected {
 		t.Fatalf("unhandled event: %s", got)
 	}
@@ -193,15 +204,29 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 		t.Fatalf("malformed cross-source delivery: %s", got)
 	}
 	var count int
-	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_deliveries WHERE protocol='synthetic'`).Scan(&count); err != nil || count != 1 {
+	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_deliveries WHERE protocol='synthetic'`).Scan(&count); err != nil || count != 4 {
 		t.Fatalf("synthetic deliveries = %d, err=%v", count, err)
 	}
+	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_occurrences WHERE source_id=?`, source.SourceID).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("external occurrence identities = %d, err=%v", count, err)
+	}
+	var frozenID string
+	var fingerprintBytes int
+	if err := harness.database.SQL.QueryRow(`SELECT external_identity,length(fingerprint) FROM alert_occurrences WHERE source_id=? AND external_identity='upstream-1'`, source.SourceID).Scan(&frozenID, &fingerprintBytes); err != nil || frozenID != "upstream-1" || fingerprintBytes != 32 {
+		t.Fatalf("external identity=%q digest bytes=%d err=%v", frozenID, fingerprintBytes, err)
+	}
+	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_delivery_items WHERE status='identity_conflict'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("identity conflict count=%d err=%v", count, err)
+	}
+	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_delivery_items WHERE status='fingerprint_mismatch'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("missing external identity issue count=%d err=%v", count, err)
+	}
 	var title string
-	if err := harness.database.SQL.QueryRow(`SELECT title FROM alert_occurrences WHERE source_id=?`, source.SourceID).Scan(&title); err != nil || title != "Synthetic source" {
+	if err := harness.database.SQL.QueryRow(`SELECT title FROM alert_occurrences WHERE source_id=? LIMIT 1`, source.SourceID).Scan(&title); err != nil || title != "Synthetic source" {
 		t.Fatalf("normalized title=%q err=%v", title, err)
 	}
 	snapshot, err := harness.alerts.AlertSnapshot(ctx, "Firing", "")
-	if err != nil || len(snapshot.Items) != 1 || snapshot.Items[0].Source != "synthetic" {
+	if err != nil || len(snapshot.Items) != 2 || snapshot.Items[0].Source != "synthetic" {
 		t.Fatalf("normalized source in alert list: %+v err=%v", snapshot.Items, err)
 	}
 	item, err := harness.alerts.GetAlert(ctx, snapshot.Items[0].ID)
