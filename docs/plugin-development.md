@@ -73,6 +73,9 @@ func (mySource) Kind() string { return "myplatform" } // URL 段与来源协议�
 
 func (mySource) VerifyAndParse(ctx context.Context, req plugins.InboundRequest) ([]plugins.Event, error) {
     // req.Header / req.Body / req.ReceivedAt
+    // req.Settings：命中的来源实例的非秘密设置（ADR-0014 story 2）——网关在
+    // Bearer 认证并锁定同一来源实例之后才注入，Quoin 已按插件声明的封闭
+    // EventSourceConfigSchema 校验；绝不携带凭据，也绝不会是别的实例的设置。
     // 职责：协议级校验（载荷形状、来源特有签名）+ 归一化。业务语义（occurrence
     // 状态机、去重策略、归因）绝不在此——那是 Quoin 消费者的事。
     return []plugins.Event{{Type: "alerts.batch", Payload: normalized}}, nil
@@ -244,6 +247,19 @@ func init() {
 `additionalProperties: false`、顶层 object。Quoin 在写入连接 revision 时用
 `registry.ValidateConfig(pluginID, settings)` 校验；跨字段静态规则可实现 `Validator
 ConfigValidator`（纯函数、无 I/O）。
+
+同时拥有 EventSource 与 ConnectionKind 的插件可声明两套互不相关的实例设置：
+`EventSourceConfigSchema` 是告警来源实例设置（`alert_sources.settings_json`，ADR-0014
+story 2）的封闭 schema——它绝不复用/覆盖 `ConfigSchema`（连接 revision 的权威）。规则与
+连接侧一致：顶层 object、`additionalProperties: false`（注册期强制）、任意深度的属性名
+禁入 password/bearerToken/apiKey/token/secret、文档上界 64KiB；跨字段静态规则可实现
+`EventSourceValidator`。Quoin 在创建来源（create 请求的 `settings`）与更新设置
+（`POST /api/v1/alert-sources/{sourceKey}/settings`，携 clientCommandId +
+expectedRowVersion）时校验并 canonical 化落库；设置写入不改变交付身份，并推进全局单调
+`settings_version` 使凭据快照版本失效——Stele 下次刷新即换新文档与版本。已入队事件在
+接受时刻冻结快照版本，投递按该版本归因，设置变更不重解释或拒绝已入队事件；插件在
+`req.Settings` 里拿到的永远是命中实例、已校验的非秘密文档。未声明 schema 的来源只接受
+空文档 `{}`。
 
 ## 当前内置插件
 

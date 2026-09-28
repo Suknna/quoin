@@ -103,6 +103,7 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("rotateAlertSourceCredential", http.MethodPost, "/api/v1/alert-sources/{sourceKey}/rotate", operations.LevelAdmin, operations.KindCommand, "alert_source"),
 		declaration("retireAlertSourceCredential", http.MethodPost, "/api/v1/alert-sources/{sourceKey}/credentials/{credentialId}/retire", operations.LevelAdmin, operations.KindCommand, "alert_source"),
 		declaration("disableAlertSource", http.MethodPost, "/api/v1/alert-sources/{sourceKey}/disable", operations.LevelAdmin, operations.KindCommand, "alert_source"),
+		declaration("setAlertSourceSettings", http.MethodPost, "/api/v1/alert-sources/{sourceKey}/settings", operations.LevelAdmin, operations.KindCommand, "alert_source"),
 		declaration("revealAlertSourceCredential", http.MethodPost, "/api/v1/alert-sources/credentials/reveal", operations.LevelAdmin, operations.KindSensitiveRead, "alert_source"),
 	)
 

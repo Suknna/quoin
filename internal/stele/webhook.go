@@ -16,10 +16,22 @@ import (
 	"github.com/Suknna/quoin/internal/plugins"
 )
 
+// CredentialMatch is one successful Bearer/digest resolution: the pinned
+// source instance, its credential and the snapshot the match came from, plus
+// that instance's validated non-secret settings document (ADR-0014 story 2).
+// Settings are snapshot state — never credential material — and travel to
+// the plugin's VerifyAndParse inside InboundRequest.
+type CredentialMatch struct {
+	SourceID         int64
+	CredentialID     int64
+	SnapshotVersion  uint64
+	Settings         []byte
+}
+
 // CredentialLookup 是 webhook 依赖的快照认证面（Relay 实现；测试注入 stub）。
 type CredentialLookup interface {
 	Ready() bool
-	Credential(bearer, sourceKind string) (sourceID, credentialID int64, snapshotVersion uint64, ok bool)
+	Credential(bearer, sourceKind string) (CredentialMatch, bool)
 }
 
 // SourceRegistry 是 webhook 依赖的插件解析面（*plugins.Registry 实现）。
@@ -77,7 +89,7 @@ func (webhook *Webhook) serveSource(writer http.ResponseWriter, request *http.Re
 		webhook.metrics.RecordIntake("unavailable")
 		return
 	}
-	sourceID, credentialID, snapshotVersion, authorized := webhook.authenticate(request, source)
+	sourceID, credentialID, snapshotVersion, settings, authorized := webhook.authenticate(request, source)
 	if !authorized {
 		http.Error(writer, "invalid bearer credential", http.StatusUnauthorized)
 		webhook.metrics.RecordIntake("rejected")
@@ -95,8 +107,13 @@ func (webhook *Webhook) serveSource(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	receivedAt := time.Now().UTC()
+	// ADR-0014 story 2: the matched source instance's non-secret settings go
+	// to the plugin only AFTER the Bearer/digest lookup pinned this instance
+	// — settings never precede authentication and never carry credential
+	// material (banned by the owner plugin's closed schema at Quoin).
 	events, err := eventSource.VerifyAndParse(request.Context(), plugins.InboundRequest{
 		Header: request.Header, Body: body, ReceivedAt: receivedAt,
+		Settings: settings,
 	})
 	if err != nil {
 		// 入队前拒绝：坏负载不进入可靠性管道。
@@ -144,17 +161,18 @@ func (webhook *Webhook) serveSource(writer http.ResponseWriter, request *http.Re
 
 // authenticate parses the bearer and resolves it on this source's protocol;
 // both failure modes (missing header, no digest hit) answer 401 without
-// distinguishing them.
-func (webhook *Webhook) authenticate(request *http.Request, source string) (int64, int64, uint64, bool) {
+// distinguishing them. On success the pinned instance's non-secret settings
+// ride along for VerifyAndParse (ADR-0014 story 2).
+func (webhook *Webhook) authenticate(request *http.Request, source string) (int64, int64, uint64, []byte, bool) {
 	authHeader := request.Header.Get("Authorization")
 	if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
-		return 0, 0, 0, false
+		return 0, 0, 0, nil, false
 	}
-	sourceID, credentialID, snapshotVersion, ok := webhook.lookup.Credential(authHeader[7:], source)
+	match, ok := webhook.lookup.Credential(authHeader[7:], source)
 	if !ok {
-		return 0, 0, 0, false
+		return 0, 0, 0, nil, false
 	}
-	return sourceID, credentialID, snapshotVersion, true
+	return match.SourceID, match.CredentialID, match.SnapshotVersion, match.Settings, true
 }
 
 // randomEventID 生成 16 字节随机数的 base64url：DeliverEvents 的幂等键。

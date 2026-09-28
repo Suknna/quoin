@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -25,9 +26,10 @@ import (
 type createSourceInput struct {
 	Session string `cookie:"__Host-quoin-session"`
 	Body    struct {
-		Key             string `json:"key" maxLength:"200"`
-		Protocol        string `json:"protocol"`
-		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"200"`
+		Key             string          `json:"key" maxLength:"200"`
+		Protocol        string          `json:"protocol"`
+		Settings        json.RawMessage `json:"settings,omitempty"`
+		ClientCommandID string          `json:"clientCommandId" minLength:"8" maxLength:"200"`
 	}
 }
 
@@ -78,10 +80,16 @@ func (application *apiServer) createAlertSource(ctx context.Context, input *crea
 		return nil, huma.Error500InternalServerError("无法创建凭据", err)
 	}
 	digestSum := sha256.Sum256(raw)
-	result, replayed, err := application.alerts.CreateSource(ctx, input.Body.ClientCommandID, key, input.Body.Protocol, digestSum[:])
+	result, replayed, err := application.alerts.CreateSource(ctx, input.Body.ClientCommandID, key, input.Body.Protocol, input.Body.Settings, digestSum[:])
 	if err != nil {
 		if errors.Is(err, execution.ErrCommandReused) {
 			return nil, problem(http.StatusConflict, "command_id_reused", "命令标识已用于不同请求。")
+		}
+		var rejection *execution.Rejection
+		if errors.As(err, &rejection) && rejection.Code == alerts.CodeValidationFailed {
+			// Deterministic settings/protocol validation failure (ADR-0014
+			// story 2): nothing persisted, the caller corrects the document.
+			return nil, huma.Error400BadRequest(rejection.Detail, err)
 		}
 		if isUniqueViolation(err) {
 			// A concurrent same-command request may have won the race: the
@@ -381,6 +389,7 @@ func (application *apiServer) registerAlertRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/alert-sources/{sourceKey}/rotate", OperationID: "rotateAlertSourceCredential"}, application.rotateAlertSourceCredential)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/alert-sources/{sourceKey}/credentials/{credentialId}/retire", OperationID: "retireAlertSourceCredential"}, application.retireAlertSourceCredential)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/alert-sources/{sourceKey}/disable", OperationID: "disableAlertSource"}, application.disableAlertSource)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/alert-sources/{sourceKey}/settings", OperationID: "setAlertSourceSettings"}, application.setAlertSourceSettings)
 }
 
 // acknowledgeIntakeIssue is the Admin-only, one-way sticky confirmation
@@ -595,6 +604,47 @@ func (application *apiServer) disableAlertSource(ctx context.Context, input *ale
 			return nil, huma.Error409Conflict("告警源已变化", nil)
 		default:
 			return nil, huma.Error500InternalServerError("无法停用告警源", err)
+		}
+	}
+	return &struct {
+		Body alerts.SourceDetail `json:"body"`
+	}{Body: detail}, nil
+}
+
+// setAlertSourceSettings replaces one alert source instance's non-secret
+// settings (ADR-0014 story 2, story 2 of #110). The durable ledger owns the
+// replay; validation failures (schema violations, bound overflow, unknown
+// protocol) are deterministic 400s, a stale expectedRowVersion is a 409, and
+// the response is the fresh source detail including the stored document.
+func (application *apiServer) setAlertSourceSettings(ctx context.Context, input *struct {
+	Session   string          `cookie:"__Host-quoin-session"`
+	SourceKey string          `path:"sourceKey"`
+	Body      struct {
+		ClientCommandID    string          `json:"clientCommandId" minLength:"8" maxLength:"128"`
+		ExpectedRowVersion int64           `json:"expectedRowVersion" minimum:"1"`
+		Settings           json.RawMessage `json:"settings"`
+	}
+}) (*struct {
+	Body alerts.SourceDetail `json:"body"`
+}, error,
+) {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "配置告警源设置"); err != nil {
+		return nil, err
+	}
+	detail, _, err := application.alerts.SetSourceSettings(ctx, input.Body.ClientCommandID, input.SourceKey, input.Body.Settings, input.Body.ExpectedRowVersion)
+	if err != nil {
+		var rejection *execution.Rejection
+		switch {
+		case errors.Is(err, execution.ErrCommandReused):
+			return nil, huma.Error409Conflict("命令 ID 已被使用", nil)
+		case errors.As(err, &rejection) && rejection.Code == alerts.CodeNotFound:
+			return nil, huma.Error404NotFound("告警源不存在", err)
+		case errors.As(err, &rejection) && rejection.Code == alerts.CodeValidationFailed:
+			return nil, huma.Error400BadRequest(rejection.Detail, err)
+		case errors.As(err, &rejection):
+			return nil, huma.Error409Conflict("告警源已变化，请刷新后重试", err)
+		default:
+			return nil, huma.Error500InternalServerError("无法保存告警源设置", err)
 		}
 	}
 	return &struct {

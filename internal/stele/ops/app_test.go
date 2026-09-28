@@ -38,7 +38,9 @@ type readyLookup struct{}
 
 func (readyLookup) Ready() bool { return true }
 
-func (readyLookup) Credential(string, string) (int64, int64, uint64, bool) { return 1, 1, 1, true }
+func (readyLookup) Credential(string, string) (stele.CredentialMatch, bool) {
+	return stele.CredentialMatch{SourceID: 1, CredentialID: 1, SnapshotVersion: 1, Settings: []byte("{}")}, true
+}
 
 func scrapeMetrics(t *testing.T, server *sharedops.Server) string {
 	t.Helper()

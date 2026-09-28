@@ -64,16 +64,17 @@ func (application *apiServer) configurePlugins(configured []string) ([]string, e
 }
 
 type pluginCatalogItem struct {
-	ID                  string   `json:"id"`
-	SourceKind          string   `json:"sourceKind,omitempty"`
-	ConnectionKind      string   `json:"connectionKind,omitempty"`
-	ConnectionAuthModes []string `json:"connectionAuthModes,omitempty"`
-	ConnectionProbePath string   `json:"connectionProbePath,omitempty"`
-	DisplayName         string   `json:"displayName"`
-	Description         string   `json:"description"`
-	Enabled             bool     `json:"enabled"`
-	Version             string   `json:"version"`
-	Capabilities        []string `json:"capabilities"`
+	ID                      string         `json:"id"`
+	SourceKind              string         `json:"sourceKind,omitempty"`
+	ConnectionKind          string         `json:"connectionKind,omitempty"`
+	ConnectionAuthModes     []string       `json:"connectionAuthModes,omitempty"`
+	ConnectionProbePath     string         `json:"connectionProbePath,omitempty"`
+	EventSourceConfigSchema map[string]any `json:"eventSourceConfigSchema,omitempty"`
+	DisplayName             string         `json:"displayName"`
+	Description             string         `json:"description"`
+	Enabled                 bool           `json:"enabled"`
+	Version                 string         `json:"version"`
+	Capabilities            []string       `json:"capabilities"`
 }
 
 type integrationsPluginsInput struct {
@@ -192,6 +193,7 @@ func pluginCatalogEntry(plugin plugins.Plugin, enabled bool) pluginCatalogItem {
 	}
 	if plugin.EventSource != nil {
 		item.SourceKind = plugin.EventSource.Kind()
+		item.EventSourceConfigSchema = plugin.EventSourceConfigSchema
 		item.Capabilities = append(item.Capabilities, "event_source")
 	}
 	if plugin.ConnectionKind != "" {

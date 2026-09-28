@@ -90,7 +90,7 @@ func seedSource(t *testing.T, service *Service, ctx context.Context, key string)
 	for index := range digest {
 		digest[index] = byte(index)
 	}
-	result, _, err := service.CreateSource(adminCommandContext(t, ctx), "seed-"+key, key, "alertmanager", digest)
+	result, _, err := service.CreateSource(adminCommandContext(t, ctx), "seed-"+key, key, "alertmanager", nil, digest)
 	if err != nil {
 		t.Fatal(err)
 	}

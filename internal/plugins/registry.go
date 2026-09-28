@@ -251,13 +251,19 @@ func (r *Registry) InboundManifestFingerprint() string {
 	type declaration struct {
 		ID, Version, Kind, AlertIdentity string
 		EventTypes                       []string
+		// EventSourceConfigSchema joins the manifest so two hosts cannot
+		// disagree on which instance settings a source accepts (ADR-0014
+		// story 2). Canonical JSON marshal sorts map keys, so the digest is
+		// deterministic; a nil schema stays absent, preserving the fingerprint
+		// of schema-less sources.
+		EventSourceConfigSchema map[string]any `json:"eventSourceConfigSchema,omitempty"`
 	}
 	manifest := make([]declaration, 0, len(r.sources))
 	for kind, id := range r.sources {
 		plugin := r.plugins[id]
 		events := append([]string{}, plugin.EventTypes...)
 		sort.Strings(events)
-		manifest = append(manifest, declaration{ID: id, Version: plugin.Version, Kind: kind, AlertIdentity: plugin.AlertIdentity, EventTypes: events})
+		manifest = append(manifest, declaration{ID: id, Version: plugin.Version, Kind: kind, AlertIdentity: plugin.AlertIdentity, EventTypes: events, EventSourceConfigSchema: plugin.EventSourceConfigSchema})
 	}
 	r.mu.Unlock()
 	sort.Slice(manifest, func(i, j int) bool { return manifest[i].Kind < manifest[j].Kind })
@@ -293,9 +299,9 @@ func (r *Registry) AlertNormalizer(kind string) (AlertNormalizer, string, bool) 
 	return normalizer, pluginID, ok
 }
 
-// AlertIdentity resolves a source's frozen alert identity contract. The
-// caller never chooses identity semantics from untrusted event contents.
-func (r *Registry) AlertIdentity(kind string) (string, bool) {
+	// AlertIdentity resolves a source's frozen alert identity contract. The
+	// caller never chooses identity semantics from untrusted event contents.
+	func (r *Registry) AlertIdentity(kind string) (string, bool) {
 	r.mu.Lock()
 	r.ensureFrozen()
 	pluginID, ok := r.sources[kind]
@@ -305,6 +311,23 @@ func (r *Registry) AlertIdentity(kind string) (string, bool) {
 	}
 	r.mu.Unlock()
 	return mode, ok && mode != ""
+}
+
+// EventSourceSettings resolves one source kind's closed instance-settings
+// schema and its owning plugin ID (ADR-0014 story 2). The Quoin control
+// plane validates every alert-source settings document against this schema
+// before persisting it; a nil schema means the source takes no settings and
+// only the empty document is legal.
+func (r *Registry) EventSourceSettings(kind string) (map[string]any, string, bool) {
+	r.mu.Lock()
+	r.ensureFrozen()
+	pluginID, ok := r.sources[kind]
+	var schema map[string]any
+	if ok {
+		schema = r.plugins[pluginID].EventSourceConfigSchema
+	}
+	r.mu.Unlock()
+	return schema, pluginID, ok
 }
 
 // InspectionTemplate resolves one declared collection template by its
@@ -392,6 +415,20 @@ func validatePlugin(plugin Plugin) error {
 		if _, err := json.Marshal(plugin.ConfigSchema); err != nil {
 			return fmt.Errorf("%w: %s config schema is not JSON: %v", ErrInvalidPlugin, plugin.ID, err)
 		}
+	}
+	if plugin.EventSourceConfigSchema != nil {
+		if plugin.EventSource == nil {
+			return fmt.Errorf("%w: %s declares an event source config schema without an event source", ErrInvalidPlugin, plugin.ID)
+		}
+		if _, err := json.Marshal(plugin.EventSourceConfigSchema); err != nil {
+			return fmt.Errorf("%w: %s event source config schema is not JSON: %v", ErrInvalidPlugin, plugin.ID, err)
+		}
+		if err := validateClosedSettingsSchema(plugin.ID, "event source config", plugin.EventSourceConfigSchema); err != nil {
+			return err
+		}
+	}
+	if plugin.EventSourceValidator != nil && plugin.EventSource == nil {
+		return fmt.Errorf("%w: %s declares an event source config validator without an event source", ErrInvalidPlugin, plugin.ID)
 	}
 	if plugin.EventSource != nil && !sourceKindPattern.MatchString(plugin.EventSource.Kind()) {
 		return fmt.Errorf("%w: %s event source kind %q is not [a-z][a-z0-9-]*", ErrInvalidPlugin, plugin.ID, plugin.EventSource.Kind())

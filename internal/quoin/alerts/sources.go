@@ -3,10 +3,12 @@ package alerts
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
@@ -34,11 +36,12 @@ import (
 // Stable operation identities (they double as the durable command types and
 // the automatic audit actions) and the audit domain object types.
 const (
-	opCreateSource     = "alert_source.create"
-	opRotateCredential = "alert_source.rotate"
-	opRetireCredential = "alert_source.credential_retire"
-	opSetSourceEnabled = "alert_source.set_enabled"
-	opRevealCredential = "alert_source.credential_reveal"
+	opCreateSource      = "alert_source.create"
+	opRotateCredential  = "alert_source.rotate"
+	opRetireCredential  = "alert_source.credential_retire"
+	opSetSourceEnabled  = "alert_source.set_enabled"
+	opSetSourceSettings = "alert_source.set_settings"
+	opRevealCredential  = "alert_source.credential_reveal"
 
 	opDelivery             = "alert.delivery"
 	opAcknowledgeIntake    = "alert_intake_issue.acknowledge"
@@ -70,6 +73,7 @@ type alertOperations struct {
 	rotate     *execution.Operation
 	retire     *execution.Operation
 	enabled    *execution.Operation
+	settings   *execution.Operation
 	reveal     *execution.Operation
 	delivery   *execution.Operation
 	ackIntake  *execution.Operation
@@ -106,6 +110,7 @@ func registerOperations(runner *execution.Runner) (alertOperations, error) {
 		{opRotateCredential, objectCredential, authorizeSourceAdmin, &ops.rotate},
 		{opRetireCredential, objectCredential, authorizeSourceAdmin, &ops.retire},
 		{opSetSourceEnabled, objectSource, authorizeSourceAdmin, &ops.enabled},
+		{opSetSourceSettings, objectSource, authorizeSourceAdmin, &ops.settings},
 		{opRevealCredential, objectCredential, authorizeSourceAdmin, &ops.reveal},
 		{opDelivery, objectDelivery, authorizeMachineEntry, &ops.delivery},
 		{opAcknowledgeIntake, objectIntakeIssue, authorizeSourceAdmin, &ops.ackIntake},
@@ -165,25 +170,42 @@ func commandActor(ctx context.Context) (execution.Command, error) {
 	}, nil
 }
 
-// CreateSource creates the logical source and its first Active credential in
-// one runner transaction, persisting only the bearer digest. The automatic
-// audit records the acting administrator. A duplicate source_key surfaces as
-// the driver's UNIQUE violation after a full rollback — no ledger row and no
-// audit trace — exactly like the legacy contract.
-func (service *Service) CreateSource(ctx context.Context, clientCommandID, sourceKey, protocol string, bearerDigest []byte) (CreateSourceResult, bool, error) {
+// CreateSource creates the logical source with its initial non-secret
+// settings and its first Active credential in one runner transaction,
+// persisting only the bearer digest. The settings document is validated
+// against the owning plugin's closed EventSourceConfigSchema (ADR-0014 story
+// 2) and stored canonically; an absent document persists the default empty
+// object. The automatic audit records the acting administrator. A duplicate
+// source_key surfaces as the driver's UNIQUE violation after a full rollback
+// — no ledger row and no audit trace — exactly like the legacy contract.
+func (service *Service) CreateSource(ctx context.Context, clientCommandID, sourceKey, protocol string, settings []byte, bearerDigest []byte) (CreateSourceResult, bool, error) {
 	command, err := commandActor(ctx)
 	if err != nil {
 		return CreateSourceResult{}, false, err
 	}
 	command.ClientCommandID = clientCommandID
-	command.Digest = auth.DigestCommand(opCreateSource, map[string]any{"key": sourceKey, "protocol": protocol})
+	command.Digest = auth.DigestCommand(opCreateSource, map[string]any{"key": sourceKey, "protocol": protocol, "settings": string(settings)})
 	outcome, err := execution.Run(ctx, service.runner, service.ops.create, command,
 		func(tx *execution.Tx) (CreateSourceResult, execution.Change, error) {
 			if err := service.validateSourceInput(sourceKey, protocol); err != nil {
 				return CreateSourceResult{}, execution.Unchanged, err
 			}
+			settingsJSON, err := canonicalSourceSettings(service.sources, protocol, settings)
+			if err != nil {
+				return CreateSourceResult{}, execution.Unchanged, err
+			}
 			now := service.clockText()
-			sourceRow, err := tx.ExecContext(ctx, `INSERT INTO alert_sources(source_key, protocol, enabled, created_at) VALUES(?,?,1,?)`, sourceKey, protocol, now)
+			// A meaningful initial document occupies the next global settings
+			// version so the snapshot (and its provenance) spans it; the
+			// default empty object stays at 0 and does not consume the
+			// monotone counter (DATA-ALERT-013).
+			settingsVersion := int64(0)
+			if string(settingsJSON) != "{}" {
+				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(settings_version),0)+1 FROM alert_sources`).Scan(&settingsVersion); err != nil {
+					return CreateSourceResult{}, execution.Changed, err
+				}
+			}
+			sourceRow, err := tx.ExecContext(ctx, `INSERT INTO alert_sources(source_key, protocol, enabled, settings_json, settings_version, created_at) VALUES(?,?,1,?,?,?)`, sourceKey, protocol, string(settingsJSON), settingsVersion, now)
 			if err != nil {
 				return CreateSourceResult{}, execution.Changed, err
 			}
@@ -225,6 +247,106 @@ func (service *Service) validateSourceInput(sourceKey, protocol string) error {
 		return &execution.Rejection{Code: CodeValidationFailed, Detail: "protocol 对应插件未启用"}
 	}
 	return nil
+}
+
+// canonicalSourceSettings validates one alert-source settings document
+// against the owning plugin's closed EventSourceConfigSchema (ADR-0014 story
+// 2) and returns its canonical JSON bytes: an absent document persists `{}`;
+// a present one is re-marshalled from its parsed object so the authoritative
+// column never stores whitespace variants of the same document. Secret
+// material cannot pass: the schema was already banned at registration and
+// the closed shape rejects undeclared fields.
+func canonicalSourceSettings(registry sourceSettingsValidator, protocol string, settings []byte) ([]byte, error) {
+	_, pluginID, ok := registry.EventSourceSettings(protocol)
+	if !ok {
+		return nil, &execution.Rejection{Code: CodeValidationFailed, Detail: "protocol 未注册告警事件源"}
+	}
+	if len(settings) == 0 || string(settings) == "null" {
+		if err := registry.ValidateEventSourceConfig(pluginID, nil); err != nil {
+			return nil, &execution.Rejection{Code: CodeValidationFailed, Detail: "告警源设置无效"}
+		}
+		return []byte("{}"), nil
+	}
+	if len(settings) > plugins.MaxEventSourceSettingsBytes {
+		return nil, &execution.Rejection{Code: CodeValidationFailed, Detail: fmt.Sprintf("告警源设置超过 %d 字节上限", plugins.MaxEventSourceSettingsBytes)}
+	}
+	var document map[string]any
+	if err := json.Unmarshal(settings, &document); err != nil {
+		return nil, &execution.Rejection{Code: CodeValidationFailed, Detail: "告警源设置必须是 JSON 对象"}
+	}
+	canonical, err := json.Marshal(document)
+	if err != nil {
+		return nil, &execution.Rejection{Code: CodeValidationFailed, Detail: "告警源设置必须是 JSON 对象"}
+	}
+	if err := registry.ValidateEventSourceConfig(pluginID, canonical); err != nil {
+		return nil, &execution.Rejection{Code: CodeValidationFailed, Detail: "告警源设置不符合插件声明的事件源设置 schema"}
+	}
+	return canonical, nil
+}
+
+// sourceSettingsValidator is the registry surface the settings commands
+// need; *plugins.Registry satisfies it (isolated tests may stub it).
+type sourceSettingsValidator interface {
+	EventSourceSettings(kind string) (map[string]any, string, bool)
+	ValidateEventSourceConfig(pluginID string, settings json.RawMessage) error
+}
+
+// SetSourceSettings replaces one source instance's non-secret settings under
+// row-version fencing (ADR-0014 story 2). The command is a durable replayable
+// ledger entry: the same clientCommandId replays the stored detail, a reused
+// id with a different digest conflicts, and a stale expectedRowVersion is a
+// recorded deterministic rejection. The write is identity-preserving —
+// source_key/protocol/credentials never move — and advances the global
+// monotone settings_version so every Stele snapshot refresh (and therefore
+// every subsequent webhook) sees exactly one attributed settings revision.
+func (service *Service) SetSourceSettings(ctx context.Context, clientCommandID, sourceKey string, settings []byte, expectedRowVersion int64) (SourceDetail, bool, error) {
+	command, err := commandActor(ctx)
+	if err != nil {
+		return SourceDetail{}, false, err
+	}
+	command.ClientCommandID = clientCommandID
+	command.Digest = auth.DigestCommand(opSetSourceSettings, map[string]any{"sourceKey": sourceKey, "settings": string(settings), "expectedRowVersion": expectedRowVersion})
+	outcome, err := execution.Run(ctx, service.runner, service.ops.settings, command,
+		func(tx *execution.Tx) (SourceDetail, execution.Change, error) {
+			var sourceID int64
+			var protocol string
+			if err := tx.QueryRowContext(ctx, `SELECT id, protocol FROM alert_sources WHERE source_key=?`, sourceKey).Scan(&sourceID, &protocol); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return SourceDetail{}, execution.Unchanged, &execution.Rejection{Code: CodeNotFound, Detail: "告警源不存在"}
+				}
+				return SourceDetail{}, execution.Changed, err
+			}
+			settingsJSON, err := canonicalSourceSettings(service.sources, protocol, settings)
+			if err != nil {
+				return SourceDetail{}, execution.Unchanged, err
+			}
+			var settingsVersion int64
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(settings_version),0)+1 FROM alert_sources`).Scan(&settingsVersion); err != nil {
+				return SourceDetail{}, execution.Changed, err
+			}
+			result, err := tx.ExecContext(ctx, `UPDATE alert_sources SET settings_json=?, settings_version=?, row_version=row_version+1 WHERE source_key=? AND row_version=?`,
+				string(settingsJSON), settingsVersion, sourceKey, expectedRowVersion)
+			if err != nil {
+				return SourceDetail{}, execution.Changed, err
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return SourceDetail{}, execution.Changed, err
+			}
+			if affected == 0 {
+				return SourceDetail{}, execution.Unchanged, &execution.Rejection{Code: CodeRowVersionConflict, Detail: "告警源已变化", ObjectID: sourceID}
+			}
+			detail, err := sourceDetailOn(ctx, tx, sourceKey)
+			if err != nil {
+				return SourceDetail{}, execution.Changed, err
+			}
+			return detail, execution.Changed, nil
+		},
+		func(detail SourceDetail) int64 { return detail.IDAsInt64() })
+	if err != nil {
+		return SourceDetail{}, false, err
+	}
+	return outcome.Result, outcome.Replayed, nil
 }
 
 // RotateCredential creates a new Active generation superseding the current

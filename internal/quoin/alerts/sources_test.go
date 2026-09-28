@@ -59,7 +59,7 @@ func TestCreateSourceAuditsAutomaticallyAndReplays(t *testing.T) {
 
 	digest := make([]byte, 32)
 	digest[0] = 7
-	result, replayed, err := service.CreateSource(ctx, "create-audit-0001", "checkout-am", "alertmanager", digest)
+	result, replayed, err := service.CreateSource(ctx, "create-audit-0001", "checkout-am", "alertmanager", nil, digest)
 	if err != nil || replayed {
 		t.Fatalf("create = (%+v, %v, %v)", result, replayed, err)
 	}
@@ -84,7 +84,7 @@ func TestCreateSourceAuditsAutomaticallyAndReplays(t *testing.T) {
 	// Idempotent replay: the same client command id and the same request
 	// digest return the stored result and the original correlation without a
 	// new business success audit or a second source row.
-	replayResult, replayed, err := service.CreateSource(ctx, "create-audit-0001", "checkout-am", "alertmanager", digest)
+	replayResult, replayed, err := service.CreateSource(ctx, "create-audit-0001", "checkout-am", "alertmanager", nil, digest)
 	if err != nil || !replayed {
 		t.Fatalf("replay = (%+v, %v, %v)", replayResult, replayed, err)
 	}
@@ -111,7 +111,7 @@ func TestCreateSourceAuditsAutomaticallyAndReplays(t *testing.T) {
 
 	// Command-key reuse with a different request: deterministic conflict with
 	// no new durable trace.
-	if _, _, err := service.CreateSource(ctx, "create-audit-0001", "other-am", "alertmanager", digest); !errors.Is(err, execution.ErrCommandReused) {
+	if _, _, err := service.CreateSource(ctx, "create-audit-0001", "other-am", "alertmanager", nil, digest); !errors.Is(err, execution.ErrCommandReused) {
 		t.Fatalf("reused command id must surface ErrCommandReused, got %v", err)
 	}
 	if got := countRows(t, db, `SELECT COUNT(*) FROM audit_events`); got != 1 {
@@ -121,7 +121,7 @@ func TestCreateSourceAuditsAutomaticallyAndReplays(t *testing.T) {
 	// Duplicate source key under a fresh command id: the UNIQUE violation
 	// rolls everything back and surfaces verbatim (the HTTP layer maps it to
 	// the conflict problem); no ledger or audit trace remains.
-	if _, _, err := service.CreateSource(ctx, "create-audit-0002", "checkout-am", "alertmanager", digest); err == nil {
+	if _, _, err := service.CreateSource(ctx, "create-audit-0002", "checkout-am", "alertmanager", nil, digest); err == nil {
 		t.Fatal("duplicate source key must be rejected")
 	}
 	if got := countRows(t, db, `SELECT COUNT(*) FROM audit_events`); got != 1 {
@@ -157,7 +157,7 @@ func TestCreateSourceRollsBackOnMidTransactionFailure(t *testing.T) {
 	// credential INSERT after the source INSERT succeeded inside the same
 	// runner transaction.
 	shortDigest := make([]byte, 31)
-	if _, _, err := service.CreateSource(ctx, "create-rollback-0001", "broken-am", "alertmanager", shortDigest); err == nil {
+	if _, _, err := service.CreateSource(ctx, "create-rollback-0001", "broken-am", "alertmanager", nil, shortDigest); err == nil {
 		t.Fatal("short digest must fail the credential insert")
 	}
 	for name, query := range map[string]string{
@@ -181,7 +181,7 @@ func TestSourceLifecycleRecordsAuditFactsAndRejections(t *testing.T) {
 	db := database.SQL
 	ctx := adminCommandContext(t, context.Background())
 
-	created, _, err := service.CreateSource(ctx, "lifecycle-create-0001", "cycle-am", "alertmanager", make([]byte, 32))
+	created, _, err := service.CreateSource(ctx, "lifecycle-create-0001", "cycle-am", "alertmanager", nil, make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestSourceCommandsFailClosed(t *testing.T) {
 	db := database.SQL
 
 	// Missing metadata (integration gap, never "assume system").
-	if _, _, err := service.CreateSource(context.Background(), "create-ghost-0001", "ghost-am", "alertmanager", make([]byte, 32)); !errors.Is(err, execution.ErrMissingContext) {
+	if _, _, err := service.CreateSource(context.Background(), "create-ghost-0001", "ghost-am", "alertmanager", nil, make([]byte, 32)); !errors.Is(err, execution.ErrMissingContext) {
 		t.Fatalf("missing metadata must fail with ErrMissingContext, got %v", err)
 	}
 
@@ -330,7 +330,7 @@ func TestSourceCommandsFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := service.CreateSource(operatorCtx, "create-operator-0001", "ghost-am", "alertmanager", make([]byte, 32)); !errors.Is(err, auth.ErrActorChanged) {
+	if _, _, err := service.CreateSource(operatorCtx, "create-operator-0001", "ghost-am", "alertmanager", nil, make([]byte, 32)); !errors.Is(err, auth.ErrActorChanged) {
 		t.Fatalf("operator session must surface ErrActorChanged, got %v", err)
 	}
 
@@ -339,7 +339,7 @@ func TestSourceCommandsFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	revokedCtx := adminCommandContext(t, context.Background())
-	if _, _, err := service.CreateSource(revokedCtx, "create-revoked-0001", "ghost-am", "alertmanager", make([]byte, 32)); !errors.Is(err, auth.ErrActorChanged) {
+	if _, _, err := service.CreateSource(revokedCtx, "create-revoked-0001", "ghost-am", "alertmanager", nil, make([]byte, 32)); !errors.Is(err, auth.ErrActorChanged) {
 		t.Fatalf("revoked session must surface ErrActorChanged, got %v", err)
 	}
 
