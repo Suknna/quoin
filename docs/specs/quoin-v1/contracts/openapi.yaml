@@ -3154,6 +3154,9 @@ paths:
                       properties:
                         id:
                           type: string
+                        sourceKind:
+                          type: string
+                          description: EventSource.Kind(); only present when event_source is declared. Not necessarily the plugin ID.
                         displayName:
                           type: string
                         description:

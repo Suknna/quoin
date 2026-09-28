@@ -76,6 +76,9 @@ func (mySource) VerifyAndParse(ctx context.Context, req plugins.InboundRequest) 
 Stele 网关负责 Bearer/digest 认证（"签名对不对"）与 16MiB body 上限；解析失败在**入队前**拒绝
 （HTTP 400），解析成功即本地入队并返回 202。`Event.Payload` 是你与 Quoin 消费者之间的归一化
 契约（参考 `plugins/alertmanager/alertmanager.go`：payload 保持平台 wire 投影形状）。
+`Plugin.ID` 是插件包的身份，`EventSource.Kind()` 是来源协议身份，两者可以不同；
+管理目录会分别返回 `id` 和 `sourceKind`，创建实例时提交的是后者，不能把插件 ID
+当成 URL kind 或来源 protocol。
 插件必须声明所有可能产出的 `EventTypes`；Stele 会在入队前拒绝未声明的类型，
 Quoin 同样在接收时复核。声明一个新类型不等于核心已有其投影处理器，当前仅 `alerts.batch` 可消费。
 编译入站清单指纹会在 Stele→Quoin 的快照/投递 RPC 上交叉校验；改动事件契约时应

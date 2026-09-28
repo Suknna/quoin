@@ -7180,6 +7180,8 @@ export interface operations {
                     "application/json": {
                         items: {
                             id: string;
+                            /** @description EventSource.Kind(); only present when event_source is declared. Not necessarily the plugin ID. */
+                            sourceKind?: string;
                             displayName: string;
                             description: string;
                             enabled: boolean;

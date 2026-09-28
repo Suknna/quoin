@@ -601,8 +601,10 @@ describe("integration workbench", () => {
 		// #110: 任何带 event_source 能力的已启用目录插件（非品牌专用表单）都走
 		// 通用来源表单；这里用一枚合成插件 ID 验证目录驱动的路由与生命周期。
 		const SYNTHETIC_ID = "synthetic-hook";
+		const SYNTHETIC_PLUGIN_ID = "synthetic-plugin";
 		const syntheticPlugin = {
-			id: SYNTHETIC_ID,
+			id: SYNTHETIC_PLUGIN_ID,
+			sourceKind: SYNTHETIC_ID,
 			displayName: "合成事件源",
 			description: "用于验收的通用事件接入插件",
 			enabled: true,
@@ -632,7 +634,7 @@ describe("integration workbench", () => {
 				},
 			]);
 			render(
-				<IntegrationView route={`/settings/platform/integrations/${SYNTHETIC_ID}`} />,
+				<IntegrationView route={`/settings/platform/integrations/${SYNTHETIC_PLUGIN_ID}`} />,
 			);
 			expect(
 				await screen.findByRole("heading", { name: "配置 合成事件源" }),
@@ -671,7 +673,7 @@ describe("integration workbench", () => {
 					);
 				});
 			render(
-				<IntegrationView route={`/settings/platform/integrations/${SYNTHETIC_ID}`} />,
+				<IntegrationView route={`/settings/platform/integrations/${SYNTHETIC_PLUGIN_ID}`} />,
 			);
 			await screen.findByRole("heading", { name: "配置 合成事件源" });
 			fireEvent.change(screen.getByLabelText("来源键"), {
@@ -714,6 +716,7 @@ describe("integration workbench", () => {
 				syntheticPlugin,
 				{
 					id: "disabled-hook",
+					sourceKind: "disabled-kind",
 					displayName: "停用事件源",
 					description: "未启用",
 					enabled: false,
@@ -722,6 +725,7 @@ describe("integration workbench", () => {
 				},
 				{
 					id: "events-without-alerts",
+					sourceKind: "non-alert-events",
 					displayName: "非告警事件源",
 					description: "缺少告警归一化能力",
 					enabled: true,

@@ -19,6 +19,8 @@ export const EVENT_SOURCE_CAPABILITY = "event_source";
 
 export interface IntegrationCatalogItem {
 	id: string;
+	/** Registered EventSource.Kind(), not necessarily the plugin ID. */
+	sourceKind?: string;
 	displayName: string;
 	description: string;
 	enabled: boolean;

@@ -152,7 +152,7 @@ function CatalogCard({
 		item.id === "prometheus" ||
 		item.id === "thanos" ||
 		item.id === "alertmanager" ||
-		(item.capabilities.includes("event_source") &&
+		(Boolean(item.sourceKind) && item.capabilities.includes("event_source") &&
 			item.capabilities.includes("alert_normalizer"));
 	return (
 		<Card className="flex flex-col">
@@ -1790,13 +1790,14 @@ function GenericEventSourceRoute({
 	if (
 		!item ||
 		!item.enabled ||
+		!item.sourceKind ||
 		!item.capabilities.includes(EVENT_SOURCE_CAPABILITY) ||
 		!item.capabilities.includes("alert_normalizer")
 	) {
 		return <IntegrationNotFound />;
 	}
 	return (
-		<EventSourceForm item={item} navigate={navigate} suspended={suspended} />
+		<EventSourceForm item={item} kind={item.sourceKind} navigate={navigate} suspended={suspended} />
 	);
 }
 
@@ -1806,14 +1807,15 @@ function GenericEventSourceRoute({
  * protocols; the catalog check above only avoids offering dead forms. */
 function EventSourceForm({
 	item,
+	kind,
 	navigate,
 	suspended,
 }: {
 	item: IntegrationCatalogItem;
+	kind: string;
 	navigate: (to: string) => void;
 	suspended: boolean;
 }) {
-	const kind = item.id;
 	const [key, setKey] = useState("");
 	const [createdKey, setCreatedKey] = useState("");
 	const [saving, setSaving] = useState(false);

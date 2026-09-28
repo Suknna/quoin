@@ -54,6 +54,7 @@ func (application *apiServer) configurePlugins(configured []string) ([]string, e
 
 type pluginCatalogItem struct {
 	ID           string   `json:"id"`
+	SourceKind   string   `json:"sourceKind,omitempty"`
 	DisplayName  string   `json:"displayName"`
 	Description  string   `json:"description"`
 	Enabled      bool     `json:"enabled"`
@@ -96,8 +97,10 @@ func (application *apiServer) integrationsPlugins(ctx context.Context, input *in
 		// capability), tools (outbound model tools), discover/inspection_
 		// templates (declarative catalogs the schedulers consume).
 		var capabilities []string
+		var sourceKind string
 		if plugin.EventSource != nil {
 			capabilities = append(capabilities, "event_source")
+			sourceKind = plugin.EventSource.Kind()
 		}
 		if plugin.AlertNormalizer != nil {
 			capabilities = append(capabilities, "alert_normalizer")
@@ -114,6 +117,7 @@ func (application *apiServer) integrationsPlugins(ctx context.Context, input *in
 		sort.Strings(capabilities)
 		output.Body.Items = append(output.Body.Items, pluginCatalogItem{
 			ID:           plugin.ID,
+			SourceKind:   sourceKind,
 			DisplayName:  plugin.DisplayName,
 			Description:  plugin.Description,
 			Enabled:      plugins.IsEnabled(enabled, plugin.ID),
