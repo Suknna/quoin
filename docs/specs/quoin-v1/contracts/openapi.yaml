@@ -85,6 +85,232 @@ tags:
   - name: realtime
     description: SSE 变更流
 paths:
+  /api/v1/inspections/daily-report-configs:
+    get:
+      tags: [inspections]
+      operationId: listInspectionDailyReportConfigs
+      summary: 列出日报配置
+      responses:
+        '200':
+          description: 管理员可见的日报配置。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/DailyReportConfig'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [inspections]
+      operationId: createInspectionDailyReportConfig
+      summary: 创建跨来源日报配置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DailyReportConfigInput'}
+      responses:
+        '201':
+          description: 创建后的日报配置。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DailyReportConfig'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /api/v1/inspections/daily-report-configs/{configKey}:
+    parameters:
+      - in: path
+        name: configKey
+        required: true
+        schema: {type: string}
+    get:
+      tags: [inspections]
+      operationId: getInspectionDailyReportConfig
+      summary: 获取日报配置
+      responses:
+        '200':
+          description: 配置详情。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DailyReportConfig'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [inspections]
+      operationId: updateInspectionDailyReportConfig
+      summary: 按版本更新日报配置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/DailyReportConfigInput'
+                - type: object
+                  required: [expectedRowVersion]
+                  properties:
+                    expectedRowVersion: {type: integer, minimum: 1}
+      responses:
+        '200':
+          description: 更新后的配置；旧报告继续使用原冻结定义。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DailyReportConfig'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /api/v1/inspections/daily-reports:
+    get:
+      tags: [inspections]
+      operationId: listInspectionDailyReports
+      summary: 列出跨来源日报
+      parameters:
+        - in: query
+          name: configKey
+          required: false
+          schema: {type: string}
+        - in: query
+          name: limit
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 200}
+      responses:
+        '200':
+          description: 日报及封存状态。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/DailyReportSummary'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/inspections/daily-reports/backfill:
+    post:
+      tags: [inspections]
+      operationId: backfillInspectionDailyReport
+      summary: 对已结束的原日期人工补跑日报
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clientCommandId, configKey, localDate]
+              properties:
+                clientCommandId: {type: string}
+                configKey: {type: string}
+                localDate: {type: string, format: date}
+      responses:
+        '202':
+          description: 以原日期的冻结时间窗建立日报。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DailyReportSummary'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /api/v1/inspections/daily-reports/{configKey}/{localDate}:
+    parameters:
+      - in: path
+        name: configKey
+        required: true
+        schema: {type: string}
+      - in: path
+        name: localDate
+        required: true
+        schema: {type: string, format: date}
+    get:
+      tags: [inspections]
+      operationId: getInspectionDailyReport
+      summary: 获取冻结日报与最新事实版本
+      responses:
+        '200':
+          description: 汇总事实、缺口与版本。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DailyReportDetail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/inspections/daily-reports/{configKey}/{localDate}/rerun:
+    parameters:
+      - in: path
+        name: configKey
+        required: true
+        schema: {type: string}
+      - in: path
+        name: localDate
+        required: true
+        schema: {type: string, format: date}
+    post:
+      tags: [inspections]
+      operationId: rerunInspectionDailyReport
+      summary: 从同一冻结窗口生成新日报版本
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clientCommandId]
+              properties:
+                clientCommandId: {type: string}
+      responses:
+        '202':
+          description: 新版本已追加；旧版本保持不可变。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DailyReportSummary'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/inspections/daily-reports/{configKey}/{localDate}/versions/{version}:
+    parameters:
+      - in: path
+        name: configKey
+        required: true
+        schema: {type: string}
+      - in: path
+        name: localDate
+        required: true
+        schema: {type: string, format: date}
+      - in: path
+        name: version
+        required: true
+        schema: {type: integer, minimum: 1}
+    get:
+      tags: [inspections]
+      operationId: getInspectionDailyReportVersion
+      summary: 读取一个不可变日报事实版本
+      responses:
+        '200':
+          description: content 是冻结的 JSON 文档字符串。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [content]
+                properties:
+                  content: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /api/v1/inspections/plans:
     get:
       tags:
@@ -4306,6 +4532,133 @@ components:
                   type: string
                 identityKey:
                   type: string
+    DailyReportConfigInput:
+      type: object
+      required: [clientCommandId, configKey, displayName, enabled, timezone, triggerTime, planKeys]
+      properties:
+        clientCommandId: {type: string, minLength: 8, maxLength: 128}
+        configKey: {type: string, pattern: '^[a-z][a-z0-9-]{0,62}$'}
+        displayName: {type: string, minLength: 1, maxLength: 200}
+        enabled: {type: boolean}
+        timezone: {type: string, description: IANA 时区标识}
+        triggerTime: {type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$', description: 本地 HH:MM 触发时间}
+        planKeys:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: {type: string}
+    DailyReportConfig:
+      type: object
+      required: [configKey, displayName, enabled, timezone, triggerTime, planKeys, rowVersion, createdAt, updatedAt]
+      properties:
+        configKey: {type: string}
+        displayName: {type: string}
+        enabled: {type: boolean}
+        timezone: {type: string}
+        triggerTime: {type: string}
+        planKeys:
+          type: array
+          items: {type: string}
+        rowVersion: {type: integer, minimum: 1}
+        createdAt: {$ref: '#/components/schemas/Timestamp'}
+        updatedAt: {$ref: '#/components/schemas/Timestamp'}
+    DailyReportSummary:
+      type: object
+      required: [id, configKey, localDate, timezone, windowStartUtc, windowEndUtc, triggerKind, state, latestVersion, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/LocatorId'}
+        configKey: {type: string}
+        localDate: {type: string, format: date}
+        timezone: {type: string}
+        windowStartUtc: {$ref: '#/components/schemas/Timestamp'}
+        windowEndUtc: {$ref: '#/components/schemas/Timestamp'}
+        triggerKind: {type: string, enum: [schedule, manual]}
+        state: {type: string, enum: [Collecting, Sealed]}
+        sealedAt: {$ref: '#/components/schemas/Timestamp'}
+        latestVersion: {type: integer, minimum: 0}
+        createdAt: {$ref: '#/components/schemas/Timestamp'}
+    DailyReportSource:
+      type: object
+      required: [planKey, enabled, sourceEnabled, status]
+      properties:
+        planKey: {type: string}
+        displayName: {type: string}
+        connectionName: {type: string}
+        pluginId: {type: string}
+        templateId: {type: string}
+        templateVersion: {type: string}
+        enabled: {type: boolean}
+        sourceEnabled: {type: boolean}
+        missing: {type: boolean}
+        status: {type: string, enum: [ok, gap]}
+        gapReasons:
+          type: array
+          items: {type: string}
+        checks:
+          type: array
+          items:
+            type: object
+            required: [runId, checkKey, status]
+            properties:
+              runId: {type: integer, minimum: 1}
+              checkKey: {type: string}
+              status: {type: string}
+              gapReason: {type: string}
+              observedAt: {$ref: '#/components/schemas/Timestamp'}
+    DailyReportContribution:
+      type: object
+      required: [planKey, enabled, sourceEnabled]
+      properties:
+        planKey: {type: string}
+        displayName: {type: string}
+        connectionName: {type: string}
+        pluginId: {type: string}
+        templateId: {type: string}
+        templateVersion: {type: string}
+        enabled: {type: boolean}
+        sourceEnabled: {type: boolean}
+        missing: {type: boolean}
+    DailyReportDetail:
+      allOf:
+        - $ref: '#/components/schemas/DailyReportSummary'
+        - type: object
+          required: [configRowVersion, cutoffAt, contributions, versions]
+          properties:
+            configRowVersion: {type: integer, minimum: 1}
+            cutoffAt: {$ref: '#/components/schemas/Timestamp'}
+            contributions:
+              type: array
+              items: {$ref: '#/components/schemas/DailyReportContribution'}
+            versions:
+              type: array
+              items:
+                type: object
+                required: [version, createdAt]
+                properties:
+                  version: {type: integer, minimum: 1}
+                  createdAt: {$ref: '#/components/schemas/Timestamp'}
+            latest:
+              type: object
+              required: [schemaKind, configKey, localDate, timezone, windowStartUtc, windowEndUtc, sealedAt, sources, totals]
+              properties:
+                schemaKind: {type: string, enum: [inspection_daily_report_v1]}
+                configKey: {type: string}
+                localDate: {type: string, format: date}
+                timezone: {type: string}
+                windowStartUtc: {$ref: '#/components/schemas/Timestamp'}
+                windowEndUtc: {$ref: '#/components/schemas/Timestamp'}
+                sealedAt: {$ref: '#/components/schemas/Timestamp'}
+                sources:
+                  type: array
+                  items: {$ref: '#/components/schemas/DailyReportSource'}
+                totals:
+                  type: object
+                  required: [checksOk, checksGap, checksError, sourcesGap]
+                  properties:
+                    checksOk: {type: integer}
+                    checksGap: {type: integer}
+                    checksError: {type: integer}
+                    sourcesGap: {type: integer}
     PluginInspectionPlan:
       type: object
       required:

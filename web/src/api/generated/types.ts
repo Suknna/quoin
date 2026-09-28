@@ -4,6 +4,139 @@
  */
 
 export interface paths {
+    "/api/v1/inspections/daily-report-configs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 列出日报配置 */
+        get: operations["listInspectionDailyReportConfigs"];
+        put?: never;
+        /** 创建跨来源日报配置 */
+        post: operations["createInspectionDailyReportConfig"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inspections/daily-report-configs/{configKey}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+            };
+            cookie?: never;
+        };
+        /** 获取日报配置 */
+        get: operations["getInspectionDailyReportConfig"];
+        /** 按版本更新日报配置 */
+        put: operations["updateInspectionDailyReportConfig"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inspections/daily-reports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 列出跨来源日报 */
+        get: operations["listInspectionDailyReports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inspections/daily-reports/backfill": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 对已结束的原日期人工补跑日报 */
+        post: operations["backfillInspectionDailyReport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inspections/daily-reports/{configKey}/{localDate}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+                localDate: string;
+            };
+            cookie?: never;
+        };
+        /** 获取冻结日报与最新事实版本 */
+        get: operations["getInspectionDailyReport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inspections/daily-reports/{configKey}/{localDate}/rerun": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+                localDate: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 从同一冻结窗口生成新日报版本 */
+        post: operations["rerunInspectionDailyReport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inspections/daily-reports/{configKey}/{localDate}/versions/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+                localDate: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        /** 读取一个不可变日报事实版本 */
+        get: operations["getInspectionDailyReportVersion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/inspections/plans": {
         parameters: {
             query?: never;
@@ -2074,6 +2207,103 @@ export interface components {
                 identityKey: string;
             }[];
         };
+        DailyReportConfigInput: {
+            clientCommandId: string;
+            configKey: string;
+            displayName: string;
+            enabled: boolean;
+            /** @description IANA 时区标识 */
+            timezone: string;
+            /** @description 本地 HH:MM 触发时间 */
+            triggerTime: string;
+            planKeys: string[];
+        };
+        DailyReportConfig: {
+            configKey: string;
+            displayName: string;
+            enabled: boolean;
+            timezone: string;
+            triggerTime: string;
+            planKeys: string[];
+            rowVersion: number;
+            createdAt: components["schemas"]["Timestamp"];
+            updatedAt: components["schemas"]["Timestamp"];
+        };
+        DailyReportSummary: {
+            id: components["schemas"]["LocatorId"];
+            configKey: string;
+            /** Format: date */
+            localDate: string;
+            timezone: string;
+            windowStartUtc: components["schemas"]["Timestamp"];
+            windowEndUtc: components["schemas"]["Timestamp"];
+            /** @enum {string} */
+            triggerKind: "schedule" | "manual";
+            /** @enum {string} */
+            state: "Collecting" | "Sealed";
+            sealedAt?: components["schemas"]["Timestamp"];
+            latestVersion: number;
+            createdAt: components["schemas"]["Timestamp"];
+        };
+        DailyReportSource: {
+            planKey: string;
+            displayName?: string;
+            connectionName?: string;
+            pluginId?: string;
+            templateId?: string;
+            templateVersion?: string;
+            enabled: boolean;
+            sourceEnabled: boolean;
+            missing?: boolean;
+            /** @enum {string} */
+            status: "ok" | "gap";
+            gapReasons?: string[];
+            checks?: {
+                runId: number;
+                checkKey: string;
+                status: string;
+                gapReason?: string;
+                observedAt?: components["schemas"]["Timestamp"];
+            }[];
+        };
+        DailyReportContribution: {
+            planKey: string;
+            displayName?: string;
+            connectionName?: string;
+            pluginId?: string;
+            templateId?: string;
+            templateVersion?: string;
+            enabled: boolean;
+            sourceEnabled: boolean;
+            missing?: boolean;
+        };
+        DailyReportDetail: components["schemas"]["DailyReportSummary"] & {
+            configRowVersion: number;
+            cutoffAt: components["schemas"]["Timestamp"];
+            contributions: components["schemas"]["DailyReportContribution"][];
+            versions: {
+                version: number;
+                createdAt: components["schemas"]["Timestamp"];
+            }[];
+            latest?: {
+                /** @enum {string} */
+                schemaKind: "inspection_daily_report_v1";
+                configKey: string;
+                /** Format: date */
+                localDate: string;
+                timezone: string;
+                windowStartUtc: components["schemas"]["Timestamp"];
+                windowEndUtc: components["schemas"]["Timestamp"];
+                sealedAt: components["schemas"]["Timestamp"];
+                sources: components["schemas"]["DailyReportSource"][];
+                totals: {
+                    checksOk: number;
+                    checksGap: number;
+                    checksError: number;
+                    sourcesGap: number;
+                };
+            };
+        };
         PluginInspectionPlan: {
             planKey: components["schemas"]["StableKey"];
             displayName: string;
@@ -3737,6 +3967,12 @@ export interface components {
     pathItems: never;
 }
 export type PluginInspectionScope = components['schemas']['PluginInspectionScope'];
+export type DailyReportConfigInput = components['schemas']['DailyReportConfigInput'];
+export type DailyReportConfig = components['schemas']['DailyReportConfig'];
+export type DailyReportSummary = components['schemas']['DailyReportSummary'];
+export type DailyReportSource = components['schemas']['DailyReportSource'];
+export type DailyReportContribution = components['schemas']['DailyReportContribution'];
+export type DailyReportDetail = components['schemas']['DailyReportDetail'];
 export type PluginInspectionPlan = components['schemas']['PluginInspectionPlan'];
 export type BusinessView = components['schemas']['BusinessView'];
 export type PluginInspectionPlanInput = components['schemas']['PluginInspectionPlanInput'];
@@ -3927,6 +4163,266 @@ export type HeaderNoSniff = components['headers']['NoSniff'];
 export type HeaderDownloadSandboxPolicy = components['headers']['DownloadSandboxPolicy'];
 export type $defs = Record<string, never>;
 export interface operations {
+    listInspectionDailyReportConfigs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 管理员可见的日报配置。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["DailyReportConfig"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createInspectionDailyReportConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DailyReportConfigInput"];
+            };
+        };
+        responses: {
+            /** @description 创建后的日报配置。 */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyReportConfig"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    getInspectionDailyReportConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 配置详情。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyReportConfig"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateInspectionDailyReportConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DailyReportConfigInput"] & {
+                    expectedRowVersion: number;
+                };
+            };
+        };
+        responses: {
+            /** @description 更新后的配置；旧报告继续使用原冻结定义。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyReportConfig"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    listInspectionDailyReports: {
+        parameters: {
+            query?: {
+                configKey?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 日报及封存状态。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["DailyReportSummary"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    backfillInspectionDailyReport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    clientCommandId: string;
+                    configKey: string;
+                    /** Format: date */
+                    localDate: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 以原日期的冻结时间窗建立日报。 */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyReportSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    getInspectionDailyReport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+                localDate: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 汇总事实、缺口与版本。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyReportDetail"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    rerunInspectionDailyReport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+                localDate: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    clientCommandId: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 新版本已追加；旧版本保持不可变。 */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyReportSummary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getInspectionDailyReportVersion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+                localDate: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description content 是冻结的 JSON 文档字符串。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        content: string;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     listPluginInspectionPlans: {
         parameters: {
             query?: never;
