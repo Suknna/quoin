@@ -61,7 +61,7 @@ func mapDomainError(err error) *problemError {
 		switch planError.Code {
 		case "not_found":
 			status = http.StatusNotFound
-		case "plan_exists", "row_version_conflict", "command_reused":
+		case "plan_exists", "row_version_conflict", "command_reused", "config_exists", "daily_report_exists", "daily_report_not_sealed", "config_disabled":
 			status = http.StatusConflict
 		}
 		return problem(status, planError.Code, planError.Detail)
@@ -408,6 +408,7 @@ func (handler *Handler) RegisterUpgradeDrain(api huma.API) {
 // Register mounts the manual inspection routes (HTTP-INSPECT surface, T24).
 func (handler *Handler) Register(api huma.API) {
 	handler.registerPlans(api)
+	handler.registerDailyReports(api)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/runs", OperationID: "listInspectionRuns"}, handler.listRuns)
 	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/inspections/runs", OperationID: "createInspectionRun"}, handler.createRun)
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/runs/{runId}", OperationID: "getInspectionRun"}, handler.getRun)

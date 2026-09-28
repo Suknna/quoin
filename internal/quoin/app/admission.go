@@ -188,6 +188,19 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("updatePluginInspectionPlan", http.MethodPut, "/api/v1/inspections/plans/{planKey}", operations.LevelAdmin, operations.KindCommand, "inspection_plan"),
 	)
 
+	// 跨来源日报（Admin，ADR-0014）：配置管理、读模型与人工补跑/重分析。
+	add(
+		declaration("listInspectionDailyReportConfigs", http.MethodGet, "/api/v1/inspections/daily-report-configs", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
+		declaration("createInspectionDailyReportConfig", http.MethodPost, "/api/v1/inspections/daily-report-configs", operations.LevelAdmin, operations.KindCommand, "inspection_daily_report"),
+		declaration("getInspectionDailyReportConfig", http.MethodGet, "/api/v1/inspections/daily-report-configs/{configKey}", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
+		declaration("updateInspectionDailyReportConfig", http.MethodPut, "/api/v1/inspections/daily-report-configs/{configKey}", operations.LevelAdmin, operations.KindCommand, "inspection_daily_report"),
+		declaration("listInspectionDailyReports", http.MethodGet, "/api/v1/inspections/daily-reports", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
+		declaration("getInspectionDailyReport", http.MethodGet, "/api/v1/inspections/daily-reports/{configKey}/{localDate}", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
+		declaration("getInspectionDailyReportVersion", http.MethodGet, "/api/v1/inspections/daily-reports/{configKey}/{localDate}/versions/{version}", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
+		declaration("backfillInspectionDailyReport", http.MethodPost, "/api/v1/inspections/daily-reports/backfill", operations.LevelAdmin, operations.KindCommand, "inspection_daily_report"),
+		declaration("rerunInspectionDailyReport", http.MethodPost, "/api/v1/inspections/daily-reports/{configKey}/{localDate}/rerun", operations.LevelAdmin, operations.KindCommand, "inspection_daily_report"),
+	)
+
 	// 业务视图（Admin）。
 	add(
 		declaration("listBusinessViews", http.MethodGet, "/api/v1/business-views", operations.LevelSession, operations.KindQuery, "business_view"),

@@ -976,6 +976,80 @@ WHEN NOT EXISTS (
 )
 BEGIN SELECT RAISE(ABORT, 'inspection analysis requirements must bind an inspection_analysis run Attempt'); END;
 
+-- ----------------------------------------------------------------------------
+-- 7.1 跨来源日报（ADR-0014）：日报是核心的跨来源聚合，不是新的巡检计划类型。
+-- 管理员为一份日报配置时区、每天一次的本地触发时间与参与计划；触发时冻结
+-- UTC 时间窗与参与计划/来源版本快照，封存收敛为不可变日报；缺失、部分成功、
+-- 禁用与超时均显式记录 gap，绝不虚构健康。
+-- ----------------------------------------------------------------------------
+
+-- 日报配置：config_key 是跨版本稳定用户 key，退役不复用；配置行不可删除
+-- （停用即可），不破坏历史日报的引用。
+CREATE TABLE inspection_daily_report_configs (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  config_key     TEXT NOT NULL UNIQUE,  -- ^[a-z][a-z0-9-]{0,62}$，退役不复用
+  display_name   TEXT NOT NULL,
+  enabled        INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  timezone       TEXT NOT NULL,         -- 合法 IANA 名称
+  trigger_time   TEXT NOT NULL,         -- 本地 wall clock 'HH:MM'
+  plan_keys_json TEXT NOT NULL CHECK (json_valid(plan_keys_json) AND json_type(plan_keys_json) = 'array'
+                    AND json_array_length(plan_keys_json) >= 1), -- 参与计划 key，非空
+  row_version    INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  created_by     INTEGER REFERENCES users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL
+) STRICT;
+CREATE TRIGGER trg_inspection_daily_report_configs_no_delete BEFORE DELETE ON inspection_daily_report_configs
+BEGIN SELECT RAISE(ABORT, 'daily report configs are never deleted; keys are retired, not reused'); END;
+
+-- 日报身份：身份 = (config_key, local_date)。触发时冻结配置快照、UTC 窗口
+-- （本地 [00:00, 次日 00:00) 的 UTC 表示，DST 正确）与参与计划/来源版本；
+-- 封存后不可改写，人工重分析只追加版本。
+CREATE TABLE inspection_daily_reports (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  config_id          INTEGER NOT NULL REFERENCES inspection_daily_report_configs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  config_key         TEXT NOT NULL,
+  config_row_version INTEGER NOT NULL CHECK (config_row_version >= 1), -- 触发时冻结的配置版本
+  local_date         TEXT NOT NULL,      -- 'YYYY-MM-DD'，配置时区内已完整结束的自然日
+  timezone           TEXT NOT NULL,      -- 触发时冻结
+  window_start_utc   TEXT NOT NULL,      -- 冻结的 UTC 窗口起点（含）
+  window_end_utc     TEXT NOT NULL,      -- 冻结的 UTC 窗口终点（不含）
+  trigger_kind       TEXT NOT NULL CHECK (trigger_kind IN ('schedule','manual')),
+  scheduled_for      TEXT,               -- UTC 触发边界；manual 为 NULL
+  cutoff_at          TEXT NOT NULL,      -- 采证截止 = 触发 + 2h（ADR-0014）
+  contributions_json TEXT NOT NULL CHECK (json_valid(contributions_json) AND json_type(contributions_json) = 'array'),
+  state              TEXT NOT NULL CHECK (state IN ('Collecting','Sealed')),
+  sealed_at          TEXT,
+  row_version        INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+  created_at         TEXT NOT NULL,
+  UNIQUE (config_key, local_date),
+  CHECK ((trigger_kind = 'schedule' AND scheduled_for IS NOT NULL)
+      OR (trigger_kind = 'manual' AND scheduled_for IS NULL)),
+  CHECK ((state = 'Collecting' AND sealed_at IS NULL) OR (state = 'Sealed' AND sealed_at IS NOT NULL))
+) STRICT;
+CREATE INDEX idx_inspection_daily_reports_config ON inspection_daily_reports (config_key, local_date DESC);
+-- 触发时冻结的身份、窗口与贡献快照不可改写；只有 state/sealed_at/row_version
+-- 走封存转换，人工补跑不能偷换原日期窗口。
+CREATE TRIGGER trg_inspection_daily_reports_identity_immutable BEFORE UPDATE OF
+  config_id, config_key, config_row_version, local_date, timezone, window_start_utc, window_end_utc,
+  trigger_kind, scheduled_for, cutoff_at, contributions_json, created_at ON inspection_daily_reports
+BEGIN SELECT RAISE(ABORT, 'daily report identity and frozen window are immutable'); END;
+
+-- 日报版本：append-only。v1 = 到期封存；人工重分析追加新版本，绝不改写旧版本
+-- 事实（旧版本始终可读、可比较）。
+CREATE TABLE inspection_daily_report_versions (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  report_id  INTEGER NOT NULL REFERENCES inspection_daily_reports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  version    INTEGER NOT NULL CHECK (version >= 1),
+  content    TEXT NOT NULL CHECK (json_valid(content) AND length(content) BETWEEN 1 AND 4000000),
+  created_at TEXT NOT NULL,
+  UNIQUE (report_id, version)
+) STRICT;
+CREATE TRIGGER trg_inspection_daily_report_versions_immutable BEFORE UPDATE ON inspection_daily_report_versions
+BEGIN SELECT RAISE(ABORT, 'daily report versions are immutable'); END;
+CREATE TRIGGER trg_inspection_daily_report_versions_no_delete BEFORE DELETE ON inspection_daily_report_versions
+BEGIN SELECT RAISE(ABORT, 'daily report versions are append-only'); END;
+
 -- ============================================================================
 -- 7.5 来源级观测（ADR-0004）：接入即有界观测，身份 = 接入 + 对象类型 + 规范来源身份
 -- ============================================================================
