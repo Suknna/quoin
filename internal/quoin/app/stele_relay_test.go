@@ -178,7 +178,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	}
 	clientFixture := startRelayServer(t, harness.alerts, harness.connection)
 	client := relayClient(t, clientFixture, &clientFixture.steleClient)
-	body := []byte(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-1","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
+	body := []byte(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-1","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"},{"status":"firing","labels":{"alertname":"Invalid","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
 	send := func(id, kind, eventType string, payload []byte) runtimev1.EventDeliveryStatus {
 		t.Helper()
 		response, err := client.DeliverEvents(ctx, &runtimev1.DeliverEventsRequest{
@@ -258,7 +258,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_delivery_items WHERE status='identity_conflict'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("identity conflict count=%d err=%v", count, err)
 	}
-	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_delivery_items WHERE status='fingerprint_mismatch'`).Scan(&count); err != nil || count != 1 {
+	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_delivery_items WHERE status='fingerprint_mismatch'`).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("missing external identity issue count=%d err=%v", count, err)
 	}
 	var title string
