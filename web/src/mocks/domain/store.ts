@@ -6,6 +6,7 @@ import type {
 } from "../../api/generated/types";
 import type {
 	DailyReportConfig,
+	DailyReportContent,
 	DailyReportDetail,
 } from "../../features/inspection/daily";
 
@@ -426,7 +427,7 @@ function baseState(scenario: MockScenario): MockState {
 	};
 	// 跨来源日报（ADR-0014）演示边界：一份已封存（含 plan_missing 缺口事实），
 	// 一份采集中（无版本、无结论）。
-	const dailySealedContent = {
+	const dailySealedContent: DailyReportContent = {
 		schemaKind: "inspection_daily_report_v1",
 		configKey: "ops-daily",
 		localDate: "2026-09-27",
