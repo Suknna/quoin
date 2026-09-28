@@ -4737,7 +4737,7 @@ components:
               evidenceId: {type: integer, minimum: 1, description: 已提交的不可变 Evidence 定位；缺口可能没有证据。}
               measurement:
                 type: object
-                description: 从冻结 Evidence 派生的有界结构化观测摘要，不是原始平台响应。
+                description: 从冻结 Evidence 派生的有界结构化观测摘要，不是原始平台响应；逐序列条目携带标签与数值极值（min/max 及时间戳），超界序列按确定性顺序省略并标记 truncated。
                 required: [resultType, series, samples]
                 properties:
                   resultType: {type: string}
@@ -4746,6 +4746,29 @@ components:
                   firstValue: {type: string}
                   lastValue: {type: string}
                   lastAt: {$ref: '#/components/schemas/Timestamp'}
+                  truncated:
+                    type: boolean
+                    description: 为 true 表示逐序列条目超过有界上限，超出部分按确定性顺序省略（计数仍为全量）。
+                  entries:
+                    type: array
+                    description: 前 32 个序列的有界摘要（按结果数组确定性顺序）。
+                    items:
+                      type: object
+                      required: [samples]
+                      properties:
+                        labels:
+                          type: object
+                          additionalProperties: {type: string}
+                          description: 该序列的 PromQL 标签集（至多 16 个键，按键字典序）。
+                        labelsTruncated: {type: boolean}
+                        samples: {type: integer, minimum: 0}
+                        firstValue: {type: string}
+                        lastValue: {type: string}
+                        lastAt: {$ref: '#/components/schemas/Timestamp'}
+                        minValue: {type: string, description: 数值极值（仅有限浮点参与；样本值保持证据文本）。}
+                        minAt: {$ref: '#/components/schemas/Timestamp'}
+                        maxValue: {type: string}
+                        maxAt: {$ref: '#/components/schemas/Timestamp'}
     DailyReportContribution:
       type: object
       required: [planKey, enabled, sourceEnabled]

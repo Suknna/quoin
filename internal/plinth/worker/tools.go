@@ -56,7 +56,10 @@ const InspectionAnalysisAgentVersion = "inspection-analysis-v5"
 
 // InspectionDailyAnalysisAgentVersion pins the cross-source daily report
 // analysis agent generation (mirrors attempt.InspectionDailyAgentVersion).
-const InspectionDailyAnalysisAgentVersion = "inspection-daily-analysis-v1"
+// v2 is the pagination/alert-context generation: daily_report_get pages with
+// cursor/nextCursor and daily_alerts_get supplies the window-bound alert
+// context (replacing the now-anchored alerts_recent in this generation).
+const InspectionDailyAnalysisAgentVersion = "inspection-daily-analysis-v2"
 
 // KeptInspectionAnalysisAgentVersion retains the Keep-adapted
 // inspection-analysis-v3 prompt generation for already-created attempts.

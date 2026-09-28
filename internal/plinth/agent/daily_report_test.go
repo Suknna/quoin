@@ -52,18 +52,40 @@ type parsedDailyPrompt struct {
 			Name string `xml:"name,attr"`
 			Text string `xml:",chardata"`
 		} `xml:"argument"`
+		Continuation string `xml:"continuation"`
 	} `xml:"frozenDetail"`
+	AlertContext struct {
+		Tool       string `xml:"tool,attr"`
+		WindowOnly string `xml:"windowLevelOnly,attr"`
+		Arguments  []struct {
+			Name string `xml:"name,attr"`
+			Text string `xml:",chardata"`
+		} `xml:"argument"`
+		Continuation string `xml:"continuation"`
+	} `xml:"alertContext"`
 	Sources []struct {
 		PlanKey        string   `xml:"planKey,attr"`
 		ConnectionName string   `xml:"connection,attr"`
 		Status         string   `xml:"status,attr"`
 		GapReasons     []string `xml:"gapReason"`
 		Checks         []struct {
-			Key        string `xml:"key,attr"`
-			RunID      int    `xml:"runId,attr"`
-			Status     string `xml:"status,attr"`
-			ObservedAt string `xml:"observedAt,attr"`
-			GapReason  string `xml:"gapReason"`
+			Key         string `xml:"key,attr"`
+			RunID       int    `xml:"runId,attr"`
+			Status      string `xml:"status,attr"`
+			ObservedAt  string `xml:"observedAt,attr"`
+			GapReason   string `xml:"gapReason"`
+			Measurement struct {
+				ResultType string `xml:"resultType,attr"`
+				Series     int    `xml:"series,attr"`
+				Truncated  string `xml:"truncated,attr"`
+				Entries    []struct {
+					Labels string `xml:"labels,attr"`
+					Min    string `xml:"min,attr"`
+					MinAt  string `xml:"minAt,attr"`
+					Max    string `xml:"max,attr"`
+					MaxAt  string `xml:"maxAt,attr"`
+				} `xml:"series"`
+			} `xml:"measurement"`
 		} `xml:"check"`
 	} `xml:"provenance>source"`
 	Instructions struct {
@@ -122,6 +144,25 @@ func TestDailyReportPromptEscapesAdversarialValuesAndStaysWellFormed(t *testing.
 	if arguments["configKey"] != "core-daily" || arguments["localDate"] != "2026-09-27" || arguments["version"] != "2" {
 		t.Fatalf("tool arguments = %+v", arguments)
 	}
+	// (a2) 分页续读指令与告警上下文的精确参数：XML 必须告诉模型下一次调
+	// 用怎么传，直到取全才允许总结。
+	if parsed.FrozenDetail.Continuation == "" || !strings.Contains(parsed.FrozenDetail.Continuation, "nextCursor") || !strings.Contains(parsed.FrozenDetail.Continuation, "cursor") {
+		t.Fatalf("frozen detail must carry the pagination continuation: %q", parsed.FrozenDetail.Continuation)
+	}
+	if parsed.AlertContext.Tool != "daily_alerts_get" || parsed.AlertContext.WindowOnly != "true" {
+		t.Fatalf("alert context tool attrs = %+v", parsed.AlertContext)
+	}
+	alertArguments := map[string]string{}
+	for _, argument := range parsed.AlertContext.Arguments {
+		alertArguments[argument.Name] = argument.Text
+	}
+	if alertArguments["configKey"] != "core-daily" || alertArguments["localDate"] != "2026-09-27" || alertArguments["version"] != "2" ||
+		alertArguments["offset"] != "0" || alertArguments["limit"] != "50" {
+		t.Fatalf("alert context arguments = %+v", alertArguments)
+	}
+	if !strings.Contains(parsed.AlertContext.Continuation, "hasMore") || !strings.Contains(parsed.AlertContext.Continuation, "sourceKey") {
+		t.Fatalf("alert context must carry exact paging and attribution boundary: %q", parsed.AlertContext.Continuation)
+	}
 	// (b) 对抗值不破坏文档且可回读：控制字符被剔除，标记字符被转义还原。
 	if len(parsed.Sources) != 1 {
 		t.Fatalf("sources = %+v", parsed.Sources)
@@ -142,9 +183,52 @@ func TestDailyReportPromptEscapesAdversarialValuesAndStaysWellFormed(t *testing.
 	if !strings.Contains(parsed.Instructions.Expected.Text, "日报总结") || !strings.Contains(parsed.Instructions.Expected.Text, "evidenceId") {
 		t.Fatalf("default expectation missing: %q", parsed.Instructions.Expected.Text)
 	}
-	// 系统提示钉住工具事实来源与禁编造行为。
-	if !strings.Contains(messages[0].Content, "daily_report_get") || !strings.Contains(messages[0].Content, "不得编造") {
+	// 系统提示钉住工具事实来源、分页取全义务与禁编造行为。
+	if !strings.Contains(messages[0].Content, "daily_report_get") || !strings.Contains(messages[0].Content, "不得编造") ||
+		!strings.Contains(messages[0].Content, "daily_alerts_get") || !strings.Contains(messages[0].Content, "直到 nextCursor 为 null") {
 		t.Fatalf("system prompt = %q", messages[0].Content)
+	}
+}
+
+// TestDailyReportPromptRendersSeriesMeasurementEntries 钉住逐序列测量摘
+// 要的渲染：中间序列的标签与数值极值（min/max 及其时间戳）必须逐字可回
+// 读，截断标记诚实呈现，任意标签值不破坏良构性。
+func TestDailyReportPromptRendersSeriesMeasurementEntries(t *testing.T) {
+	input := dailyReportTestInput()
+	input.Sources[0].Checks = input.Sources[0].Checks[:1]
+	input.Sources[0].Checks[0].Status = "ok"
+	input.Sources[0].Checks[0].Measurement = &agentcontext.DailyMeasurement{
+		ResultType: "vector", Series: 3, Samples: 3,
+		FirstValue: ptrString("0.4"), LastValue: ptrString("9.9"), LastAt: ptrString("1790000002"),
+		Truncated: true,
+		Entries: []agentcontext.DailyMeasurementSeriesEntry{
+			{Labels: map[string]string{"job": "quoin", "instance": "a"}, Samples: 1,
+				FirstValue: ptrString("0.4"), LastValue: ptrString("0.4"), LastAt: ptrString("1790000000"),
+				MinValue: ptrString("0.4"), MinAt: ptrString("1790000000"), MaxValue: ptrString("0.4"), MaxAt: ptrString("1790000000")},
+			{Labels: map[string]string{"job": "quoin, special", "instance": "b<1>"}, Samples: 1,
+				LastValue: ptrString("9.9"), LastAt: ptrString("1790000001"),
+				MaxValue: ptrString("9.9"), MaxAt: ptrString("1790000001")},
+		},
+	}
+	messages, err := BuildDailyReportMessages(input)
+	if err != nil {
+		t.Fatalf("render daily prompt: %v", err)
+	}
+	parsed := parseDailyPrompt(t, messages[1].Content)
+	measurement := parsed.Sources[0].Checks[0].Measurement
+	if measurement.ResultType != "vector" || measurement.Series != 3 || measurement.Truncated != "true" {
+		t.Fatalf("measurement attrs = %+v", measurement)
+	}
+	if len(measurement.Entries) != 2 {
+		t.Fatalf("series entries = %+v", measurement.Entries)
+	}
+	first, spike := measurement.Entries[0], measurement.Entries[1]
+	if first.Labels != "instance=a,job=quoin" || first.Min != "0.4" || first.Max != "0.4" || first.MinAt != "1790000000" {
+		t.Fatalf("first entry = %+v", first)
+	}
+	// 标签值里的逗号与标记符号被转义还原，不破坏良构性也不丢失原文。
+	if spike.Labels != "instance=b<1>,job=quoin, special" || spike.Max != "9.9" || spike.MaxAt != "1790000001" {
+		t.Fatalf("spike entry = %+v", spike)
 	}
 }
 

@@ -16,8 +16,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"math"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -991,17 +994,32 @@ func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, 
 
 // dailyMeasurementFromEvidence derives the bounded measurement summary of one
 // committed Evidence result. The committed vocabulary is the shared PromQL
-// shape (vector/matrix); an unknown shape is summarised honestly as its type
-// alone — no values are invented.
-func dailyMeasurementFromEvidence(evidenceID int64, checkKey, resultJSON string) (*agentcontext.DailyMeasurement, error) {
-	var failure error
+// shape (vector/matrix/scalar/string); an unknown shape is summarised
+// honestly as its type alone — no values are invented. Per-series entries
+// carry the label set and numeric extremes (min/max with timestamps) so a
+// middle-series anomaly stays analyzable; series beyond the entry bound are
+// deterministically omitted and marked truncated.
+//
+// The recover guard is only real because the results are NAMED: a recovered
+// panic overwrites both named results, so the caller sees a typed error —
+// never the silent (nil, nil) success an unnamed-return local would produce.
+func dailyMeasurementFromEvidence(evidenceID int64, checkKey, resultJSON string) (measurement *agentcontext.DailyMeasurement, failure error) {
 	defer func() {
-		// json.Unmarshal on plugin-validated payloads cannot panic; the guard
-		// keeps a malformed document from escalating beyond a typed error.
 		if recovered := recover(); recovered != nil {
-			failure = fmt.Errorf("evidence %d check %s measurement projection failed", evidenceID, checkKey)
+			measurement, failure = nil, fmt.Errorf("evidence %d check %s measurement projection failed", evidenceID, checkKey)
 		}
 	}()
+	return dailyMeasurementProject(evidenceID, checkKey, resultJSON)
+}
+
+// dailyMeasurementProject is the pure parse-and-fold of one evidence result.
+// It is split from the recover boundary so tests can exercise that boundary
+// with an injected panic — JSON bytes alone cannot panic the parser, and an
+// untestable guard is exactly how the silent (nil, nil) regression slipped
+// through. Tests substitute it only around the boundary exercise.
+var dailyMeasurementProject = dailyMeasurementProjectOn
+
+func dailyMeasurementProjectOn(evidenceID int64, checkKey, resultJSON string) (*agentcontext.DailyMeasurement, error) {
 	var payload struct {
 		ResultType string          `json:"resultType"`
 		Result     json.RawMessage `json:"result"`
@@ -1010,51 +1028,132 @@ func dailyMeasurementFromEvidence(evidenceID int64, checkKey, resultJSON string)
 		return nil, fmt.Errorf("evidence %d check %s result is malformed: %w", evidenceID, checkKey, err)
 	}
 	measurement := &agentcontext.DailyMeasurement{ResultType: payload.ResultType}
+	fold := func(entry *agentcontext.DailyMeasurementSeriesEntry, timestamp, value json.RawMessage) {
+		sample := dailySampleText(value)
+		entry.Samples++
+		measurement.Samples++
+		if measurement.FirstValue == nil {
+			first := sample
+			measurement.FirstValue = &first
+		}
+		last := sample
+		lastAt := string(timestamp)
+		entry.FirstValue = firstOrNil(entry.FirstValue, sample)
+		entry.LastValue, entry.LastAt = &last, &lastAt
+		measurement.LastValue, measurement.LastAt = &last, &lastAt
+		// 数值极值只在有限浮点时跟踪（NaN/+Inf/-Inf 不构成可比较的极值，
+		// 仍作为首末值原样可见）；平局保留首次出现，保证确定性。
+		if number, err := strconv.ParseFloat(sample, 64); err == nil && !math.IsNaN(number) && !math.IsInf(number, 0) {
+			minAt, maxAt := string(timestamp), string(timestamp)
+			if entry.MinValue == nil || number < dailyMeasurementNumber(entry.MinValue) {
+				entry.MinValue, entry.MinAt = &sample, &minAt
+			}
+			if entry.MaxValue == nil || number > dailyMeasurementNumber(entry.MaxValue) {
+				entry.MaxValue, entry.MaxAt = &sample, &maxAt
+			}
+		}
+	}
 	switch payload.ResultType {
 	case "vector":
 		var series []struct {
-			Value [2]json.RawMessage `json:"value"`
+			Metric map[string]string  `json:"metric"`
+			Value  [2]json.RawMessage `json:"value"`
 		}
 		if err := json.Unmarshal(payload.Result, &series); err != nil {
 			return nil, fmt.Errorf("evidence %d check %s vector result is malformed: %w", evidenceID, checkKey, err)
 		}
 		measurement.Series = len(series)
-		for _, item := range series {
-			measurement.Samples++
-			value := string(item.Value[1])
-			if measurement.FirstValue == nil {
-				first := value
-				measurement.FirstValue = &first
+		for index, item := range series {
+			entry := dailySeriesEntry(item.Metric)
+			fold(&entry, item.Value[0], item.Value[1])
+			if index < agentcontext.DailyMeasurementEntryBound {
+				measurement.Entries = append(measurement.Entries, entry)
 			}
-			last := value
-			timestamp := string(item.Value[0])
-			measurement.LastValue, measurement.LastAt = &last, &timestamp
 		}
+		measurement.Truncated = len(series) > agentcontext.DailyMeasurementEntryBound
 	case "matrix":
 		var series []struct {
+			Metric map[string]string   `json:"metric"`
 			Values [][]json.RawMessage `json:"values"`
 		}
 		if err := json.Unmarshal(payload.Result, &series); err != nil {
 			return nil, fmt.Errorf("evidence %d check %s matrix result is malformed: %w", evidenceID, checkKey, err)
 		}
 		measurement.Series = len(series)
-		for _, item := range series {
-			for index, sample := range item.Values {
+		for index, item := range series {
+			entry := dailySeriesEntry(item.Metric)
+			for _, sample := range item.Values {
 				if len(sample) != 2 {
 					continue
 				}
-				measurement.Samples++
-				if index == 0 && measurement.FirstValue == nil {
-					first := string(sample[1])
-					measurement.FirstValue = &first
-				}
-				last := string(sample[1])
-				timestamp := string(sample[0])
-				measurement.LastValue, measurement.LastAt = &last, &timestamp
+				fold(&entry, sample[0], sample[1])
+			}
+			if index < agentcontext.DailyMeasurementEntryBound {
+				measurement.Entries = append(measurement.Entries, entry)
 			}
 		}
+		measurement.Truncated = len(series) > agentcontext.DailyMeasurementEntryBound
+	case "scalar", "string":
+		// 标量/字符串结果是单个 [timestamp, value] 样本：同样折叠进一条
+		// 无标签条目，值不再丢失。
+		var sample [2]json.RawMessage
+		if err := json.Unmarshal(payload.Result, &sample); err != nil {
+			return nil, fmt.Errorf("evidence %d check %s %s result is malformed: %w", evidenceID, checkKey, payload.ResultType, err)
+		}
+		measurement.Series = 1
+		entry := agentcontext.DailyMeasurementSeriesEntry{}
+		fold(&entry, sample[0], sample[1])
+		measurement.Entries = append(measurement.Entries, entry)
 	}
-	return measurement, failure
+	return measurement, nil
+}
+
+// dailySampleText 提取样本值的纯文本：Prometheus 语义把样本值编码为 JSON
+// 字符串（为了携带 NaN/+Inf），投影必须剥掉编码引号——模型看到的是值本身
+// （0.4、NaN），不是 JSON 字面量（"0.4"）；非字符串字面量（数值时间戳）
+// 原样保留。
+func dailySampleText(value json.RawMessage) string {
+	var text string
+	if err := json.Unmarshal(value, &text); err == nil {
+		return text
+	}
+	return string(value)
+}
+
+// dailySeriesEntry bounds one series' label set: keys beyond the label bound
+// are dropped in deterministic key order and marked.
+func dailySeriesEntry(labels map[string]string) agentcontext.DailyMeasurementSeriesEntry {
+	entry := agentcontext.DailyMeasurementSeriesEntry{}
+	if len(labels) == 0 {
+		return entry
+	}
+	keys := slices.Sorted(maps.Keys(labels))
+	entry.LabelsTruncated = len(keys) > agentcontext.DailyMeasurementLabelBound
+	if entry.LabelsTruncated {
+		keys = keys[:agentcontext.DailyMeasurementLabelBound]
+	}
+	entry.Labels = make(map[string]string, len(keys))
+	for _, key := range keys {
+		entry.Labels[key] = labels[key]
+	}
+	return entry
+}
+
+func firstOrNil(existing *string, value string) *string {
+	if existing != nil {
+		return existing
+	}
+	return &value
+}
+
+// dailyMeasurementNumber re-parses a previously accepted numeric sample;
+// the projection only stores values that parsed once, so this cannot fail.
+func dailyMeasurementNumber(value *string) float64 {
+	number, err := strconv.ParseFloat(*value, 64)
+	if err != nil {
+		return math.NaN()
+	}
+	return number
 }
 
 // CreateManualDailyReport is the bounded manual backfill (漏过的整日人工补跑):

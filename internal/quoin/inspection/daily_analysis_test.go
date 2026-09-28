@@ -104,7 +104,7 @@ func TestDailyAnalysisQueuesAfterSealAndRetriesWithoutModel(t *testing.T) {
 	if err := h.db.QueryRow(`SELECT state,agent_version FROM execution_attempts WHERE id=?`, attemptID).Scan(&state, &agentVersion); err != nil {
 		t.Fatal(err)
 	}
-	if state != "Queued" || agentVersion != "inspection-daily-analysis-v1" {
+	if state != "Queued" || agentVersion != "inspection-daily-analysis-v2" {
 		t.Fatalf("analysis attempt = %s/%s", state, agentVersion)
 	}
 	var schemaKind string
@@ -237,6 +237,12 @@ func TestDailyAnalysisFrozenCatalogCarriesNoLivePlatformTool(t *testing.T) {
 	}
 	if !strings.Contains(catalog, "daily_report_get") {
 		t.Fatal("daily analysis frozen catalog must carry the frozen-facts retrieval tool")
+	}
+	if !strings.Contains(catalog, "daily_alerts_get") {
+		t.Fatal("daily analysis frozen catalog must carry the window-bound alert context tool")
+	}
+	if strings.Contains(catalog, "alerts_recent") {
+		t.Fatal("daily analysis must use the frozen-window alert tool, not the now-anchored alerts_recent")
 	}
 }
 
