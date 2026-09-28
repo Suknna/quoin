@@ -49,6 +49,16 @@ func TestEventSourceConfigSchemaMustBeClosed(t *testing.T) {
 		"nested secret property":   {"type": "object", "additionalProperties": false, "properties": map[string]any{"retries": map[string]any{"type": "integer"}, "nested": map[string]any{"type": "object", "properties": map[string]any{"password": map[string]any{"type": "string"}}}}},
 		"top-level token property": {"type": "object", "additionalProperties": false, "properties": map[string]any{"token": map[string]any{"type": "string"}}},
 		"api key variant":          {"type": "object", "additionalProperties": false, "properties": map[string]any{"api_key": map[string]any{"type": "string"}}},
+		"referenced secret field": {"type": "object", "additionalProperties": false,
+			"properties": map[string]any{"options": map[string]any{"$ref": "#/$defs/options"}},
+			"$defs": map[string]any{"options": map[string]any{"type": "object", "additionalProperties": false,
+				"properties": map[string]any{"password": map[string]any{"type": "string"}}}}},
+		"nested open object": {"type": "object", "additionalProperties": false,
+			"properties": map[string]any{"options": map[string]any{"type": "object", "additionalProperties": true}}},
+		"pattern-based secret": {"type": "object", "additionalProperties": false,
+			"patternProperties": map[string]any{".*": map[string]any{"type": "string"}}},
+		"opaque external ref": {"type": "object", "additionalProperties": false,
+			"properties": map[string]any{"options": map[string]any{"$ref": "https://example.test/remote.json"}}},
 	} {
 		registry := plugins.NewRegistry()
 		err := registry.Register(plugins.Plugin{
@@ -60,6 +70,19 @@ func TestEventSourceConfigSchemaMustBeClosed(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s: unclosed or secret-carrying schema accepted", name)
 		}
+	}
+}
+
+func TestEventSourceConfigAcceptsClosedNestedSettings(t *testing.T) {
+	registry := sourceSettingsRegistry(t, map[string]any{
+		"type": "object", "additionalProperties": false,
+		"properties": map[string]any{"options": map[string]any{
+			"type": "object", "additionalProperties": false,
+			"properties": map[string]any{"region": map[string]any{"type": "string"}},
+		}},
+	})
+	if err := registry.ValidateEventSourceConfig("settings-plugin", []byte(`{"options":{"region":"eu"}}`)); err != nil {
+		t.Fatalf("closed nested non-secret settings rejected: %v", err)
 	}
 }
 

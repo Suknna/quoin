@@ -146,12 +146,24 @@ func validateClosedSettingsSchema(pluginID, role string, schema map[string]any) 
 	return nil
 }
 
-// rejectSecretSchemaFields walks the schema (properties, items, additional
-// properties subschemas, oneOf/anyOf/allOf branches) and rejects any object
-// property whose name is in forbiddenSettingsFields.
+// rejectSecretSchemaFields walks every nested schema shape. References and
+// pattern-driven/open object keys cannot prove the no-secret guarantee at
+// registration, so they fail closed instead of delegating that check to a
+// runtime JSON Schema compiler which correctly resolves them but does not
+// enforce our separate security vocabulary.
 func rejectSecretSchemaFields(pluginID, role, path string, node any) error {
 	switch value := node.(type) {
 	case map[string]any:
+		for _, keyword := range []string{"$ref", "$dynamicRef", "patternProperties", "unevaluatedProperties"} {
+			if _, ok := value[keyword]; ok {
+				return fmt.Errorf("%w: plugin %s %s schema cannot prove secret-free fields through %s.%s", ErrInvalidPlugin, pluginID, role, path, keyword)
+			}
+		}
+		if value["type"] == "object" || value["properties"] != nil {
+			if value["additionalProperties"] != false {
+				return fmt.Errorf("%w: plugin %s %s schema must close object at %s", ErrInvalidPlugin, pluginID, role, path)
+			}
+		}
 		if properties, ok := value["properties"].(map[string]any); ok {
 			names := make([]string, 0, len(properties))
 			for name := range properties {
@@ -167,20 +179,16 @@ func rejectSecretSchemaFields(pluginID, role, path string, node any) error {
 				}
 			}
 		}
-		for _, key := range []string{"items", "additionalProperties", "not", "contains", "if", "then", "else"} {
-			if sub, ok := value[key]; ok {
-				if err := rejectSecretSchemaFields(pluginID, role, path+"."+key, sub); err != nil {
-					return err
-				}
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			if key != "properties" {
+				keys = append(keys, key)
 			}
 		}
-		for _, key := range []string{"oneOf", "anyOf", "allOf", "prefixItems"} {
-			if branches, ok := value[key].([]any); ok {
-				for index, branch := range branches {
-					if err := rejectSecretSchemaFields(pluginID, role, fmt.Sprintf("%s.%s[%d]", path, key, index), branch); err != nil {
-						return err
-					}
-				}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if err := rejectSecretSchemaFields(pluginID, role, path+"."+key, value[key]); err != nil {
+				return err
 			}
 		}
 	case []any:

@@ -253,12 +253,13 @@ ConfigValidator`（纯函数、无 I/O）。
 同时拥有 EventSource 与 ConnectionKind 的插件可声明两套互不相关的实例设置：
 `EventSourceConfigSchema` 是告警来源实例设置（`alert_sources.settings_json`，ADR-0014
 story 2）的封闭 schema——它绝不复用/覆盖 `ConfigSchema`（连接 revision 的权威）。规则与
-连接侧一致：顶层 object、`additionalProperties: false`（注册期强制）、任意深度的属性名
-禁入 password/bearerToken/apiKey/token/secret、文档上界 64KiB；跨字段静态规则可实现
+连接侧一致：顶层与所有嵌套 object 均须 `additionalProperties: false`（注册期强制）、任意深度的属性名
+禁入 password/bearerToken/apiKey/token/secret、文档上界 64KiB；`$ref`/`$dynamicRef`、
+`patternProperties`、`unevaluatedProperties` 不被接受，防止动态键绕过封闭性。跨字段静态规则可实现
 `EventSourceValidator`。Quoin 在创建来源（create 请求的 `settings`）与更新设置
 （`POST /api/v1/alert-sources/{sourceKey}/settings`，携 clientCommandId +
 expectedRowVersion）时校验并 canonical 化落库；设置写入不改变交付身份，并推进全局单调
-`settings_version` 使凭据快照版本失效——Stele 下次刷新即换新文档与版本。已入队事件在
+`settings_version`；SQLite 同事务推进独立的 `alert_snapshot_epoch`，Stele 下次刷新即换新文档与版本。已入队事件在
 接受时刻冻结快照版本，投递按该版本归因，设置变更不重解释或拒绝已入队事件；插件在
 `req.Settings` 里拿到的永远是命中实例、已校验的非秘密文档。未声明 schema 的来源只接受
 空文档 `{}`。
