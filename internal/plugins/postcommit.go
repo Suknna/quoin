@@ -15,6 +15,7 @@ package plugins
 import (
 	"context"
 	"fmt"
+	"sort"
 )
 
 // The finite post-commit fact vocabulary (ADR-0014). A subscription naming
@@ -112,7 +113,9 @@ func (r *Registry) PostCommitSubscribers(eventType string, enabledIDs []string) 
 		enabled[id] = true
 	}
 	var subscribers []PostCommitSubscriberEntry
-	for _, id := range r.order {
+	ids := append([]string(nil), r.order...)
+	sort.Strings(ids)
+	for _, id := range ids {
 		plugin := r.plugins[id]
 		if !enabled[id] || plugin.PostCommitHandler == nil {
 			continue

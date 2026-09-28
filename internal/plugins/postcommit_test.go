@@ -96,13 +96,13 @@ func TestPostCommitSubscribersResolveEnabledInStableOrder(t *testing.T) {
 	first := &stubHandler{}
 	second := &stubHandler{}
 	for _, plugin := range []Plugin{
+		testPluginWithSubscriptions("gamma-sub", []PostCommitSubscription{{EventType: FactAlertObservationCommitted}}, &stubHandler{}),
+		testPluginWithSubscriptions("beta-sub", []PostCommitSubscription{{EventType: FactAlertObservationCommitted}}, second),
 		// One plugin subscribing to two fact types resolves under both.
 		testPluginWithSubscriptions("alpha-sub", []PostCommitSubscription{
 			{EventType: FactAlertObservationCommitted},
 			{EventType: FactInspectionReportSealed},
 		}, first),
-		testPluginWithSubscriptions("beta-sub", []PostCommitSubscription{{EventType: FactAlertObservationCommitted}}, second),
-		testPluginWithSubscriptions("gamma-sub", []PostCommitSubscription{{EventType: FactAlertObservationCommitted}}, &stubHandler{}),
 	} {
 		if err := registry.Register(plugin); err != nil {
 			t.Fatalf("register %s: %v", plugin.ID, err)

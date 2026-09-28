@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
+	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	_ "modernc.org/sqlite"
 )
 
@@ -31,6 +31,13 @@ type recordingSubscriber struct {
 	facts       []plugins.PostCommitFact
 	failFirst   int
 	failWith    error
+}
+
+func TestPublisherRejectsMissingAuthorityTransaction(t *testing.T) {
+	publisher := NewPublisher(plugins.NewRegistry(), nil)
+	if _, err := publisher.Emit(context.Background(), nil, Fact{Type: plugins.FactAlertObservationCommitted}); err == nil {
+		t.Fatal("configured publisher silently discarded a fact outside the authority transaction")
+	}
 }
 
 func (subscriber *recordingSubscriber) HandlePostCommitFact(_ context.Context, fact plugins.PostCommitFact) error {

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -420,10 +421,18 @@ type httpProbeObservation struct {
 // 明形状的 GET 请求经 Stele 网关出向（凭证注入、限流、传输都在网关），任何
 // 状态码都是传输成功，语义（是否等于期望状态）由调用方裁决。
 func (service *RuntimeService) runReadOnlyHTTPProbe(ctx context.Context, contract plugins.HTTPProbeContract, conn localConnection) httpProbeObservation {
+	parsed, err := url.ParseRequestURI(contract.Path)
+	if err != nil || parsed.Host != "" || parsed.Scheme != "" {
+		return httpProbeObservation{status: 0, err: errors.New("frozen HTTP probe path is invalid")}
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return httpProbeObservation{status: 0, err: errors.New("frozen HTTP probe query is invalid")}
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, httpProbeTimeout)
 	defer cancel()
 	response, err := newLocalProbeCaller(service, conn).Call(probeCtx, plugins.PlatformRequest{
-		Method: contract.Method, Path: contract.Path, Timeout: httpProbeTimeout,
+		Method: contract.Method, Path: parsed.EscapedPath(), Query: query, Timeout: httpProbeTimeout,
 	})
 	if err != nil {
 		return httpProbeObservation{status: 0, err: err}

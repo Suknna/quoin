@@ -65,6 +65,10 @@ func TestHTTPConnectionKindDeclarationValidation(t *testing.T) {
 		{"relative probe path", httpKindPluginWithProbe("p", "k", "health"), "must be absolute"},
 		{"oversized probe path", httpKindPluginWithProbe("p", "k", "/"+strings.Repeat("a", 2049)), "exceeds 2048 bytes"},
 		{"probe path with space", httpKindPluginWithProbe("p", "k", "/hea lth"), "printable ASCII"},
+		{"probe path with raw Unicode", httpKindPluginWithProbe("p", "k", "/检查"), "printable ASCII"},
+		{"network-path probe", httpKindPluginWithProbe("p", "k", "//internal/health"), "configured connection endpoint"},
+		{"probe fragment", httpKindPluginWithProbe("p", "k", "/health#internal"), "configured connection endpoint"},
+		{"bad query escape", httpKindPluginWithProbe("p", "k", "/health?mode=%GG"), "invalid HTTP probe"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {

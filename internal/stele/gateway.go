@@ -480,6 +480,10 @@ func platformHTTPClient(config revisionConfig) (*http.Client, error) {
 	return &http.Client{
 		Transport: &http.Transport{TLSClientConfig: tlsConfig},
 		Timeout:   gatewayMaxTimeout,
+		// The configured connection endpoint is the sole outbound authority.
+		// A platform-controlled redirect must never move a credential-bearing
+		// request to another host (or to an internal address).
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}, nil
 }
 

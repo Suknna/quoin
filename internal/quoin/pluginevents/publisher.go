@@ -17,6 +17,7 @@ package pluginevents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -101,8 +102,11 @@ type persistedRefs struct {
 // Emit never performs I/O beyond the transaction and never blocks on a
 // subscriber: delivery happens strictly after the commit.
 func (publisher *Publisher) Emit(ctx context.Context, tx execution.Executor, fact Fact) (int64, error) {
-	if publisher == nil || publisher.registry == nil || tx == nil {
+	if publisher == nil {
 		return 0, nil
+	}
+	if publisher.registry == nil || tx == nil {
+		return 0, errors.New("pluginevents: publisher requires a registry and authority transaction")
 	}
 	if !plugins.ValidPostCommitFactType(fact.Type) {
 		return 0, fmt.Errorf("pluginevents: fact type %q is outside the frozen vocabulary", fact.Type)

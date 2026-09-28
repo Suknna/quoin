@@ -45,8 +45,12 @@ func stubLocalProbeCaller(t *testing.T, fake *fakeProbeCaller) {
 
 // newSyntheticProbeFixture 播种一个 synth-http 连接（禁用）及其 Queued 探测
 // attempt，kinds 走真实冻结注册表（插件声明 GET /health 期望 200）。
-func newSyntheticProbeFixture(t *testing.T) (*sql.DB, *RuntimeService, int64) {
+func newSyntheticProbeFixture(t *testing.T, path ...string) (*sql.DB, *RuntimeService, int64) {
 	t.Helper()
+	probePath := "/health"
+	if len(path) > 0 {
+		probePath = path[0]
+	}
 	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/synth-probe.db?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
@@ -78,12 +82,22 @@ func newSyntheticProbeFixture(t *testing.T) (*sql.DB, *RuntimeService, int64) {
 	registry := plugins.NewRegistry()
 	if err := registry.Register(plugins.Plugin{ID: "synthmetrics", Version: "1", DefaultEnabled: true,
 		ConnectionKind: "synth-http", ConnectionTransport: plugins.ConnectionTransportHTTP,
-		ConnectionAuthModes: []string{plugins.AuthModeNone}, ConnectionProbePath: "/health"}); err != nil {
+		ConnectionAuthModes: []string{plugins.AuthModeNone}, ConnectionProbePath: probePath}); err != nil {
 		t.Fatal(err)
 	}
 	conns.SetConnectionKinds(registry.ConnectionKindView())
 	service := NewRuntimeControl(qruntime.NewService(), "test", conns, db)
 	return db, service, 5
+}
+
+func TestLocalHTTPProbeSplitsDeclaredQueryFromGatewayPath(t *testing.T) {
+	fake := &fakeProbeCaller{status: 200}
+	stubLocalProbeCaller(t, fake)
+	_, service, _ := newSyntheticProbeFixture(t, "/health?mode=read-only")
+	service.runLocalExecutionPass(context.Background())
+	if len(fake.requests) != 1 || fake.requests[0].Path != "/health" || fake.requests[0].Query.Get("mode") != "read-only" {
+		t.Fatalf("probe query was not sent through the gateway query field: %+v", fake.requests)
+	}
 }
 
 func TestLocalHTTPProbePassedResultOverFakeGateway(t *testing.T) {

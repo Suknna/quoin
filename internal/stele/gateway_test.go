@@ -68,6 +68,34 @@ func newPlatform(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 	return server
 }
 
+func TestPlatformHTTPClientNeverFollowsPlatformRedirects(t *testing.T) {
+	var redirected atomic.Int64
+	other := newPlatform(t, func(writer http.ResponseWriter, _ *http.Request) {
+		redirected.Add(1)
+		writer.WriteHeader(http.StatusOK)
+	})
+	entry := newPlatform(t, func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, other.URL+"/internal", http.StatusFound)
+	})
+	client, err := platformHTTPClient(revisionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodGet, entry.URL+"/probe", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer test-secret")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusFound || redirected.Load() != 0 {
+		t.Fatalf("redirect escaped configured endpoint: status=%d targetRequests=%d", response.StatusCode, redirected.Load())
+	}
+}
+
 // acquireResponse 组装一份 Acquire 响应（MetricsConfig 形状 + secret）。
 func acquireResponse(connectionID, revision int64, baseURL, authType, username, password, bearer string) *runtimev1.AcquireConnectionCredentialResponse {
 	return &runtimev1.AcquireConnectionCredentialResponse{

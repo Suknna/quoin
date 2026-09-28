@@ -12,7 +12,9 @@ package plugins
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -36,7 +38,7 @@ var reservedConnectionKinds = map[string]bool{"model_provider": true}
 
 // HTTPProbeContract is the frozen, bounded read-only probe contract of one
 // trusted HTTP connection kind: one GET request against a declared absolute
-// path, expected to answer with a single declared 2xx status. The contract is
+// path, expected to answer with HTTP 200. The contract is
 // compiled plugin declaration (never instance configuration); Quoin freezes
 // it into every probe attempt of the kind and executes it through the generic
 // gateway, so enabling a connection always rests on a real bounded request.
@@ -47,7 +49,7 @@ type HTTPProbeContract struct {
 	// Path is the absolute request path (starts with "/", may carry a query
 	// string, no spaces or control characters).
 	Path string
-	// ExpectStatus is the single 2xx status the probe treats as success.
+	// ExpectStatus is HTTP 200 for the current probe vocabulary.
 	ExpectStatus int
 }
 
@@ -92,8 +94,18 @@ func validateProbePath(plugin Plugin) error {
 	if path[0] != '/' {
 		return fmt.Errorf("%w: %s connection probe path %q must be absolute (start with '/')", ErrInvalidPlugin, plugin.ID, path)
 	}
+	if strings.HasPrefix(path, "//") || strings.ContainsAny(path, "#\\") {
+		return fmt.Errorf("%w: %s probe path must stay on the configured connection endpoint", ErrInvalidPlugin, plugin.ID)
+	}
+	parsed, err := url.ParseRequestURI(path)
+	if err != nil || parsed.Host != "" || parsed.Scheme != "" {
+		return fmt.Errorf("%w: %s declares an invalid HTTP probe path", ErrInvalidPlugin, plugin.ID)
+	}
+	if _, err := url.ParseQuery(parsed.RawQuery); err != nil {
+		return fmt.Errorf("%w: %s declares an invalid HTTP probe query", ErrInvalidPlugin, plugin.ID)
+	}
 	for i := 0; i < len(path); i++ {
-		if path[i] <= 0x20 || path[i] == 0x7f {
+		if path[i] <= 0x20 || path[i] >= 0x7f {
 			return fmt.Errorf("%w: %s connection probe path must be printable ASCII without spaces or control characters", ErrInvalidPlugin, plugin.ID)
 		}
 	}

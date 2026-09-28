@@ -40,11 +40,17 @@ func init() {
         ID: "myplatform", Version: "1",
         DisplayName: "My Platform", Description: "……",
         ConnectionKind: "myplatform",   // 插件绑定的外部平台类型
+        ConnectionTransport: plugins.ConnectionTransportHTTP,
+        ConnectionAuthModes: []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
+        ConnectionProbePath: "/health?scope=read-only", // 可选；GET、只接受 HTTP 200
         DefaultEnabled: false,
         ConfigSchema:   myConfigSchema, // 实例设置的封闭 JSON Schema（draft 2020-12）
         EventSource:    mySource{},     // 可选：入向能力
         EventTypes:     []string{"alerts.batch"}, // 入向类型必须显式声明
         AlertIdentity:  plugins.AlertIdentityExternal, // 告警来源选一种固定身份模式
+        AlertNormalizer: myAlertNormalizer{}, // 与告警身份模式一起声明
+        PostCommitSubscriptions: []plugins.PostCommitSubscription{{EventType: plugins.FactAlertObservationCommitted}},
+        PostCommitHandler: mySubscriber{}, // 可选；声明与处理器必须同时提供
         Tools:          myTools{},      // 可选：出向能力
         // 可选声明目录（调度器消费，执行走内部工具）：
         // DiscoverObjects / InspectionTemplates
@@ -87,6 +93,27 @@ Quoin 同样在接收时复核。声明一个新类型不等于核心已有其�
 编译入站清单指纹会在 Stele→Quoin 的快照/投递 RPC 上交叉校验；改动事件契约时应
 更新插件 Version，并同批替换两宿主镜像。在更换载荷版本前先排空 Stele 本地队列，
 因为旧排队事件尚无逐条 payload version 可供新消费者迁移。
+
+## 提交后事件订阅
+
+插件只能声明 `internal/plugins/postcommit.go` 列出的有限事实类型：告警观察提交、
+日报窗口到期、巡检检查结果/证据提交、日报封存。Quoin 在权威事务内写有界事件引用，
+提交后才异步回调 `HandlePostCommitFact(ctx, fact)`；回调拿不到业务库句柄、平台凭据、
+原始正文，不能改变已完成的 Stele/Quoin ACK 裁决。`fact.ID` 是稳定的事件身份，
+**处理器必须自己按 `(插件 ID, fact.ID)` 幂等**，因为崩溃/重试后可能再次调用。
+有界重试后进入死信，重放必须显式操作；没有启用订阅者时不产生额外业务事件行。
+新增领域语义不能仅靠订阅者凭空扩展核心事实词表，仍需有版本的核心契约变更。
+
+## 受控 HTTP 接入与探测
+
+有出站 HTTP 连接的插件须声明 `ConnectionKind`、`ConnectionTransportHTTP` 和允许的
+`ConnectionAuthModes`。启用一个新连接前必须通过其插件声明的只读
+`ConnectionProbePath`：Quoin 冻结 GET/路径/期望状态 200，经 Stele 网关执行
+并在 SQL 中按当前 revision + 凭据 generation 校验探测资格。探测地址只能是
+相对于该连接 endpoint 的绝对路径（可带 query，不可包含网络主机或凭据）；
+Stele 不跟随平台响应的跳转，避免携凭据越过连接边界。未声明探测路径的 HTTP 类型
+可以参与有限网关执行，但**不能通过 probe 启用新实例**，不要把它当完整接入能力。
+模型供应商凭据仍只走 Plinth 路径，不属于插件 HTTP 连接。
 
 ## 出向：泛型工具
 
