@@ -7,13 +7,16 @@ package app
 // 绝不产生任何实时平台查询。
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"slices"
 	"strconv"
@@ -32,16 +35,25 @@ import (
 // 逐页取回直至 nextCursor 为 null——完整遍历永远可能，任何单页都有界。
 const dailyReportToolPageBound = 48 * 1024
 
-// dailyReportCursorPattern 是分页游标的封闭形状：s<来源序号>:c<检查序号>。
-var dailyReportCursorPattern = regexp.MustCompile(`^s(\d+):c(\d+)$`)
+// dailyReportCheckWindowBytes 是单个超界检查项（其封存 JSON 自己就超过页界，
+// 例如超长指标标签值/样本值）的确定性字节窗口目标：窗口尽量落在 JSON token
+// 边界，单 token 超窗时退化为 rune 对齐的原始窗口。取 6 KiB 是为 JSON 字符串
+// 转义的最坏 6 倍膨胀（控制字符 → \u00XX）留足裕量：6 KiB × 6 = 36 KiB，加
+// 页信封仍严格小于页界——任何输入下单个分片页都不可能溢出。
+const dailyReportCheckWindowBytes = 6 * 1024
+
+// dailyReportCursorPattern 是分页游标的封闭形状：s<来源序号>:c<检查序号>，
+// 或超界检查项分片续读的 s<来源序号>:c<检查序号>:f<分片序号>。
+var dailyReportCursorPattern = regexp.MustCompile(`^s(\d+):c(\d+)(?::f(\d+))?$`)
 
 // dailyReportPageCursor 定位封存文档内的一个确定性分页位置：Source 是
-// sources 数组序号，Check 是该 source 内 checks 数组的起始序号（0 = 整个
-// source 从头开始）。游标只在这份冻结文档内移动，与报告定位符共同构成
-// 不可变续读坐标。
+// sources 数组序号，Check 是该 source 内 checks 数组的序号（0 = 整个 source
+// 从头开始），Fragment 非零时表示该检查项封存 JSON 的分片续读序号。游标只
+// 在这份冻结文档内移动，与报告定位符共同构成不可变续读坐标。
 type dailyReportPageCursor struct {
-	Source int64
-	Check  int64
+	Source   int64
+	Check    int64
+	Fragment int64
 }
 
 func parseDailyReportCursor(raw string) (dailyReportPageCursor, error) {
@@ -50,15 +62,22 @@ func parseDailyReportCursor(raw string) (dailyReportPageCursor, error) {
 	}
 	match := dailyReportCursorPattern.FindStringSubmatch(raw)
 	if match == nil {
-		return dailyReportPageCursor{}, fmt.Errorf("cursor must be an exact nextCursor value like s3:c12")
+		return dailyReportPageCursor{}, fmt.Errorf("cursor must be an exact nextCursor value like s3:c12 or s3:c12:f2")
 	}
 	source, _ := strconv.ParseInt(match[1], 10, 64)
 	check, _ := strconv.ParseInt(match[2], 10, 64)
-	return dailyReportPageCursor{Source: source, Check: check}, nil
+	var fragment int64
+	if match[3] != "" {
+		fragment, _ = strconv.ParseInt(match[3], 10, 64)
+	}
+	return dailyReportPageCursor{Source: source, Check: check, Fragment: fragment}, nil
 }
 
 func (cursor dailyReportPageCursor) String() string {
-	return fmt.Sprintf("s%d:c%d", cursor.Source, cursor.Check)
+	if cursor.Fragment == 0 {
+		return fmt.Sprintf("s%d:c%d", cursor.Source, cursor.Check)
+	}
+	return fmt.Sprintf("s%d:c%d:f%d", cursor.Source, cursor.Check, cursor.Fragment)
 }
 
 // dailyReportSealedDocument 只解封存文档的外层信封：sources 保留原始字节，
@@ -306,8 +325,10 @@ func resolveDailyReportAttempt(ctx context.Context, attempts *attempt.Service, a
 // 目录里，且请求定位符必须与 Attempt 创建时冻结的报告身份逐字一致——任何
 // 不一致都是确定性失败，模型看到结构化错误而不是别的报告。封存文档按
 // 确定性位置分页返回：每页携带精确定位符与 nextCursor 续读坐标，逐页取回
-// 直至 nextCursor 为 null（完整遍历永远可能），任何单页载荷有界。执行只读
-// 已提交的不可变版本行，绝不触发平台查询。
+// 直至 nextCursor 为 null（完整遍历永远可能），任何单页载荷有界；单个检查
+// 项的封存 JSON 自己超界时，按确定性字节窗口分片返回（checkFragments，
+// 逐字节无损），绝不静默截断。执行只读已提交的不可变版本行，绝不触发
+// 平台查询。
 func (service *RuntimeService) invokeDailyReportGetTool(ctx context.Context, attempts *attempt.Service, loaded *routedToolContext) toolCallSeal {
 	arguments, err := parseDailyReportGetArguments(loaded.arguments)
 	if err != nil {
@@ -341,7 +362,7 @@ func (service *RuntimeService) invokeDailyReportGetTool(ctx context.Context, att
 	if document.ConfigKey != identity.ConfigKey || document.LocalDate != identity.LocalDate {
 		return routedFailureSeal(loaded, "report_unavailable", "sealed daily report document identity disagrees with its frozen report row")
 	}
-	sources, next, err := buildDailyReportPage(&document, cursor)
+	page, err := buildDailyReportPage(&document, cursor)
 	if err != nil {
 		return routedFailureSeal(loaded, "invalid_cursor", err.Error())
 	}
@@ -352,10 +373,13 @@ func (service *RuntimeService) invokeDailyReportGetTool(ctx context.Context, att
 		"windowStartUtc": document.WindowStartUTC, "windowEndUtc": document.WindowEndUTC,
 		"sealedAt": document.SealedAt, "totals": json.RawMessage(document.Totals),
 		"cursor":  cursor.String(),
-		"sources": sources,
+		"sources": page.Sources,
 	}
-	if next != nil {
-		payload["nextCursor"] = next.String()
+	if len(page.CheckFragments) > 0 {
+		payload["checkFragments"] = page.CheckFragments
+	}
+	if page.Next != nil {
+		payload["nextCursor"] = page.Next.String()
 	}
 	return routedSuccessSeal(loaded, payload)
 }
@@ -618,21 +642,54 @@ func attachDailyAlertViewKeys(ctx context.Context, reader interface {
 	return nil
 }
 
+// dailyReportCheckFragment 是一个超界检查项的一页分片：Text 是该检查项封存
+// JSON 的逐字字节窗口（UTF-8 安全），按 (sourceIndex, checkIndex, byteOffset)
+// 升序拼接后即还原完整封存字节——分片只切窗口，绝不改写或省略任何字节，
+// 因此完整遍历仍然无损。note 是字节恒定的固定续读说明。
+type dailyReportCheckFragment struct {
+	SourceIndex int64  `json:"sourceIndex"`
+	CheckIndex  int64  `json:"checkIndex"`
+	ByteOffset  int64  `json:"byteOffset"`
+	ByteLength  int64  `json:"byteLength"`
+	TotalBytes  int64  `json:"totalBytes"`
+	Text        string `json:"text"`
+	Note        string `json:"note"`
+}
+
+// dailyReportFragmentNote 是每个分片页携带的固定协议说明（字节恒定）：
+// 告诉模型分片如何重组、为什么不得按单片直接下结论。
+const dailyReportFragmentNote = "该检查项的封存 JSON 超过单页上限，已按确定性字节窗口分片：同一定位符的连续分片页按 byteOffset 升序拼接 text 即为该检查项的完整封存字节；必须逐片取回（直到 nextCursor 为 null）后才可引用该检查项的事实，不得按单个分片段落直接下结论。"
+
+// dailyReportPageResult 是一页的确定性产物：sources 页（整 source 或按检查
+// 项切片的 source 前缀，逐字节复用封存原文）或一个超界检查项的分片组。
+type dailyReportPageResult struct {
+	Sources        []json.RawMessage
+	CheckFragments []dailyReportCheckFragment
+	Next           *dailyReportPageCursor
+}
+
 // buildDailyReportPage packs the sealed document's sources into one bounded
 // page starting at the cursor position. Whole sources are reused byte-for-
 // byte; a source that does not fit (or a mid-source continuation) is split
 // at its check array, re-emitting the source envelope with a bounded slice
-// of verbatim checks. The walk is deterministic: the same frozen document
-// and cursor always yield the same page and nextCursor. next is nil once
-// every source has been emitted (complete traversal).
-func buildDailyReportPage(document *dailyReportSealedDocument, cursor dailyReportPageCursor) ([]json.RawMessage, *dailyReportPageCursor, error) {
+// of verbatim checks. A single check whose own sealed JSON exceeds the page
+// bound (huge metric label values) is emitted as a deterministic sequence of
+// byte-window fragment pages instead — never truncated, never unbounded. The
+// walk is deterministic: the same frozen document and cursor always yield the
+// same page and nextCursor. Next is nil once every source has been emitted
+// (complete traversal).
+func buildDailyReportPage(document *dailyReportSealedDocument, cursor dailyReportPageCursor) (dailyReportPageResult, error) {
 	total := int64(len(document.Sources))
-	if cursor.Source > total || (cursor.Source == total && cursor.Check > 0) {
-		return nil, nil, fmt.Errorf("cursor %s is past the end of the sealed document (%d sources)", cursor, total)
+	if cursor.Source > total || (cursor.Source == total && (cursor.Check > 0 || cursor.Fragment > 0)) {
+		return dailyReportPageResult{}, fmt.Errorf("cursor %s is past the end of the sealed document (%d sources)", cursor, total)
+	}
+	if cursor.Fragment > 0 {
+		return buildDailyCheckFragmentPage(document, cursor)
 	}
 	page := []json.RawMessage{}
-	// pageSize 是当前页信封（含页眉/totals）加已选 sources 的精确字节数：
-	// 每次候选追加都真实重新序列化，杜绝估算漂移。
+	// pageSize 是当前页已选 sources 的精确字节数：每次候选追加都真实重新
+	// 序列化，杜绝估算漂移（页信封与分片页共用 ≤512 字节裕量，与页界测试
+	// 同一约定）。
 	pageSize := func(fragments []json.RawMessage) int {
 		encoded, err := json.Marshal(map[string]any{"sources": fragments})
 		if err != nil {
@@ -650,45 +707,212 @@ func buildDailyReportPage(document *dailyReportSealedDocument, cursor dailyRepor
 				continue
 			}
 			if len(page) > 0 {
-				return page, &dailyReportPageCursor{Source: si, Check: 0}, nil
+				return dailyReportPageResult{Sources: page, Next: &dailyReportPageCursor{Source: si}}, nil
 			}
 			// 空页且整个 source 超界：按检查项切片该 source。
 		}
 		var sealed dailyReportSealedSource
 		if err := json.Unmarshal(document.Sources[si], &sealed); err != nil {
-			return nil, nil, fmt.Errorf("sealed daily report source %d is malformed: %w", si, err)
+			return dailyReportPageResult{}, fmt.Errorf("sealed daily report source %d is malformed: %w", si, err)
 		}
-		if ci > int64(len(sealed.Checks)) {
-			return nil, nil, fmt.Errorf("cursor %s points past the %d checks of source %d", cursor, len(sealed.Checks), si)
+		if ci >= int64(len(sealed.Checks)) {
+			// 合法游标永远不会指向已耗尽的检查序号：分片页取完检查项后直接
+			// 生成下一个检查项/下一个 source 的游标。这里是确定性拒绝伪造游标。
+			return dailyReportPageResult{}, fmt.Errorf("cursor %s points past the %d checks of source %d", cursor, len(sealed.Checks), si)
 		}
 		partial := sealed
 		prior := append([]json.RawMessage{}, page...)
 		kept := int64(0)
+		oversized := false
 		for kept < int64(len(sealed.Checks))-ci {
 			partial.Checks = sealed.Checks[ci : ci+kept+1]
 			// 候选页始终是「此前完整 sources + 本 source 的当前片段」：片段随
 			// kept 增长而替换，绝不与前缀叠加重复。
 			candidate := append(append([]json.RawMessage{}, prior...), mustMarshalJSON(partial))
-			// 空页首片永远至少携带一个检查项（诚实的下限），此后逐个装入；
-			// 非空页装不下时在本 source 前收页，游标原地等待下一页。
-			if (len(prior) > 0 || kept > 0) && pageSize(candidate) > dailyReportToolPageBound {
+			if pageSize(candidate) > dailyReportToolPageBound {
+				if len(prior) > 0 || kept > 0 {
+					break // 页面已有内容：在本 source 前收页，游标原地等待下一页。
+				}
+				// 空页的首个检查项自己就超界：不再无条件整块塞入（旧守卫的
+				// 无界漏洞），改走检查项分片页——逐字节无损且有界。
+				oversized = true
 				break
 			}
 			page = candidate
 			kept++
 		}
+		if oversized {
+			return buildDailyCheckFragmentPage(document, dailyReportPageCursor{Source: si, Check: ci + kept})
+		}
 		if kept == 0 {
+			if len(page) == 0 {
+				return dailyReportPageResult{}, fmt.Errorf("sealed daily report source %d cannot make progress at cursor %s", si, cursor)
+			}
 			// 页面已有内容且本 source 首片就超界：收页，下一页从原地重试
-			//（下一页为空页，必然至少取一个检查项）。
-			return page, &dailyReportPageCursor{Source: si, Check: ci}, nil
+			//（下一页为空页，必然至少取一个检查项或进入分片页）。
+			return dailyReportPageResult{Sources: page, Next: &dailyReportPageCursor{Source: si, Check: ci}}, nil
 		}
 		if consumed := ci + kept; consumed < int64(len(sealed.Checks)) {
-			return page, &dailyReportPageCursor{Source: si, Check: consumed}, nil
+			return dailyReportPageResult{Sources: page, Next: &dailyReportPageCursor{Source: si, Check: consumed}}, nil
 		}
 		si, ci = si+1, 0
 	}
-	return page, nil, nil
+	return dailyReportPageResult{Sources: page}, nil
 }
+
+// buildDailyCheckFragmentPage 续读一个超界检查项的确定性字节窗口分片：
+// 页内按序装入尽可能多的分片（每次真实重新序列化度量），信封与精确续读
+// 坐标随每页重复。单个分片页按构造必然有界（6 KiB 窗口 × 最坏 6 倍 JSON
+// 转义 < 页界），此处仍以真实度量兑底：越界即确定性失败，绝不静默截断。
+// 分片全部取完后，游标推进到该 source 的下一个检查项（或下一个 source）。
+func buildDailyCheckFragmentPage(document *dailyReportSealedDocument, cursor dailyReportPageCursor) (dailyReportPageResult, error) {
+	if cursor.Source >= int64(len(document.Sources)) {
+		return dailyReportPageResult{}, fmt.Errorf("cursor %s is past the end of the sealed document", cursor)
+	}
+	var sealed dailyReportSealedSource
+	if err := json.Unmarshal(document.Sources[cursor.Source], &sealed); err != nil {
+		return dailyReportPageResult{}, fmt.Errorf("sealed daily report source %d is malformed: %w", cursor.Source, err)
+	}
+	if cursor.Check >= int64(len(sealed.Checks)) {
+		return dailyReportPageResult{}, fmt.Errorf("cursor %s points past the %d checks of source %d", cursor, len(sealed.Checks), cursor.Source)
+	}
+	check := sealed.Checks[cursor.Check]
+	fragments := dailyCheckJSONFragments(check, dailyReportCheckWindowBytes)
+	if cursor.Fragment >= int64(len(fragments)) {
+		return dailyReportPageResult{}, fmt.Errorf("cursor %s points past the %d fragments of source %d check %d", cursor, len(fragments), cursor.Source, cursor.Check)
+	}
+	candidates := make([]dailyReportCheckFragment, 0, len(fragments)-int(cursor.Fragment))
+	offset := int64(0)
+	for index := int64(0); index < cursor.Fragment; index++ {
+		offset += int64(len(fragments[index]))
+	}
+	for index := cursor.Fragment; index < int64(len(fragments)); index++ {
+		window := fragments[index]
+		candidates = append(candidates, dailyReportCheckFragment{
+			SourceIndex: cursor.Source, CheckIndex: cursor.Check,
+			ByteOffset: offset, ByteLength: int64(len(window)), TotalBytes: int64(len(check)),
+			Text: string(window), Note: dailyReportFragmentNote,
+		})
+		offset += int64(len(window))
+	}
+	page := []dailyReportCheckFragment{}
+	for index := 0; index < len(candidates); index++ {
+		candidate := append(append([]dailyReportCheckFragment{}, page...), candidates[index])
+		if len(page) > 0 {
+			if encoded, err := json.Marshal(map[string]any{"checkFragments": candidate}); err != nil || len(encoded) > dailyReportToolPageBound {
+				break // 不可达的 marshal 错误与页界溢出同判：停止装入，剩余分片下一页。
+			}
+		}
+		page = candidate
+	}
+	if len(page) == 0 {
+		// 构造上不可达（6 KiB 窗口的最坏转义膨胀仍在页界内）；兑底确定性
+		// 失败而不是发出任何超界页。
+		return dailyReportPageResult{}, fmt.Errorf("sealed check fragment of source %d check %d exceeds the page bound", cursor.Source, cursor.Check)
+	}
+	result := dailyReportPageResult{Sources: []json.RawMessage{}, CheckFragments: page}
+	consumed := cursor.Fragment + int64(len(page))
+	var next dailyReportPageCursor
+	if consumed < int64(len(fragments)) {
+		next = dailyReportPageCursor{Source: cursor.Source, Check: cursor.Check, Fragment: consumed}
+	} else if cursor.Check+1 < int64(len(sealed.Checks)) {
+		next = dailyReportPageCursor{Source: cursor.Source, Check: cursor.Check + 1}
+	} else {
+		next = dailyReportPageCursor{Source: cursor.Source + 1}
+	}
+	if next.Source < int64(len(document.Sources)) {
+		result.Next = &next
+	}
+	return result, nil
+}
+
+// dailyCheckJSONFragments deterministically splits one sealed check's JSON
+// bytes into bounded UTF-8-safe windows. Cuts land on JSON token boundaries
+// when the bytes parse; a single token larger than the window target (a huge
+// label value) is further split at rune-aligned raw windows. The same bytes
+// always yield the same fragment sequence, and concatenating every fragment
+// in order reproduces the input bytes exactly — the split is a pure
+// geometry, never a rewrite.
+func dailyCheckJSONFragments(check []byte, target int) [][]byte {
+	if len(check) <= target {
+		return [][]byte{check}
+	}
+	cuts := dailyJSONTokenCuts(check, target)
+	parts := [][]byte{}
+	for index := 0; index+1 < len(cuts); index++ {
+		start, end := cuts[index], cuts[index+1]
+		for start < end {
+			limit := end
+			if limit-start > target {
+				limit = dailyRuneAlignedLimit(check, start, start+target)
+			}
+			parts = append(parts, check[start:limit])
+			start = limit
+		}
+	}
+	return parts
+}
+
+// dailyJSONTokenCuts walks the check's JSON tokens and emits cut points so
+// that consecutive cuts span at least one window target; a window may exceed
+// the target only by carrying one whole oversized token, which the caller
+// then sub-splits at rune boundaries. Malformed sealed bytes (a data-
+// integrity fault the seal path should never produce) deterministically fall
+// back to pure rune-aligned windows instead of panicking or drifting.
+func dailyJSONTokenCuts(check []byte, target int) []int {
+	cuts := []int{0}
+	decoder := json.NewDecoder(bytes.NewReader(check))
+	for {
+		offset := decoder.InputOffset()
+		if offset >= int64(len(check)) {
+			break
+		}
+		if int(offset) >= cuts[len(cuts)-1]+target {
+			cuts = append(cuts, int(offset))
+			continue
+		}
+		if _, err := decoder.Token(); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return dailyRawWindowCuts(check, target)
+		}
+	}
+	if cuts[len(cuts)-1] != len(check) {
+		cuts = append(cuts, len(check))
+	}
+	return cuts
+}
+
+// dailyRawWindowCuts is the rune-aligned fallback tiling for bytes that do
+// not parse as JSON: fixed-size windows whose boundaries never split a
+// multi-byte rune.
+func dailyRawWindowCuts(check []byte, target int) []int {
+	cuts := []int{0}
+	for start := 0; start < len(check); {
+		limit := start + target
+		if limit >= len(check) {
+			cuts = append(cuts, len(check))
+			break
+		}
+		limit = dailyRuneAlignedLimit(check, start, limit)
+		cuts = append(cuts, limit)
+		start = limit
+	}
+	return cuts
+}
+
+// dailyRuneAlignedLimit walks limit back (at most three bytes, the maximum
+// continuation tail of a 4-byte rune) so that check[limit] starts a rune —
+// every emitted window is therefore valid UTF-8 on its own.
+func dailyRuneAlignedLimit(check []byte, start, limit int) int {
+	for limit > start+3 && isUTF8Continuation(check[limit]) {
+		limit--
+	}
+	return limit
+}
+
+func isUTF8Continuation(byteValue byte) bool { return byteValue&0xC0 == 0x80 }
 
 // mustMarshalJSON marshals an in-memory sealed-source projection; the shape
 // is our own sealed vocabulary, so a marshal failure is unreachable.
