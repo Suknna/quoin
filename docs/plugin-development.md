@@ -96,7 +96,7 @@ Quoin 同样在接收时复核。声明一个新类型不等于核心已有其�
 
 ## 提交后事件订阅
 
-插件只能声明 `internal/plugins/postcommit.go` 列出的有限事实类型：告警观察提交、
+插件只能声明 `internal/plugins/postcommit.go` 列出的有限事实类型：规范接入事件已持久接收、告警观察提交、
 日报窗口到期、巡检检查结果/证据提交、日报封存。Quoin 在权威事务内写有界事件引用，
 提交后才异步回调 `HandlePostCommitFact(ctx, fact)`；回调拿不到业务库句柄、平台凭据、
 原始正文，不能改变已完成的 Stele/Quoin ACK 裁决。`fact.ID` 是稳定的事件身份，

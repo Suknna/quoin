@@ -114,6 +114,7 @@ func NewDispatcher(db *sql.DB, reader audit.Reader, registry *plugins.Registry, 
 	}
 	handlers := map[string]plugins.PostCommitHandler{}
 	for _, factType := range []string{
+		plugins.FactInboundEventAccepted,
 		plugins.FactAlertObservationCommitted,
 		plugins.FactInspectionDailyWindowDue,
 		plugins.FactInspectionCheckEvidenceCommitted,

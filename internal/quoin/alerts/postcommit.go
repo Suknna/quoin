@@ -36,3 +36,12 @@ func (service *Service) emitObservationFact(ctx context.Context, tx execution.Ex
 		},
 	})
 }
+
+func (service *Service) emitAcceptedDeliveryFact(ctx context.Context, tx execution.Executor, sourceID, deliveryID int64, sourceKey, integrity string) error {
+	_, err := service.publisher.Emit(ctx, tx, pluginevents.Fact{
+		Type:   plugins.FactInboundEventAccepted,
+		Refs:   []plugins.PostCommitFactRef{{Name: "sourceId", ID: sourceID}, {Name: "deliveryId", ID: deliveryID}},
+		Labels: map[string]string{"sourceKey": sourceKey, "integrity": integrity},
+	})
+	return err
+}

@@ -1957,7 +1957,7 @@ CREATE INDEX idx_maintenance_items_state ON maintenance_items (maintenance_revis
 -- 不可变引用（refs_json），永不携带凭据或无界正文。
 CREATE TABLE plugin_events (
   id              INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
-  event_type      TEXT NOT NULL CHECK (event_type IN ('quoin.alert.observation.committed','quoin.inspection.daily_window_due','quoin.inspection.check_evidence.committed','quoin.inspection.report.sealed')),
+  event_type      TEXT NOT NULL CHECK (event_type IN ('quoin.ingress.event.accepted','quoin.alert.observation.committed','quoin.inspection.daily_window_due','quoin.inspection.check_evidence.committed','quoin.inspection.report.sealed')),
   payload_version INTEGER NOT NULL CHECK (payload_version = 1),
   committed_at    TEXT NOT NULL,
   refs_json       TEXT NOT NULL CHECK (length(refs_json) BETWEEN 2 AND 4096)

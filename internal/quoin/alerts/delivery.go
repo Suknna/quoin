@@ -356,6 +356,11 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 		issues = append(issues, issueRef)
 	}
 
+	// This delivery milestone is independent of item validity: item issues are
+	// durable too. Duplicate relay IDs returned earlier without a second fact.
+	if err := service.emitAcceptedDeliveryFact(ctx, tx, sourceID, deliveryID, sourceKey, integrity); err != nil {
+		return DeliveryResult{}, err
+	}
 	// ADR-0014: the committed normalized observations become bounded
 	// post-commit facts inside this same authority transaction — same commit
 	// or same rollback, never a post-hoc fact.

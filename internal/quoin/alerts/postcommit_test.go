@@ -100,7 +100,7 @@ func TestRelayReplayEmitsNoDuplicateFact(t *testing.T) {
 	registry := plugins.NewRegistry()
 	if err := registry.Register(plugins.Plugin{
 		ID: "hooky", Version: "v1-test",
-		PostCommitSubscriptions: []plugins.PostCommitSubscription{{EventType: plugins.FactAlertObservationCommitted}},
+		PostCommitSubscriptions: []plugins.PostCommitSubscription{{EventType: plugins.FactInboundEventAccepted}, {EventType: plugins.FactAlertObservationCommitted}},
 		PostCommitHandler:       &factRecorder{},
 	}); err != nil {
 		t.Fatal(err)
@@ -116,8 +116,8 @@ func TestRelayReplayEmitsNoDuplicateFact(t *testing.T) {
 		t.Fatal(err)
 	}
 	var events int
-	if err := database.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_events`).Scan(&events); err != nil || events != 1 {
-		t.Fatalf("relay replay must not duplicate facts, rows=%d err=%v", events, err)
+	if err := database.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_events`).Scan(&events); err != nil || events != 2 {
+		t.Fatalf("relay replay must preserve one delivery and one observation fact, rows=%d err=%v", events, err)
 	}
 }
 

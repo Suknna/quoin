@@ -22,6 +22,9 @@ import (
 // anything else fails plugin registration — unknown facts are a programming
 // error, never a silent no-op.
 const (
+	// FactInboundEventAccepted: the normalized inbound batch was committed as
+	// one authoritative delivery, even when individual items carry issues.
+	FactInboundEventAccepted = "quoin.ingress.event.accepted"
 	// FactAlertObservationCommitted: one normalized alert observation and its
 	// occurrence effect committed inside the intake transaction.
 	FactAlertObservationCommitted = "quoin.alert.observation.committed"
@@ -145,7 +148,8 @@ func ValidPostCommitFactType(eventType string) bool { return validPostCommitFact
 // vocabulary.
 func validPostCommitFactType(eventType string) bool {
 	switch eventType {
-	case FactAlertObservationCommitted,
+	case FactInboundEventAccepted,
+		FactAlertObservationCommitted,
 		FactInspectionDailyWindowDue,
 		FactInspectionCheckEvidenceCommitted,
 		FactInspectionReportSealed:
