@@ -106,6 +106,14 @@ type Service struct {
 	promqlGap     *execution.Operation
 	collectionGap *execution.Operation
 	opDefaultPlan *execution.Operation
+	// 跨来源日报（ADR-0014）：配置命令走管理员会话；调度触发与封存是系统
+	// 调度工作；人工补跑/重分析走管理员会话。
+	createDailyConfig   *execution.Operation
+	updateDailyConfig   *execution.Operation
+	scheduleDailyReport *execution.Operation
+	sealDailyReport     *execution.Operation
+	manualDailyReport   *execution.Operation
+	rerunDailyReport    *execution.Operation
 }
 
 // NewService assembles the module over db: the pool backs the runner's owned
@@ -164,6 +172,12 @@ func (s *Service) registerOperations() {
 	s.promqlGap = register(execution.Operation{Name: commandPromqlGap, Class: execution.ClassWrite, ObjectType: ObjectInspectionRun, Authorize: requireSystemResultWork})
 	s.collectionGap = register(execution.Operation{Name: commandCollectionGap, Class: execution.ClassWrite, ObjectType: ObjectInspectionRun, Authorize: requireSystemResultWork})
 	s.opDefaultPlan = register(execution.Operation{Name: commandDefaultPlan, Class: execution.ClassWrite, ObjectType: ObjectInspectionPlan, Authorize: authorizeInspectionAdmin})
+	s.createDailyConfig = register(execution.Operation{Name: CommandCreateDailyConfig, Class: execution.ClassWrite, ObjectType: ObjectInspectionDailyReport, Authorize: authorizeInspectionAdmin})
+	s.updateDailyConfig = register(execution.Operation{Name: CommandUpdateDailyConfig, Class: execution.ClassWrite, ObjectType: ObjectInspectionDailyReport, Authorize: authorizeInspectionAdmin})
+	s.scheduleDailyReport = register(execution.Operation{Name: CommandScheduleDailyReport, Class: execution.ClassWrite, ObjectType: ObjectInspectionDailyReport, Authorize: requireSchedulerSource})
+	s.sealDailyReport = register(execution.Operation{Name: CommandSealDailyReport, Class: execution.ClassWrite, ObjectType: ObjectInspectionDailyReport, Authorize: requireSchedulerSource})
+	s.manualDailyReport = register(execution.Operation{Name: CommandManualDailyReport, Class: execution.ClassWrite, ObjectType: ObjectInspectionDailyReport, Authorize: authorizeInspectionAdmin})
+	s.rerunDailyReport = register(execution.Operation{Name: CommandRerunDailyReport, Class: execution.ClassWrite, ObjectType: ObjectInspectionDailyReport, Authorize: authorizeInspectionAdmin})
 }
 
 // SetReader injects the composition layer's real read-only query surface

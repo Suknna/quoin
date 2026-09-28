@@ -17,6 +17,11 @@ import (
 type service interface {
 	ScheduledPlans(context.Context) ([]inspection.ScheduledPlan, error)
 	CreateScheduledPlanRun(context.Context, inspection.ScheduledPlan, time.Time, inspection.RuntimeAvailability) (inspection.RunDetail, error)
+	// 跨来源日报（ADR-0014）走同一条分钟边界循环：到期投影、边界触发与
+	// 采证截止封存。与计划 Run 一样不隐式补跑，幂等由领域身份保证。
+	DueDailyReportConfigs(context.Context, time.Time) ([]inspection.DailyReportConfig, error)
+	CreateScheduledDailyReport(context.Context, inspection.DailyReportConfig, time.Time) error
+	SealDueDailyReports(context.Context, time.Time) error
 }
 
 // source is intentionally package-private: tests control time through this
@@ -114,7 +119,31 @@ func (s *Scheduler) tickAt(ctx context.Context, boundary time.Time) error {
 			scheduleErrors = append(scheduleErrors, fmt.Errorf("schedule %s at %s: %w", plan.PlanKey, scheduledFor.Format(time.RFC3339Nano), err))
 		}
 	}
+	// 日报的到期判定、触发与封存与计划 Run 共享边界快照，但互相独立：一个
+	// 失败不吞掉另一个的成功提交。
+	scheduleErrors = append(scheduleErrors, s.tickDailyReportsAt(ctx, boundary))
 	return errors.Join(scheduleErrors...)
+}
+
+// tickDailyReportsAt evaluates the daily report side of one minute boundary:
+// configs whose local trigger time is now create the previous fully ended
+// local day's report; Collecting reports past their cutoff seal. Per-config
+// failures are joined so one broken timezone never blocks the others.
+func (s *Scheduler) tickDailyReportsAt(ctx context.Context, boundary time.Time) error {
+	configs, err := s.service.DueDailyReportConfigs(ctx, boundary)
+	if err != nil {
+		return err
+	}
+	var dailyErrors []error
+	for _, config := range configs {
+		if err := s.service.CreateScheduledDailyReport(ctx, config, boundary); err != nil {
+			dailyErrors = append(dailyErrors, fmt.Errorf("daily report %s at %s: %w", config.ConfigKey, boundary.Format(time.RFC3339Nano), err))
+		}
+	}
+	if err := s.service.SealDueDailyReports(ctx, boundary); err != nil {
+		dailyErrors = append(dailyErrors, fmt.Errorf("daily report seal at %s: %w", boundary.Format(time.RFC3339Nano), err))
+	}
+	return errors.Join(dailyErrors...)
 }
 
 func dueAt(plan inspection.ScheduledPlan, now time.Time) (time.Time, bool, error) {

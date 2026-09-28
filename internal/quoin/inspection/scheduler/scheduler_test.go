@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -11,6 +12,30 @@ import (
 type recordingService struct {
 	plans []inspection.ScheduledPlan
 	calls []scheduledCall
+	// dailyDue mirrors the daily report config projection for the boundary.
+	dailyDue          []inspection.DailyReportConfig
+	dailyCreated      []string
+	dailySealCalls    int
+	dailyCreateErrors map[string]error
+}
+
+func (s *recordingService) DueDailyReportConfigs(_ context.Context, _ time.Time) ([]inspection.DailyReportConfig, error) {
+	return s.dailyDue, nil
+}
+
+func (s *recordingService) CreateScheduledDailyReport(_ context.Context, config inspection.DailyReportConfig, _ time.Time) error {
+	if s.dailyCreateErrors != nil {
+		if err := s.dailyCreateErrors[config.ConfigKey]; err != nil {
+			return err
+		}
+	}
+	s.dailyCreated = append(s.dailyCreated, config.ConfigKey)
+	return nil
+}
+
+func (s *recordingService) SealDueDailyReports(context.Context, time.Time) error {
+	s.dailySealCalls++
+	return nil
 }
 
 type scheduledCall struct {
@@ -181,6 +206,54 @@ func TestTickSkipsSpringForwardNonexistentWallTime(t *testing.T) {
 	}
 	if len(service.calls) != 0 {
 		t.Fatalf("spring-forward nonexistent local occurrence scheduled %d calls", len(service.calls))
+	}
+}
+
+// The daily report side of the boundary shares the same loop: the service
+// projects the due configs for the boundary (local trigger-time filtering
+// lives there), the scheduler triggers each one and runs the seal pass. A
+// failing daily config must not block plan runs and vice versa.
+func TestTickTriggersDueDailyReportsAndSealsEachTick(t *testing.T) {
+	at := time.Date(2026, time.September, 28, 22, 30, 0, 0, time.UTC) // 06:30 Asia/Shanghai
+	service := &recordingService{
+		plans: []inspection.ScheduledPlan{{PlanKey: "minute", Cron: "* * * * *", Timezone: "UTC"}},
+		dailyDue: []inspection.DailyReportConfig{
+			{ConfigKey: "core", Timezone: "Asia/Shanghai", TriggerTime: "06:30"},
+			{ConfigKey: "other", Timezone: "Asia/Shanghai", TriggerTime: "06:30"},
+		},
+	}
+	scheduler := newScheduler(service, fixedClock{now: at}, func(context.Context) inspection.RuntimeAvailability {
+		return inspection.RuntimeAvailability{Collection: true}
+	})
+	if err := scheduler.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(service.dailyCreated) != 2 {
+		t.Fatalf("daily created = %v, want every due config triggered", service.dailyCreated)
+	}
+	if service.dailySealCalls != 1 {
+		t.Fatalf("daily seal calls = %d, want one per tick", service.dailySealCalls)
+	}
+}
+
+func TestTickIsolatesDailyReportFailureFromPlanRuns(t *testing.T) {
+	at := time.Date(2026, time.September, 28, 6, 30, 0, 0, time.UTC)
+	service := &recordingService{
+		plans: []inspection.ScheduledPlan{{PlanKey: "minute", Cron: "* * * * *", Timezone: "UTC"}},
+		dailyDue: []inspection.DailyReportConfig{
+			{ConfigKey: "broken", Timezone: "UTC", TriggerTime: "06:30"},
+		},
+		dailyCreateErrors: map[string]error{"broken": errors.New("boom")},
+	}
+	scheduler := newScheduler(service, fixedClock{now: at}, nil)
+	if err := scheduler.tick(context.Background()); err == nil {
+		t.Fatal("tick must surface the daily report failure")
+	}
+	if len(service.calls) != 1 {
+		t.Fatalf("plan scheduled calls = %d, want the plan run to still commit", len(service.calls))
+	}
+	if service.dailySealCalls != 1 {
+		t.Fatalf("daily seal calls = %d, want the seal pass to still run", service.dailySealCalls)
 	}
 }
 
