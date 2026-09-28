@@ -34,7 +34,7 @@ import { SettingsNavigation, settingsNavGroups } from "@/features/settings/nav";
 const INTEGRATIONS_BASE = "/settings/platform/integrations";
 
 import { messageOf, notify } from "@/app/shared";
-import { newClientCommandId } from "@/api/workbench";
+import { newClientCommandId, WorkbenchApiError } from "@/api/workbench";
 import { EntityList } from "@/components/EntityList";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -120,6 +120,7 @@ import {
 	rotateEventSourceCredential,
 	rotateHttpConnectionInstance,
 	rotateMetricsInstance,
+	setEventSourceSettings,
 } from "./api";
 import {
 	EVENT_SOURCE_CAPABILITY,
@@ -131,6 +132,16 @@ import {
 	isHttpConnectionCatalogItem,
 	isSpecializedPlatform,
 } from "./types";
+import {
+	type SettingsDraft,
+	type SettingsDraftValue,
+	type SettingsFieldSpec,
+	draftFromSettings,
+	emptyDraft,
+	formatSettingValue,
+	settingsFieldSpecs,
+	settingsFromDraft,
+} from "./settings-schema";
 
 const formatEventTime = (value?: string | null) =>
 	formatDateTime(value, "等待首条有效事件");
@@ -1561,6 +1572,192 @@ const credentialStateLabels: Record<string, string> = {
 	Retired: "已退休",
 };
 
+/** Per-instance non-secret settings card (ADR-0014 story 2): read view plus
+ * row-version-guarded editing. Rendered only when the owning plugin declares
+ * a settings schema with fields; catalog outages degrade to no card instead
+ * of blocking the lifecycle drawer. Never displays credential material. */
+function EventSourceSettingsCard({
+	kind,
+	source,
+	onSaved,
+	onReload,
+	suspended,
+}: {
+	kind: string;
+	source: EventSourceInstance;
+	onSaved: (updated: EventSourceInstance) => void;
+	onReload: () => Promise<void>;
+	suspended: boolean;
+}) {
+	const entry = useCatalogEntry(kind, "sourceKind");
+	const specs = useMemo(
+		() => settingsFieldSpecs(entry.item?.eventSourceConfigSchema),
+		[entry.item],
+	);
+	const [editing, setEditing] = useState(false);
+	const [draft, setDraft] = useState<SettingsDraft>(() => emptyDraft(specs));
+	const [saving, setSaving] = useState(false);
+	const [error, setError] = useState("");
+	const [stale, setStale] = useState(false);
+	// Entering edit mode (and any parent reload while editing) re-syncs the
+	// draft from the authoritative document; failed saves keep local edits.
+	useEffect(() => {
+		if (editing) setDraft(draftFromSettings(specs, source.settings));
+	}, [editing, specs, source]);
+	if (!entry.ready || !entry.item || specs.length === 0) return null;
+	const current = source.settings ?? {};
+	const entries = Object.entries(current);
+	async function save() {
+		const validated = settingsFromDraft(specs, draft);
+		if (!validated.ok) {
+			setStale(false);
+			setError(validated.error);
+			return;
+		}
+		setSaving(true);
+		setError("");
+		try {
+			const updated = await setEventSourceSettings(
+				source.id,
+				validated.settings,
+				source.rowVersion,
+			);
+			setEditing(false);
+			setError("");
+			setStale(false);
+			notify.success("设置已保存");
+			onSaved(updated);
+		} catch (reason) {
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			// A 409 means another operator advanced the document; offer the
+			// reload-retry recovery instead of leaving a dead end.
+			setStale(
+				reason instanceof WorkbenchApiError &&
+					(reason.status === 409 || reason.code === "row_version_conflict"),
+			);
+		} finally {
+			setSaving(false);
+		}
+	}
+	async function reloadAndRetry() {
+		setError("");
+		setStale(false);
+		await onReload();
+	}
+	return (
+		<Card>
+			<CardHeader>
+				<CardTitle>来源设置</CardTitle>
+				<CardDescription>
+					非秘密实例参数，由插件声明的封闭 schema
+					校验；保存以行版本防并发，凭据永远不会出现在这里。
+				</CardDescription>
+			</CardHeader>
+			<CardContent className="flex flex-col gap-4">
+				{!editing ? (
+					<>
+						{entries.length === 0 ? (
+							<p className="text-sm text-muted-foreground">
+								尚未配置任何设置；保存空文档等同于清除全部参数。
+							</p>
+						) : (
+							<PropertyList
+								layout="grid-2"
+								entries={entries.map(([settingKey, value]) => ({
+									label: settingKey,
+									value: (
+										<span className="break-all font-medium">
+											{formatSettingValue(value)}
+										</span>
+									),
+								}))}
+							/>
+						)}
+						<div>
+							<Button
+								variant="outline"
+								disabled={suspended}
+								onClick={() => {
+									setError("");
+									setStale(false);
+									setEditing(true);
+								}}
+							>
+								编辑设置
+							</Button>
+						</div>
+					</>
+				) : (
+					<form
+						onSubmit={(event) => {
+							event.preventDefault();
+							void save();
+						}}
+					>
+						<FieldGroup>
+							{error && (
+								<Alert variant="destructive">
+									<AlertTitle>无法保存设置</AlertTitle>
+									<AlertDescription>
+										{error}
+										{stale &&
+											" 本地修改已保留；加载最新设置后可直接重试。"}
+									</AlertDescription>
+									{stale && (
+										<Button
+											type="button"
+											variant="outline"
+											size="sm"
+											className="mt-3"
+											disabled={saving || suspended}
+											onClick={() => void reloadAndRetry()}
+										>
+											<RefreshCw data-icon="inline-start" />
+											重新加载最新设置
+										</Button>
+									)}
+								</Alert>
+							)}
+							<SettingsFieldsEditor
+								specs={specs}
+								draft={draft}
+								onChange={(changed, value) =>
+									setDraft((current) => ({ ...current, [changed]: value }))
+								}
+								disabled={saving || suspended}
+								idPrefix="event-source-settings-edit"
+							/>
+						<div className="flex flex-wrap gap-2">
+							<Button type="submit" disabled={saving || suspended}>
+								{saving && (
+									<LoaderCircle
+										className="animate-spin"
+										data-icon="inline-start"
+									/>
+								)}
+								{saving ? "保存中…" : "保存设置"}
+							</Button>
+							<Button
+								type="button"
+								variant="outline"
+								disabled={saving || suspended}
+								onClick={() => {
+									setEditing(false);
+									setError("");
+									setStale(false);
+								}}
+							>
+								取消
+							</Button>
+						</div>
+						</FieldGroup>
+					</form>
+				)}
+			</CardContent>
+		</Card>
+	);
+}
+
 /** Shared lifecycle detail for every alert event source: status, one-time
  * credential reveal on rotate, and credential-generation management. The
  * receiver YAML in the reveal dialog stays exclusive to alertmanager. */
@@ -1582,7 +1779,8 @@ function EventSourceDetail({
 	const [receiverUrl, setReceiverUrl] = useState("");
 	const revealEpoch = useRef(0);
 	const load = useCallback(async () => {
-		setLoading(true);
+		// 刷新不回退到骨架屏：已展示的状态卡（含设置编辑草稿）保持挂载，
+		// 数据原地更新；初始加载仍由 loading 骨架覆盖。
 		setError("");
 		try {
 			const [sourceItem, credentialItems] = await Promise.all([
@@ -1761,6 +1959,13 @@ function EventSourceDetail({
 					</p>
 				</aside>
 			</div>
+			<EventSourceSettingsCard
+				kind={kind}
+				source={source}
+				onSaved={setSource}
+				onReload={load}
+				suspended={suspended}
+			/>
 			<section className="flex flex-col gap-3">
 				<div>
 					<h2 className="text-base font-semibold">凭据代次</h2>
@@ -1841,11 +2046,12 @@ function IntegrationNotFound() {
 
 /** Loads the server plugin catalog and resolves one entry; shared by every
  * catalog-validated generic route. Plugin-id routes resolve by `id`, the
- * connection rotate/detail routes resolve by the registered connectionKind —
+ * connection rotate/detail routes resolve by the registered connectionKind,
+ * and event-source detail routes resolve by the registered sourceKind —
  * three distinct identities (#110) that must never collapse into each other. */
 function useCatalogEntry(
 	kind: string,
-	by: "id" | "connectionKind",
+	by: "id" | "connectionKind" | "sourceKind",
 ): {
 	ready: boolean;
 	item?: IntegrationCatalogItem;
@@ -1869,7 +2075,11 @@ function useCatalogEntry(
 		};
 	}, [revision]);
 	const item = catalog?.find((candidate) =>
-		by === "id" ? candidate.id === kind : candidate.connectionKind === kind,
+		by === "id"
+			? candidate.id === kind
+			: by === "connectionKind"
+				? candidate.connectionKind === kind
+				: candidate.sourceKind === kind,
 	);
 	return {
 		ready: Boolean(catalog),
@@ -2449,6 +2659,124 @@ function HttpConnectionManager({
 	);
 }
 
+/** One schema-projected settings field: native controls for the common
+ * string/enum/number/boolean/array-of-string vocabulary, a JSON textarea
+ * for anything the plugin schema declares beyond it (never a per-brand
+ * branch). Field identity is the schema property key. */
+function SettingsFieldEditor({
+	spec,
+	value,
+	onChange,
+	disabled,
+	id,
+}: {
+	spec: SettingsFieldSpec;
+	value: SettingsDraftValue;
+	onChange: (value: SettingsDraftValue) => void;
+	disabled?: boolean;
+	id: string;
+}) {
+	if (spec.kind === "boolean")
+		return (
+			<label className="flex items-start gap-2 text-sm">
+				<input
+					type="checkbox"
+					checked={value === true}
+					onChange={(event) => onChange(event.target.checked)}
+					disabled={disabled}
+				/>
+				<span>
+					{spec.key}
+					{spec.description && (
+						<span className="block text-xs text-muted-foreground">
+							{spec.description}
+						</span>
+					)}
+				</span>
+			</label>
+		);
+	const label = spec.required ? spec.key : `${spec.key}（可选）`;
+	return (
+		<Field>
+			<FieldLabel htmlFor={id}>{label}</FieldLabel>
+			{spec.kind === "enum" ? (
+				<Select
+					value={typeof value === "string" && value ? value : "__unset__"}
+					onValueChange={(next) => onChange(next === "__unset__" ? "" : next)}
+					disabled={disabled}
+				>
+					<SelectTrigger id={id} aria-label={label} className="w-full">
+						<SelectValue />
+					</SelectTrigger>
+					<SelectContent>
+						{!spec.required && (
+							<SelectItem value="__unset__">未设置</SelectItem>
+						)}
+						{(spec.enumValues ?? []).map((option) => (
+							<SelectItem key={option} value={option}>
+								{option}
+							</SelectItem>
+						))}
+					</SelectContent>
+				</Select>
+			) : spec.kind === "stringArray" || spec.kind === "json" ? (
+				<Textarea
+					id={id}
+					value={typeof value === "string" ? value : ""}
+					onChange={(event) => onChange(event.target.value)}
+					disabled={disabled}
+					placeholder={
+						spec.kind === "stringArray" ? "每行一项" : '例如 {"key": "value"}'
+					}
+				/>
+			) : (
+				<Input
+					id={id}
+					type={spec.kind === "number" ? "number" : "text"}
+					step={spec.kind === "number" ? "any" : undefined}
+					maxLength={spec.maxLength}
+					value={typeof value === "string" ? value : ""}
+					onChange={(event) => onChange(event.target.value)}
+					disabled={disabled}
+				/>
+			)}
+			{spec.description && (
+				<FieldDescription>{spec.description}</FieldDescription>
+			)}
+		</Field>
+	);
+}
+
+/** Renders every schema-projected field from one shared draft object. */
+function SettingsFieldsEditor({
+	specs,
+	draft,
+	onChange,
+	disabled,
+	idPrefix,
+}: {
+	specs: SettingsFieldSpec[];
+	draft: SettingsDraft;
+	onChange: (key: string, value: SettingsDraftValue) => void;
+	disabled?: boolean;
+	idPrefix: string;
+}) {
+	return (
+		<>
+			{specs.map((spec) => (
+				<SettingsFieldEditor
+					key={spec.key}
+					spec={spec}
+					value={draft[spec.key]}
+					onChange={(value) => onChange(spec.key, value)}
+					disabled={disabled}
+					id={`${idPrefix}-${spec.key}`}
+				/>
+			))}
+		</>
+	);
+}
+
 /** Generic creation form for one registered source kind: a stable source key,
  * a one-time bearer reveal and the kind's public receiver URL
  * (/stele/webhook/{kind}). The server rejects unregistered or disabled
@@ -2476,6 +2804,16 @@ function EventSourceForm({
 	const [secret, setSecret] = useState("");
 	const [receiverUrl, setReceiverUrl] = useState("");
 	const revealEpoch = useRef(0);
+	// Schema-driven non-secret settings (ADR-0014 story 2); an empty spec list
+	// means the kind accepts only the empty document and renders no fields.
+	const settingsSpecs = useMemo(
+		() => settingsFieldSpecs(item.eventSourceConfigSchema),
+		[item.eventSourceConfigSchema],
+	);
+	const [settingsDraft, setSettingsDraft] = useState<SettingsDraft>(() =>
+		emptyDraft(settingsSpecs),
+	);
+	const [settingsError, setSettingsError] = useState("");
 	useEffect(() => {
 		if (suspended) {
 			revealEpoch.current += 1;
@@ -2486,13 +2824,26 @@ function EventSourceForm({
 	async function submit(event: FormEvent) {
 		event.preventDefault();
 		if (suspended) return;
+		// Validate the settings document before any network call: a rejecting
+		// server produces no row, but the one-time credential flow should not
+		// start on a request known to be invalid.
+		let settings: Record<string, unknown> | undefined;
+		if (settingsSpecs.length > 0) {
+			const validated = settingsFromDraft(settingsSpecs, settingsDraft);
+			if (!validated.ok) {
+				setSettingsError(validated.error);
+				return;
+			}
+			setSettingsError("");
+			settings = validated.settings;
+		}
 		const epoch = revealEpoch.current;
 		setSaving(true);
 		setError("");
 		try {
 			const endpoint = await fetchPublicReceiverEndpoint(kind);
 			const sourceKey = key.trim();
-			const result = await createEventSourceInstance(sourceKey, kind);
+			const result = await createEventSourceInstance(sourceKey, kind, settings);
 			setCreatedKey(sourceKey);
 			if (!result.revealHandle)
 				throw new Error(
@@ -2503,6 +2854,8 @@ function EventSourceForm({
 				setSecret(token);
 				setReceiverUrl(endpoint.publicReceiverUrl);
 				setKey("");
+				// 下一枚同类实例从空白设置开始；不同实例允许不同参数。
+				setSettingsDraft(emptyDraft(settingsSpecs));
 			}
 		} catch (reason) {
 			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
@@ -2554,11 +2907,46 @@ function EventSourceForm({
 										disabled={saving || suspended || Boolean(createdKey)}
 										autoFocus
 									/>
-									<FieldDescription>
-										例如 production-{kind}。不要输入凭据或内部地址。
-									</FieldDescription>
-								</Field>
-								<Button
+								<FieldDescription>
+									例如 production-{kind}。不要输入凭据或内部地址。
+								</FieldDescription>
+							</Field>
+							{settingsSpecs.length > 0 && (
+								<>
+									<Separator />
+									<div>
+										<h3 className="text-sm font-medium">
+											来源设置（非秘密）
+										</h3>
+										<p className="mt-1 text-xs text-muted-foreground">
+											由插件声明的封闭 schema
+											校验的实例参数；同一来源类型的每个实例可使用不同设置，且永不包含凭据。
+										</p>
+									</div>
+									{settingsError && (
+										<Alert variant="destructive">
+											<AlertDescription>
+												{settingsError}
+											</AlertDescription>
+										</Alert>
+									)}
+									<SettingsFieldsEditor
+										specs={settingsSpecs}
+										draft={settingsDraft}
+										onChange={(changed, value) =>
+											setSettingsDraft((current) => ({
+												...current,
+												[changed]: value,
+											}))
+										}
+										disabled={
+											saving || suspended || Boolean(createdKey)
+										}
+										idPrefix="event-source-settings"
+									/>
+								</>
+							)}
+							<Button
 									type="submit"
 									disabled={
 										!key.trim() || saving || suspended || Boolean(createdKey)

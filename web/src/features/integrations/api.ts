@@ -1,6 +1,7 @@
 import { newClientCommandId, request } from "@/api/workbench";
 import {
 	type AlertSourceCredentialMetadata,
+	type CreateAlertSourceRequest,
 	createAlertSource,
 	revealCredential,
 } from "@/features/alerts/api";
@@ -460,6 +461,8 @@ interface AlertSourceProjection {
 	rowVersion: number;
 	createdAt?: string;
 	latestValidEventAt?: string | null;
+	/** 来源实例的非秘密设置权威文档（ADR-0014 story 2）；始终至少为 `{}`。 */
+	settings?: Record<string, unknown>;
 }
 interface AlertCredentialProjection {
 	id: string;
@@ -475,6 +478,8 @@ export interface EventSourceInstance extends IntegrationInstance {
 	platform: string;
 	status: "active" | "disabled";
 	rowVersion: number;
+	/** Non-secret per-instance settings; the server's authoritative document. */
+	settings?: Record<string, unknown>;
 }
 export interface EventSourceCredential {
 	id: string;
@@ -495,6 +500,7 @@ function instance(source: AlertSourceProjection): EventSourceInstance {
 		createdAt: source.createdAt,
 		latestValidEventAt: source.latestValidEventAt,
 		rowVersion: source.rowVersion,
+		settings: source.settings,
 	};
 }
 export interface EventSourceInstancePage {
@@ -524,17 +530,51 @@ export async function fetchEventSourceInstance(
 		),
 	);
 }
+/** The shared create command plus the story-2 optional initial settings
+ * document; kept local so the alerts feature type stays untouched. */
+type CreateAlertSourceWithSettings = CreateAlertSourceRequest & {
+	settings?: Record<string, unknown>;
+};
+
 /** Creates an enabled source of any registered source kind; the server
- * validates the protocol against the compiled, enabled plugin registry. */
+ * validates the protocol against the compiled, enabled plugin registry and
+ * the optional initial non-secret settings against the owning plugin's
+ * closed EventSourceConfigSchema (a rejecting server produces no row). */
 export async function createEventSourceInstance(
 	key: string,
 	protocol: string,
+	settings?: Record<string, unknown>,
 ): Promise<AlertSourceCredentialMetadata> {
-	return createAlertSource({
+	const payload: CreateAlertSourceWithSettings = {
 		key,
 		protocol,
 		clientCommandId: newClientCommandId(),
-	});
+		...(settings ? { settings } : {}),
+	};
+	return createAlertSource(payload);
+}
+/** Replaces one source instance's non-secret settings (ADR-0014 story 2).
+ * Versioned command: stale expectedRowVersion fails closed with 409 and the
+ * caller re-reads; the response is the refreshed source detail. Settings are
+ * non-secret by server-side schema, so the response never carries credentials. */
+export async function setEventSourceSettings(
+	key: string,
+	settings: Record<string, unknown>,
+	expectedRowVersion: number,
+): Promise<EventSourceInstance> {
+	return instance(
+		await request<AlertSourceProjection>(
+			`/api/v1/alert-sources/${encodeURIComponent(key)}/settings`,
+			{
+				method: "POST",
+				body: JSON.stringify({
+					clientCommandId: newClientCommandId(),
+					expectedRowVersion,
+					settings,
+				}),
+			},
+		),
+	);
 }
 export async function rotateEventSourceCredential(
 	key: string,

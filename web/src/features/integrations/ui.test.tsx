@@ -1577,3 +1577,385 @@ describe("generic HTTP connection plugins (#110)", () => {
 		expect(screen.getByLabelText("Bearer Token")).toHaveValue("");
 	});
 });
+
+describe("event source instance settings (#110 story 2)", () => {
+	// 合成插件夹具：插件 ID、sourceKind 与 connectionKind 是三个互不相同的
+	// 稳定身份；设置 schema 由插件声明（closed JSON Schema），含一个不支持的
+	// 嵌套 object 属性以验证 JSON 回退而非品牌分支。
+	const SETTINGS_PLUGIN_ID = "synthetic-plugin";
+	const SETTINGS_SOURCE_KIND = "synthetic-hook";
+	const SETTINGS_CONNECTION_KIND = "synthetic-conn";
+	const settingsPlugin = {
+		id: SETTINGS_PLUGIN_ID,
+		sourceKind: SETTINGS_SOURCE_KIND,
+		connectionKind: SETTINGS_CONNECTION_KIND,
+		displayName: "合成事件源",
+		description: "用于验收的通用事件接入插件",
+		enabled: true,
+		version: "1",
+		capabilities: ["event_source", "alert_normalizer"],
+		eventSourceConfigSchema: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				siteName: {
+					type: "string",
+					maxLength: 200,
+					description: "站点标识（非秘密）",
+				},
+				retentionDays: { type: "integer" },
+				dropResolved: { type: "boolean" },
+				ignoredAlertnames: {
+					type: "array",
+					items: { type: "string", maxLength: 200 },
+					maxItems: 50,
+				},
+				advanced: { type: "object" },
+			},
+			required: ["siteName"],
+		},
+	};
+
+	function mockApi(
+		handler: (url: string, init?: RequestInit) => Response | undefined,
+	) {
+		return vi
+			.spyOn(globalThis, "fetch")
+			.mockImplementation(
+				async (input, init) =>
+					handler(String(input), init) ??
+					Response.json({ message: "unexpected request" }, { status: 500 }),
+			);
+	}
+	type FetchMock = ReturnType<typeof mockApi>;
+
+	function createPayload(fetchMock: FetchMock) {
+		return JSON.parse(
+			String(
+				fetchMock.mock.calls.find(
+					([url, init]) =>
+						String(url) === "/api/v1/alert-sources" &&
+						(init as RequestInit | undefined)?.method === "POST",
+				)?.[1]?.body,
+			),
+		) as Record<string, unknown>;
+	}
+
+	function expectNoCreate(fetchMock: FetchMock) {
+		expect(
+			fetchMock.mock.calls.some(
+				([url, init]) =>
+					String(url) === "/api/v1/alert-sources" &&
+					(init as RequestInit | undefined)?.method === "POST",
+			),
+		).toBe(false);
+	}
+
+	it("renders schema-driven settings on create and submits the typed document", async () => {
+		const fetchMock = mockApi((url, init) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [settingsPlugin] });
+			if (
+				url.endsWith(
+					`/api/v1/alert-sources/receiver-config?kind=${SETTINGS_SOURCE_KIND}`,
+				)
+			)
+				return Response.json({
+					publicReceiverUrl: `https://quoin.example.test/stele/webhook/${SETTINGS_SOURCE_KIND}`,
+				});
+			if (url === "/api/v1/alert-sources" && init?.method === "POST")
+				return Response.json(
+					{ revealHandle: "one-time-handle", revealAvailable: true },
+					{ status: 201 },
+				);
+			if (url.endsWith("/api/v1/alert-sources/credentials/reveal"))
+				return Response.json({
+					credentialId: "9",
+					bearerToken: "secret-token",
+				});
+			return undefined;
+		});
+		render(
+			<IntegrationView route={`/settings/platform/integrations/${SETTINGS_PLUGIN_ID}`} />,
+		);
+		await screen.findByRole("heading", { name: "配置 合成事件源" });
+		expect(screen.getByText("来源设置（非秘密）")).toBeInTheDocument();
+		// 不支持的嵌套 schema 回退为 JSON 编辑器，而不是为品牌写死分支。
+		expect(screen.getByLabelText("advanced（可选）")).toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText("来源键"), {
+			target: { value: "edge-site" },
+		});
+		fireEvent.change(screen.getByLabelText("siteName"), {
+			target: { value: "edge" },
+		});
+		fireEvent.change(screen.getByLabelText("retentionDays（可选）"), {
+			target: { value: "7" },
+		});
+		fireEvent.click(screen.getByRole("checkbox", { name: "dropResolved" }));
+		fireEvent.change(screen.getByLabelText(/^ignoredAlertnames/), {
+			target: { value: "Heartbeat\nNoise" },
+		});
+		fireEvent.click(
+			screen.getByRole("button", { name: "创建并显示一次凭据" }),
+		);
+		await waitFor(() =>
+			expect(screen.getByRole("dialog")).toBeInTheDocument(),
+		);
+		expect(createPayload(fetchMock)).toMatchObject({
+			key: "edge-site",
+			protocol: SETTINGS_SOURCE_KIND,
+			settings: {
+				siteName: "edge",
+				retentionDays: 7,
+				dropResolved: true,
+				ignoredAlertnames: ["Heartbeat", "Noise"],
+			},
+		});
+		fetchMock.mockRestore();
+	});
+
+	it("blocks create with an inline error when a required setting is missing", async () => {
+		const fetchMock = mockApi((url) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [settingsPlugin] });
+			return undefined;
+		});
+		render(
+			<IntegrationView route={`/settings/platform/integrations/${SETTINGS_PLUGIN_ID}`} />,
+		);
+		await screen.findByRole("heading", { name: "配置 合成事件源" });
+		fireEvent.change(screen.getByLabelText("来源键"), {
+			target: { value: "edge-site" },
+		});
+		fireEvent.click(
+			screen.getByRole("button", { name: "创建并显示一次凭据" }),
+		);
+		expect(
+			await screen.findByText("“siteName”为必填设置。"),
+		).toBeInTheDocument();
+		expectNoCreate(fetchMock);
+	});
+
+	it("rejects invalid JSON in the fallback editor without contacting the server", async () => {
+		const fetchMock = mockApi((url) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [settingsPlugin] });
+			return undefined;
+		});
+		render(
+			<IntegrationView route={`/settings/platform/integrations/${SETTINGS_PLUGIN_ID}`} />,
+		);
+		await screen.findByRole("heading", { name: "配置 合成事件源" });
+		fireEvent.change(screen.getByLabelText("来源键"), {
+			target: { value: "edge-site" },
+		});
+		fireEvent.change(screen.getByLabelText("siteName"), {
+			target: { value: "edge" },
+		});
+		fireEvent.change(screen.getByLabelText("advanced（可选）"), {
+			target: { value: "{not-json" },
+		});
+		fireEvent.click(
+			screen.getByRole("button", { name: "创建并显示一次凭据" }),
+		);
+		expect(
+			await screen.findByText("“advanced”不是合法 JSON。"),
+		).toBeInTheDocument();
+		expectNoCreate(fetchMock);
+	});
+
+	it("edits per-instance settings with row-version fencing and shows the refreshed document", async () => {
+		const fetchMock = mockApi((url, init) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [settingsPlugin] });
+			if (url === "/api/v1/alert-sources/edge-site/credentials?limit=100")
+				return Response.json({ items: [] });
+			if (url === "/api/v1/alert-sources/edge-site")
+				return Response.json({
+					key: "edge-site",
+					protocol: SETTINGS_SOURCE_KIND,
+					enabled: true,
+					rowVersion: 5,
+					createdAt: "2026-09-28T00:00:00Z",
+					settings: { siteName: "edge", ignoredAlertnames: ["Old"] },
+				});
+			if (
+				url === "/api/v1/alert-sources/edge-site/settings" &&
+				init?.method === "POST"
+			)
+				return Response.json({
+					key: "edge-site",
+					protocol: SETTINGS_SOURCE_KIND,
+					enabled: true,
+					rowVersion: 6,
+					createdAt: "2026-09-28T00:00:00Z",
+					settings: { siteName: "edge", ignoredAlertnames: ["New"] },
+				});
+			return undefined;
+		});
+		render(
+			<IntegrationView route={`/settings/platform/integrations?platform=${SETTINGS_SOURCE_KIND}&instance=edge-site`} />,
+		);
+		expect(await screen.findByText("已启用")).toBeInTheDocument();
+		expect(screen.getByText("siteName")).toBeInTheDocument();
+		expect(screen.getByText(/\["Old"\]/)).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "编辑设置" }));
+		expect(screen.getByLabelText("siteName")).toHaveValue("edge");
+		expect(screen.getByLabelText(/^ignoredAlertnames/)).toHaveValue("Old");
+		fireEvent.change(screen.getByLabelText(/^ignoredAlertnames/), {
+			target: { value: "New" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+		const settingsCall = await waitFor(() =>
+			fetchMock.mock.calls.find(
+				([url, requestInit]) =>
+					String(url) === "/api/v1/alert-sources/edge-site/settings" &&
+					(requestInit as RequestInit | undefined)?.method === "POST",
+			),
+		);
+		const command = JSON.parse(String(settingsCall?.[1]?.body));
+		expect(command.clientCommandId).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
+		expect(command.expectedRowVersion).toBe(5);
+		expect(command.settings).toMatchObject({
+			siteName: "edge",
+			ignoredAlertnames: ["New"],
+		});
+		// 响应是刷新后的来源详情：读视图展示新文档并退出编辑态。
+		await screen.findByText(/\["New"\]/);
+		expect(
+			screen.queryByRole("button", { name: "保存设置" }),
+		).not.toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "编辑设置" })).toBeEnabled();
+	});
+
+	it("recovers from a stale-settings conflict by reloading and retrying with the fresh row version", async () => {
+		// 并发操作者在首次写入被拒后已推进文档：行版本 6、他人改动可见。
+		let rowVersion = 5;
+		let settings: Record<string, unknown> = { siteName: "edge" };
+		let writes = 0;
+		const fetchMock = mockApi((url, init) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [settingsPlugin] });
+			if (url === "/api/v1/alert-sources/edge-site/credentials?limit=100")
+				return Response.json({ items: [] });
+			if (url === "/api/v1/alert-sources/edge-site")
+				return Response.json({
+					key: "edge-site",
+					protocol: SETTINGS_SOURCE_KIND,
+					enabled: true,
+					rowVersion,
+					createdAt: "2026-09-28T00:00:00Z",
+					settings,
+				});
+			if (
+				url === "/api/v1/alert-sources/edge-site/settings" &&
+				init?.method === "POST"
+			) {
+				writes += 1;
+				if (writes === 1) {
+					rowVersion = 6;
+					settings = { siteName: "edge", ignoredAlertnames: ["Theirs"] };
+					return Response.json(
+						{
+							detail: "设置已被其他操作修改，请加载最新后重试。",
+							code: "row_version_conflict",
+						},
+						{ status: 409 },
+					);
+				}
+				rowVersion += 1;
+				return Response.json({
+					key: "edge-site",
+					protocol: SETTINGS_SOURCE_KIND,
+					enabled: true,
+					rowVersion,
+					createdAt: "2026-09-28T00:00:00Z",
+					settings: { ...settings, dropResolved: true },
+				});
+			}
+			return undefined;
+		});
+		render(
+			<IntegrationView route={`/settings/platform/integrations?platform=${SETTINGS_SOURCE_KIND}&instance=edge-site`} />,
+		);
+		expect(await screen.findByText("已启用")).toBeInTheDocument();
+		// 设置卡片经目录请求解析 schema；等它渲染后再进入编辑。
+		await screen.findByText("siteName");
+		fireEvent.click(screen.getByRole("button", { name: "编辑设置" }));
+		fireEvent.click(screen.getByRole("checkbox", { name: "dropResolved" }));
+		fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+		// 错误与恢复提示同处一个描述块，用片段匹配。
+		expect(
+			await screen.findByText(/设置已被其他操作修改，请加载最新后重试。/),
+		).toBeInTheDocument();
+		fireEvent.click(
+			screen.getByRole("button", { name: "重新加载最新设置" }),
+		);
+		// 重载后草稿回填他人推进后的最新文档。
+		await waitFor(() =>
+			expect(screen.getByLabelText(/^ignoredAlertnames/)).toHaveValue("Theirs"),
+		);
+		fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+		const retryCall = await waitFor(() => {
+			const calls = fetchMock.mock.calls.filter(
+				([url, requestInit]) =>
+					String(url) === "/api/v1/alert-sources/edge-site/settings" &&
+					(requestInit as RequestInit | undefined)?.method === "POST",
+			);
+			return calls.length >= 2 ? calls[1] : undefined;
+		});
+		expect(JSON.parse(String(retryCall?.[1]?.body))).toMatchObject({
+			expectedRowVersion: 6,
+			settings: { siteName: "edge", ignoredAlertnames: ["Theirs"] },
+		});
+		// 读视图按 key/value 展示重试成功后的文档。
+		await screen.findByText("dropResolved");
+		expect(screen.getByText("true")).toBeInTheDocument();
+		expect(
+			screen.queryByRole("button", { name: "保存设置" }),
+		).not.toBeInTheDocument();
+	});
+
+	it("keeps the editable draft and shows the server validation message on 400", async () => {
+		mockApi((url, init) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [settingsPlugin] });
+			if (url === "/api/v1/alert-sources/edge-site/credentials?limit=100")
+				return Response.json({ items: [] });
+			if (url === "/api/v1/alert-sources/edge-site")
+				return Response.json({
+					key: "edge-site",
+					protocol: SETTINGS_SOURCE_KIND,
+					enabled: true,
+					rowVersion: 5,
+					createdAt: "2026-09-28T00:00:00Z",
+					settings: { siteName: "edge" },
+				});
+			if (
+				url === "/api/v1/alert-sources/edge-site/settings" &&
+				init?.method === "POST"
+			)
+				return Response.json(
+					{ detail: "ignoredAlertnames 必须为字符串数组。" },
+					{ status: 400 },
+				);
+			return undefined;
+		});
+		render(
+			<IntegrationView route={`/settings/platform/integrations?platform=${SETTINGS_SOURCE_KIND}&instance=edge-site`} />,
+		);
+		expect(await screen.findByText("已启用")).toBeInTheDocument();
+		// 设置卡片经目录请求解析 schema；等它渲染后再进入编辑。
+		await screen.findByText("siteName");
+		fireEvent.click(screen.getByRole("button", { name: "编辑设置" }));
+		fireEvent.change(screen.getByLabelText(/^ignoredAlertnames/), {
+			target: { value: "Keep" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+		expect(
+			await screen.findByText("ignoredAlertnames 必须为字符串数组。"),
+		).toBeInTheDocument();
+		// 失败保留本地修改，便于修正后直接重试。
+		expect(screen.getByLabelText(/^ignoredAlertnames/)).toHaveValue("Keep");
+	});
+});

@@ -54,6 +54,9 @@ export interface IntegrationCatalogItem {
 	connectionAuthModes?: ("none" | "basic" | "bearer")[];
 	/** 插件声明的只读 GET/200 探测路径；无路径的连接类型不得启用新实例。 */
 	connectionProbePath?: string;
+	/** 来源实例非秘密设置的封闭 JSON Schema（ADR-0014 story 2）；缺省表示
+	 * 该来源只接受空设置文档，UI 不渲染设置入口。凭据材料按构造不可出现。 */
+	eventSourceConfigSchema?: Record<string, unknown>;
 	displayName: string;
 	description: string;
 	enabled: boolean;
