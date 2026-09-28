@@ -33,8 +33,9 @@ const dailyAnalysisResultKind = "inspection_daily_analysis_result_v1"
 
 // dailyAnalysisRendererVersion 是日报分析输入快照的 renderer 代：v2 起
 // 渲染携带分页续读指令与窗口级告警上下文工具调用（首代 v1 只携带一体
-// daily_report_get 取数指令）。
-const dailyAnalysisRendererVersion = "v2"
+// daily_report_get 取数指令）；v3 起 provenance 索引按配置的上下文预算
+// 有界导览（超预算显式截断并携带 shown/total 计数），完整事实只经工具取回。
+const dailyAnalysisRendererVersion = "v3"
 
 // Command identities: the durable client_commands.command_type values for the
 // system-side daily analysis work (creation retry and result adjudication).
