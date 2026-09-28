@@ -49,7 +49,9 @@ export interface ObservationSummary {
 
 export interface AlertSourceSummary {
   key: string
-  protocol: 'alertmanager'
+  // Source kind; equals the owning plugin's catalog id. The server accepts
+  // every registered + enabled plugin with EventSource and AlertNormalizer.
+  protocol: string
   enabled: boolean
   rowVersion: number
   createdAt: string
@@ -74,7 +76,7 @@ export interface RevealCredentialResult {
 
 export interface CreateAlertSourceRequest {
   key: string
-  protocol: 'alertmanager'
+  protocol: string
   clientCommandId: string
 }
 

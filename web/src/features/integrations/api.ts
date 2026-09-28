@@ -265,7 +265,9 @@ export async function rotateMetricsInstance(
 
 interface AlertSourceProjection {
 	key: string;
-	protocol: "alertmanager";
+	// Source kind; equals the owning plugin's catalog id. The server accepts
+	// every registered + enabled plugin with EventSource and AlertNormalizer.
+	protocol: string;
 	enabled: boolean;
 	rowVersion: number;
 	createdAt?: string;
@@ -278,12 +280,15 @@ interface AlertCredentialProjection {
 	createdAt?: string;
 	firstUsedAt?: string | null;
 }
-export interface AlertmanagerInstance extends IntegrationInstance {
-	platform: "alertmanager";
+/** One configured alert event source of any registered source kind. The
+ * protocol (source kind) equals the owning plugin's catalog id; specialized
+ * admin UIs exist only for alertmanager and the metrics platforms. */
+export interface EventSourceInstance extends IntegrationInstance {
+	platform: string;
 	status: "active" | "disabled";
 	rowVersion: number;
 }
-export interface AlertmanagerCredential {
+export interface EventSourceCredential {
 	id: string;
 	rowVersion: number;
 	state: string;
@@ -293,10 +298,10 @@ export interface AlertmanagerCredential {
 export interface PublicReceiverEndpoint {
 	publicReceiverUrl: string;
 }
-function instance(source: AlertSourceProjection): AlertmanagerInstance {
+function instance(source: AlertSourceProjection): EventSourceInstance {
 	return {
 		id: source.key,
-		platform: "alertmanager",
+		platform: source.protocol,
 		displayName: source.key,
 		status: source.enabled ? "active" : "disabled",
 		createdAt: source.createdAt,
@@ -304,13 +309,13 @@ function instance(source: AlertSourceProjection): AlertmanagerInstance {
 		rowVersion: source.rowVersion,
 	};
 }
-export interface AlertmanagerInstancePage {
-	items: AlertmanagerInstance[];
+export interface EventSourceInstancePage {
+	items: EventSourceInstance[];
 	nextCursor?: string;
 }
-export async function listAlertmanagerInstances(
+export async function listEventSourceInstances(
 	cursor?: string,
-): Promise<AlertmanagerInstancePage> {
+): Promise<EventSourceInstancePage> {
 	const query = new URLSearchParams({ limit: "50" });
 	if (cursor) query.set("cursor", cursor);
 	const page = await request<{
@@ -322,25 +327,28 @@ export async function listAlertmanagerInstances(
 		nextCursor: page.nextCursor,
 	};
 }
-export async function fetchAlertmanagerInstance(
+export async function fetchEventSourceInstance(
 	key: string,
-): Promise<AlertmanagerInstance> {
+): Promise<EventSourceInstance> {
 	return instance(
 		await request<AlertSourceProjection>(
 			`/api/v1/alert-sources/${encodeURIComponent(key)}`,
 		),
 	);
 }
-export async function createAlertmanagerInstance(
+/** Creates an enabled source of any registered source kind; the server
+ * validates the protocol against the compiled, enabled plugin registry. */
+export async function createEventSourceInstance(
 	key: string,
+	protocol: string,
 ): Promise<AlertSourceCredentialMetadata> {
 	return createAlertSource({
 		key,
-		protocol: "alertmanager",
+		protocol,
 		clientCommandId: newClientCommandId(),
 	});
 }
-export async function rotateAlertmanagerCredential(
+export async function rotateEventSourceCredential(
 	key: string,
 ): Promise<AlertSourceCredentialMetadata> {
 	return request<AlertSourceCredentialMetadata>(
@@ -351,13 +359,13 @@ export async function rotateAlertmanagerCredential(
 		},
 	);
 }
-export async function revealAlertmanagerCredential(
+export async function revealEventSourceCredential(
 	handle: string,
 ): Promise<string> {
 	return (await revealCredential(handle)).bearerToken;
 }
-export async function disableAlertmanagerInstance(
-	instance: AlertmanagerInstance,
+export async function disableEventSourceInstance(
+	instance: EventSourceInstance,
 ): Promise<void> {
 	await request<void>(
 		`/api/v1/alert-sources/${encodeURIComponent(instance.id)}/disable`,
@@ -370,9 +378,9 @@ export async function disableAlertmanagerInstance(
 		},
 	);
 }
-export async function listAlertmanagerCredentials(
+export async function listEventSourceCredentials(
 	key: string,
-): Promise<AlertmanagerCredential[]> {
+): Promise<EventSourceCredential[]> {
 	const page = await request<{ items?: AlertCredentialProjection[] }>(
 		`/api/v1/alert-sources/${encodeURIComponent(key)}/credentials?limit=100`,
 	);
@@ -381,9 +389,9 @@ export async function listAlertmanagerCredentials(
 		state: credential.state ?? "Unknown",
 	}));
 }
-export async function retireAlertmanagerCredential(
+export async function retireEventSourceCredential(
 	key: string,
-	credential: AlertmanagerCredential,
+	credential: EventSourceCredential,
 ): Promise<void> {
 	await request<void>(
 		`/api/v1/alert-sources/${encodeURIComponent(key)}/credentials/${encodeURIComponent(credential.id)}/retire`,
@@ -400,6 +408,21 @@ export function fetchPublicReceiverEndpoint(): Promise<PublicReceiverEndpoint> {
 	return request<PublicReceiverEndpoint>(
 		"/api/v1/alert-sources/receiver-config",
 	);
+}
+/** Derives the public receiver URL of one source kind
+ * (/stele/webhook/{kind}) from the deployment's configured public receiver
+ * endpoint, which points at one concrete kind. The Stele gateway route itself
+ * is already kind-generic (POST /webhook/{source-kind} behind /stele). */
+export function receiverUrlForKind(
+	publicReceiverUrl: string,
+	kind: string,
+): string {
+	const rekindled = publicReceiverUrl.replace(
+		/\/webhook\/[^/]+\/?$/,
+		`/webhook/${encodeURIComponent(kind)}`,
+	);
+	if (rekindled !== publicReceiverUrl) return rekindled;
+	return `${publicReceiverUrl.replace(/\/+$/, "")}/webhook/${encodeURIComponent(kind)}`;
 }
 export function alertmanagerReceiverYaml(
 	publicReceiverUrl: string,

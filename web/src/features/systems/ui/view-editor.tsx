@@ -36,7 +36,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import {
-	listAlertmanagerInstances,
+	listEventSourceInstances,
 	listMetricsInstances,
 	type MetricsInstance,
 } from "@/features/integrations/api";
@@ -124,7 +124,7 @@ export function ViewEditor({
 	// 告警源列表只服务于可选的告警归属约束；加载失败不阻塞视图编辑。
 	useEffect(() => {
 		let cancelled = false;
-		void listAlertmanagerInstances()
+		void listEventSourceInstances()
 			.then((page) => {
 				if (!cancelled) setAlertSources(page.items.map((item) => item.id));
 			})
