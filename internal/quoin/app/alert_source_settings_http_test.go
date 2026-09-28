@@ -49,21 +49,25 @@ func TestAlertSourceSettingsLifecycleOverRealServer(t *testing.T) {
 	if err := json.Unmarshal([]byte(update.body), &detail.Body); err != nil {
 		t.Fatalf("update body malformed: %s", update.body)
 	}
-	if detail.Body.Key != "plain-am" || string(detail.Body.Settings) != "{}" {
+	if detail.Body.Key != "plain-am" || string(detail.Body.Settings) != "{}" || detail.Body.RowVersion != 1 {
 		t.Fatalf("update detail = %s", update.body)
 	}
 
-	// A stale expectedRowVersion is a recorded 409; its command id is now
-	// consumed by the rejected ledger row, so the corrected retry carries a
-	// fresh id under the current row version.
+	// Repeating the unchanged settings as a *new* command is also a semantic
+	// no-op (no row version or snapshot epoch bump). A genuinely stale
+	// expectedRowVersion still consumes its rejection command ID.
 	mustPost(t, server, admin,
-		`/api/v1/alert-sources/plain-am/settings`, `{"settings":{},"expectedRowVersion":1,"clientCommandId":"am-set-0002"}`, http.StatusConflict)
+		`/api/v1/alert-sources/plain-am/settings`, `{"settings":{},"expectedRowVersion":1,"clientCommandId":"am-set-0002"}`, http.StatusOK)
 	mustPost(t, server, admin,
-		`/api/v1/alert-sources/plain-am/settings`, `{"settings":{},"expectedRowVersion":2,"clientCommandId":"am-set-0003"}`, http.StatusOK)
+		`/api/v1/alert-sources/plain-am/disable`, `{"expectedRowVersion":1,"clientCommandId":"am-disable-0001"}`, http.StatusOK)
+	mustPost(t, server, admin,
+		`/api/v1/alert-sources/plain-am/settings`, `{"settings":{},"expectedRowVersion":1,"clientCommandId":"am-set-0003"}`, http.StatusConflict)
+	mustPost(t, server, admin,
+		`/api/v1/alert-sources/plain-am/settings`, `{"settings":{},"expectedRowVersion":2,"clientCommandId":"am-set-0004"}`, http.StatusOK)
 
 	// Unknown source is 404.
 	mustPost(t, server, admin,
-		`/api/v1/alert-sources/ghost/settings`, `{"settings":{},"expectedRowVersion":1,"clientCommandId":"am-set-0004"}`, http.StatusNotFound)
+		`/api/v1/alert-sources/ghost/settings`, `{"settings":{},"expectedRowVersion":1,"clientCommandId":"am-set-0005"}`, http.StatusNotFound)
 
 	// The settings read model is authoritative in list + detail.
 	list := mustRequest(t, server, admin, `/api/v1/alert-sources`, http.StatusOK)
@@ -86,5 +90,5 @@ func TestAlertSourceSettingsLifecycleOverRealServer(t *testing.T) {
 	scenario.createOperator(t, adminSession, "op-settings-0001", "settings-operator", "Settings Operator", operatorPassword, "operator@example.test")
 	operator := scenario.sessionHeaders(scenario.initializeOperatorSession(t, "settings-operator", operatorPassword, "Operator passphrase 2032!"))
 	mustPost(t, server, operator,
-		`/api/v1/alert-sources/plain-am/settings`, `{"settings":{},"expectedRowVersion":3,"clientCommandId":"am-set-0005"}`, http.StatusForbidden)
+		`/api/v1/alert-sources/plain-am/settings`, `{"settings":{},"expectedRowVersion":2,"clientCommandId":"am-set-0006"}`, http.StatusForbidden)
 }
