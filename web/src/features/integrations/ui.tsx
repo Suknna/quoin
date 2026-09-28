@@ -97,11 +97,13 @@ import {
 	listEventSourceCredentials,
 	listEventSourceInstances,
 	listIntegrationPlugins,
+	listPluginEventDeadletters,
 	listMetricsInstances,
 	type MetricsConnectionInput,
 	type MetricsInstance,
 	probeDiagnostic,
 	probeMetricsInstance,
+	replayPluginEventDeadletter,
 	retireEventSourceCredential,
 	revealEventSourceCredential,
 	rotateEventSourceCredential,
@@ -180,6 +182,59 @@ function CatalogCard({
 		</Card>
 	);
 }
+
+/** Operational backlog for post-commit subscribers. Replaying a deadletter
+ * is explicit and does not change the already committed source fact. */
+function PluginEventDeadletters() {
+	const [backlog, setBacklog] = useState<{ count: number; items: Awaited<ReturnType<typeof listPluginEventDeadletters>>["items"] }>();
+	const [error, setError] = useState("");
+	const [expanded, setExpanded] = useState(false);
+	const [busy, setBusy] = useState<number>();
+	const [revision, setRevision] = useState(0);
+	useEffect(() => {
+		let active = true;
+		listPluginEventDeadletters()
+			.then((result) => { if (active) { setBacklog(result); setError(""); } })
+			.catch((reason) => { if (active) setError(messageOf(reason, "无法读取插件事件死信。")); });
+		return () => { active = false; };
+	}, [revision]);
+	if (!error && !backlog?.count) return null;
+	return (
+		<Alert variant="destructive">
+			<AlertTitle>插件事件死信{backlog?.count ? ` · ${backlog.count} 条` : ""}</AlertTitle>
+			<AlertDescription>
+				{error || "事件已持久提交，但订阅者处理失败；原始告警与日报事实不受影响。"}
+			</AlertDescription>
+			<div className="mt-3 flex flex-wrap gap-2">
+				<Button variant="outline" size="sm" onClick={() => setRevision((value) => value + 1)}>刷新死信</Button>
+				{Boolean(backlog?.count) && <Button variant="outline" size="sm" onClick={() => setExpanded((value) => !value)}>{expanded ? "收起详情" : "查看详情"}</Button>}
+			</div>
+			{expanded && backlog && (
+				<div className="mt-3 space-y-2">
+					{backlog.count > backlog.items.length && <p className="text-xs">仅显示前 {backlog.items.length} 条；刷新后继续处理。</p>}
+					{backlog.items.map((entry) => (
+						<div key={entry.deliveryId} className="flex flex-wrap items-center gap-2 rounded-md border p-2 text-sm">
+							<span>事件 #{entry.eventId} · 订阅者 {entry.subscriberId} · 失败 {entry.attempts} 次</span>
+							<span className="break-all text-xs text-muted-foreground">{entry.lastError}</span>
+							<ConfirmAction
+								title={`重放死信 #${entry.deliveryId}？`}
+								description="订阅者可能再次处理同一事件，必须自行按事件 ID 幂等；原始事实不会重写。"
+								disabled={busy !== undefined}
+								onConfirm={() => {
+								setBusy(entry.deliveryId);
+								void replayPluginEventDeadletter(entry.deliveryId)
+									.then(() => { notify.success("死信已重新排队"); setRevision((value) => value + 1); })
+									.catch((reason) => notify.error(reason, "重放失败，请重试。"))
+									.finally(() => setBusy(undefined));
+							}}
+							>重放</ConfirmAction>
+						</div>
+					))}
+				</div>
+			)}
+		</Alert>
+	);
+}
 function IntegrationCatalog({ navigate }: { navigate: (to: string) => void }) {
 	const [search, setSearch] = useState("");
 	const [catalog, setCatalog] = useState<IntegrationCatalogItem[]>([]);
@@ -210,6 +265,7 @@ function IntegrationCatalog({ navigate }: { navigate: (to: string) => void }) {
 	}, [catalog, search]);
 	return (
 		<section className="flex flex-col gap-5">
+			<PluginEventDeadletters />
 			<div className="flex flex-wrap items-end justify-between gap-3">
 				<div>
 					<h1 className="text-2xl font-semibold tracking-tight">接入管理</h1>

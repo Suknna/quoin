@@ -22,10 +22,11 @@ import (
 	"strings"
 	"time"
 
+	sharedops "github.com/Suknna/quoin/internal/ops"
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/audit"
+	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	sharedops "github.com/Suknna/quoin/internal/ops"
 )
 
 // Delivery states mirror the frozen plugin_event_deliveries CHECK vocabulary.
@@ -83,8 +84,9 @@ type Dispatcher struct {
 }
 
 type dispatcherOperations struct {
-	deliver *execution.Operation
-	replay  *execution.Operation
+	deliver     *execution.Operation
+	replay      *execution.Operation
+	replayAdmin *execution.Operation
 }
 
 // NewDispatcher assembles the delivery worker over the authority database,
@@ -138,10 +140,10 @@ func NewDispatcher(db *sql.DB, reader audit.Reader, registry *plugins.Registry, 
 // operation identity, and every mutation stays an audited runner execution.
 func registerDispatcherOperations(runner *execution.Runner) (dispatcherOperations, error) {
 	ops := dispatcherOperations{}
-	declare := func(name string, target **execution.Operation) error {
+	declare := func(name string, authorize func(context.Context, *execution.Tx) error, target **execution.Operation) error {
 		op, err := runner.Register(execution.Operation{
 			Name: name, Class: execution.ClassWrite, ObjectType: "plugin_event_delivery",
-			Authorize: authorizeSystemDelivery,
+			Authorize: authorize,
 		})
 		if err != nil {
 			return fmt.Errorf("pluginevents: register %s: %w", name, err)
@@ -149,10 +151,15 @@ func registerDispatcherOperations(runner *execution.Runner) (dispatcherOperation
 		*target = op
 		return nil
 	}
-	if err := declare("plugin.event.deliver", &ops.deliver); err != nil {
+	if err := declare("plugin.event.deliver", authorizeSystemDelivery, &ops.deliver); err != nil {
 		return ops, err
 	}
-	if err := declare("plugin.event.replay", &ops.replay); err != nil {
+	if err := declare("plugin.event.replay", authorizeSystemDelivery, &ops.replay); err != nil {
+		return ops, err
+	}
+	if err := declare("plugin.event.replay_admin", func(ctx context.Context, tx *execution.Tx) error {
+		return auth.VerifyExecutionSession(ctx, tx, "admin")
+	}, &ops.replayAdmin); err != nil {
 		return ops, err
 	}
 	return ops, nil
@@ -397,8 +404,19 @@ func (dispatcher *Dispatcher) ReplayDeadletter(ctx context.Context, deliveryID i
 	if err != nil {
 		return err
 	}
-	_, err = execution.Execute(workCtx, dispatcher.runner, dispatcher.ops.replay, func(tx *execution.Tx) (bool, error) {
-		result, execErr := tx.ExecContext(workCtx, `
+	return dispatcher.replayDeadletterWith(workCtx, dispatcher.ops.replay, deliveryID)
+}
+
+// ReplayDeadletterAsAdmin rechecks a live administrator session in the same
+// transaction as the replay. The audit actor remains the human who chose the
+// replay; it is never silently rewritten as the system principal.
+func (dispatcher *Dispatcher) ReplayDeadletterAsAdmin(ctx context.Context, deliveryID int64) error {
+	return dispatcher.replayDeadletterWith(ctx, dispatcher.ops.replayAdmin, deliveryID)
+}
+
+func (dispatcher *Dispatcher) replayDeadletterWith(ctx context.Context, op *execution.Operation, deliveryID int64) error {
+	_, err := execution.Execute(ctx, dispatcher.runner, op, func(tx *execution.Tx) (bool, error) {
+		result, execErr := tx.ExecContext(ctx, `
 			UPDATE plugin_event_deliveries
 			SET state='pending', attempts=0, next_attempt_at=NULL
 			WHERE id=? AND state='deadletter'`, deliveryID)
@@ -411,7 +429,7 @@ func (dispatcher *Dispatcher) ReplayDeadletter(ctx context.Context, deliveryID i
 		}
 		if affected == 0 {
 			var state string
-			stateErr := tx.QueryRowContext(workCtx, `SELECT state FROM plugin_event_deliveries WHERE id=?`, deliveryID).Scan(&state)
+			stateErr := tx.QueryRowContext(ctx, `SELECT state FROM plugin_event_deliveries WHERE id=?`, deliveryID).Scan(&state)
 			if errors.Is(stateErr, sql.ErrNoRows) {
 				return false, &execution.Rejection{Code: "delivery_not_found", Detail: "no plugin event delivery carries this id", ObjectID: deliveryID}
 			}
@@ -455,9 +473,9 @@ func (dispatcher *Dispatcher) DeadDeliveries(ctx context.Context, limit int) ([]
 
 // DeadDelivery is one deadlettered delivery projection.
 type DeadDelivery struct {
-	DeliveryID   int64
-	EventID      int64
-	SubscriberID string
-	Attempts     int64
-	LastError    string
+	DeliveryID   int64  `json:"deliveryId"`
+	EventID      int64  `json:"eventId"`
+	SubscriberID string `json:"subscriberId"`
+	Attempts     int64  `json:"attempts"`
+	LastError    string `json:"lastError"`
 }

@@ -97,6 +97,7 @@ type apiServer struct {
 	inspectionDispatchFunc       func(ctx context.Context)
 	inspectionCancelDispatchFunc func(ctx context.Context, attemptID int64) error
 	pluginRegistry               *plugins.Registry
+	pluginEvents                 *pluginevents.Dispatcher
 	// connectionKinds is the deployment-facing view over the frozen registry
 	// that Quoin's connections domain consumes as its trusted HTTP
 	// connection-kind seam (ADR-0014); configurePlugins installs the
@@ -383,6 +384,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	if err != nil {
 		return fmt.Errorf("assemble post-commit dispatcher: %w", err)
 	}
+	application.pluginEvents = hookDispatcher
 	publisher.SetNotifier(hookDispatcher.Kick)
 	go hookDispatcher.Run(ctx)
 	// Plinth probes network partitions every 20 seconds. Accept those idle

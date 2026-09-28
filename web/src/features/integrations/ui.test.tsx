@@ -56,8 +56,8 @@ afterEach(() => {
 
 describe("integration workbench", () => {
 	it("renders the server plugin catalog without exposing unknown plugin capabilities", async () => {
-		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			Response.json({
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+			String(input).includes("/plugin-events/deadletters") ? Response.json({ count: 0, items: [] }) : Response.json({
 				items: [
 					{
 						id: "prometheus",
@@ -91,8 +91,8 @@ describe("integration workbench", () => {
 	});
 
 	it("filters the catalog by platform name", async () => {
-		vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			Response.json({
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+			String(input).includes("/plugin-events/deadletters") ? Response.json({ count: 0, items: [] }) : Response.json({
 				items: [
 					{
 						id: "thanos",
@@ -120,6 +120,31 @@ describe("integration workbench", () => {
 		});
 		expect(screen.getByText("Thanos")).toBeInTheDocument();
 		expect(screen.queryByText("Alertmanager")).not.toBeInTheDocument();
+	});
+
+	it("shows the bounded subscriber deadletter and explicitly confirms replay", async () => {
+		let replayed = false;
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const url = String(input);
+			if (url.endsWith("/api/v1/integrations/plugins")) return Response.json({ items: [] });
+			if (url.endsWith("/api/v1/integrations/plugin-events/deadletters")) {
+				return Response.json(replayed ? { count: 0, items: [] } : { count: 1, items: [{ deliveryId: 7, eventId: 8, subscriberId: "hooky", attempts: 5, lastError: "handler_failed" }] });
+			}
+			if (url.endsWith("/api/v1/integrations/plugin-events/deadletters/7/replay") && init?.method === "POST") {
+				replayed = true;
+				return new Response(null, { status: 204 });
+			}
+			return Response.json({ message: "unexpected request" }, { status: 500 });
+		});
+		render(<IntegrationView />);
+		expect(await screen.findByText("插件事件死信 · 1 条")).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "查看详情" }));
+		expect(screen.getByText(/事件 #8 · 订阅者 hooky/)).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "重放" }));
+		fireEvent.click(screen.getByRole("button", { name: "确认" }));
+		await waitFor(() => expect(replayed).toBe(true));
+		await waitFor(() => expect(screen.queryByText("插件事件死信 · 1 条")).not.toBeInTheDocument());
+		expect(fetchMock).toHaveBeenCalledWith("/api/v1/integrations/plugin-events/deadletters/7/replay", expect.objectContaining({ method: "POST" }));
 	});
 
 	it("shows denied content instead of a management view to an operator", () => {

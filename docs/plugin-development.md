@@ -101,7 +101,10 @@ Quoin 同样在接收时复核。声明一个新类型不等于核心已有其�
 提交后才异步回调 `HandlePostCommitFact(ctx, fact)`；回调拿不到业务库句柄、平台凭据、
 原始正文，不能改变已完成的 Stele/Quoin ACK 裁决。`fact.ID` 是稳定的事件身份，
 **处理器必须自己按 `(插件 ID, fact.ID)` 幂等**，因为崩溃/重试后可能再次调用。
-有界重试后进入死信，重放必须显式操作；没有启用订阅者时不产生额外业务事件行。
+有界重试后进入死信；管理员可从接入管理页查看或使用
+`GET /api/v1/integrations/plugin-events/deadletters` 读取有界诊断，确认后通过
+`POST /api/v1/integrations/plugin-events/deadletters/{deliveryId}/replay` 显式重放。
+没有启用订阅者时不产生额外业务事件行。
 新增领域语义不能仅靠订阅者凭空扩展核心事实词表，仍需有版本的核心契约变更。
 
 ## 受控 HTTP 接入与探测

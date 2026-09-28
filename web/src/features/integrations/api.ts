@@ -20,6 +20,22 @@ export async function listIntegrationPlugins(): Promise<
 	return page.items;
 }
 
+export interface PluginEventDeadletter {
+	deliveryId: number;
+	eventId: number;
+	subscriberId: string;
+	attempts: number;
+	lastError: string;
+}
+
+export async function listPluginEventDeadletters(): Promise<{ count: number; items: PluginEventDeadletter[] }> {
+	return request<{ count: number; items: PluginEventDeadletter[] }>("/api/v1/integrations/plugin-events/deadletters");
+}
+
+export async function replayPluginEventDeadletter(deliveryId: number): Promise<void> {
+	await request<void>(`/api/v1/integrations/plugin-events/deadletters/${deliveryId}/replay`, { method: "POST" });
+}
+
 export type MetricsPlatform = "prometheus" | "thanos";
 export type MetricsAuthMode = "none" | "basic" | "bearer";
 

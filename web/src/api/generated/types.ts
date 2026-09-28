@@ -1658,6 +1658,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/integrations/plugin-events/deadletters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 查看插件提交后事件死信（Admin）
+         * @description count 为完整死信总量，items 为按 id 排序的前 100 条；只含有界诊断，不含事件正文或凭据。
+         */
+        get: operations["listPluginEventDeadletters"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integrations/plugin-events/deadletters/{deliveryId}/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                deliveryId: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 人工重放一条插件事件死信（Admin）
+         * @description 重放是审计的人工命令；只允许死信，已投递或待重试条目返回冲突，不改变原业务事实。
+         */
+        post: operations["replayPluginEventDeadletter"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/connections": {
         parameters: {
             query?: never;
@@ -7317,6 +7359,63 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    listPluginEventDeadletters: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 插件事件死信诊断。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        count: number;
+                        items: {
+                            deliveryId: number;
+                            eventId: number;
+                            subscriberId: string;
+                            attempts: number;
+                            lastError: string;
+                        }[];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    replayPluginEventDeadletter: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                deliveryId: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 死信已重新排队。 */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     listConnections: {

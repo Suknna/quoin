@@ -8,11 +8,14 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sort"
 
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/execution"
+	"github.com/Suknna/quoin/internal/quoin/pluginevents"
 	"github.com/danielgtaylor/huma/v2"
 )
 
@@ -77,6 +80,73 @@ type integrationsPluginsOutput struct {
 // registerPluginRoutes owns the management catalog surface.
 func (application *apiServer) registerPluginRoutes(api huma.API) {
 	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/integrations/plugins", OperationID: "listIntegrationPlugins"}, application.integrationsPlugins)
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/integrations/plugin-events/deadletters", OperationID: "listPluginEventDeadletters"}, application.listPluginEventDeadletters)
+	huma.Register(api, huma.Operation{Method: http.MethodPost, Path: "/api/v1/integrations/plugin-events/deadletters/{deliveryId}/replay", OperationID: "replayPluginEventDeadletter", DefaultStatus: http.StatusNoContent}, application.replayPluginEventDeadletter)
+}
+
+type pluginEventDeadlettersInput struct {
+	Session string `cookie:"__Host-quoin-session"`
+}
+
+type pluginEventDeadlettersOutput struct {
+	CacheControl string `header:"Cache-Control"`
+	Body         struct {
+		Count int64                       `json:"count"`
+		Items []pluginevents.DeadDelivery `json:"items"`
+	} `json:"body"`
+}
+
+func (application *apiServer) listPluginEventDeadletters(ctx context.Context, input *pluginEventDeadlettersInput) (*pluginEventDeadlettersOutput, error) {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "查看插件事件死信"); err != nil {
+		return nil, err
+	}
+	if application.pluginEvents == nil {
+		return nil, huma.Error503ServiceUnavailable("插件事件派发器尚未就绪")
+	}
+	count, err := application.pluginEvents.DeadCount(ctx)
+	if err != nil {
+		return nil, huma.Error503ServiceUnavailable("无法读取插件事件死信", err)
+	}
+	items, err := application.pluginEvents.DeadDeliveries(ctx, 100)
+	if err != nil {
+		return nil, huma.Error503ServiceUnavailable("无法读取插件事件死信", err)
+	}
+	output := &pluginEventDeadlettersOutput{CacheControl: "no-store"}
+	output.Body.Count = count
+	output.Body.Items = items
+	return output, nil
+}
+
+type replayPluginEventDeadletterInput struct {
+	Session    string `cookie:"__Host-quoin-session"`
+	DeliveryID int64  `path:"deliveryId" minimum:"1"`
+}
+
+type replayPluginEventDeadletterOutput struct {
+	Status int `header:"-"`
+}
+
+func (application *apiServer) replayPluginEventDeadletter(ctx context.Context, input *replayPluginEventDeadletterInput) (*replayPluginEventDeadletterOutput, error) {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "重放插件事件死信"); err != nil {
+		return nil, err
+	}
+	if application.pluginEvents == nil {
+		return nil, huma.Error503ServiceUnavailable("插件事件派发器尚未就绪")
+	}
+	if err := application.pluginEvents.ReplayDeadletterAsAdmin(ctx, input.DeliveryID); err != nil {
+		var rejection *execution.Rejection
+		switch {
+		case errors.As(err, &rejection):
+			if rejection.Code == "delivery_not_found" {
+				return nil, huma.Error404NotFound("插件事件投递不存在")
+			}
+			return nil, huma.Error409Conflict("只有死信可重放", err)
+		default:
+			return nil, huma.Error503ServiceUnavailable("插件事件死信重放失败", err)
+		}
+	}
+	application.pluginEvents.Kick()
+	return &replayPluginEventDeadletterOutput{Status: http.StatusNoContent}, nil
 }
 
 // integrationsPlugins serves the authoritative plugin management catalog:

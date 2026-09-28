@@ -126,6 +126,8 @@ func accessDeclarationTable() map[string]operations.Declaration {
 	// 观测与插件（Admin）。
 	add(
 		declaration("listIntegrationPlugins", http.MethodGet, "/api/v1/integrations/plugins", operations.LevelAdmin, operations.KindQuery, "plugin"),
+		declaration("listPluginEventDeadletters", http.MethodGet, "/api/v1/integrations/plugin-events/deadletters", operations.LevelAdmin, operations.KindQuery, "plugin_event_delivery"),
+		declaration("replayPluginEventDeadletter", http.MethodPost, "/api/v1/integrations/plugin-events/deadletters/{deliveryId}/replay", operations.LevelAdmin, operations.KindCommand, "plugin_event_delivery"),
 	)
 
 	// 业务上下文（User）。

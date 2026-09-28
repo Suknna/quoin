@@ -356,6 +356,49 @@ func TestDeadletterThenExplicitReplay(t *testing.T) {
 	}
 }
 
+func TestAdminReplayRechecksSessionAndKeepsHumanAuditActor(t *testing.T) {
+	fixture := newFixture(t, []string{"watcher"}, []string{"watcher"})
+	fixture.dispatcher.maxAttempts = 1
+	fixture.subscriber.failFirst = 1
+	eventID := fixture.emit(t, sampleFact())
+	drainUntil(t, fixture.dispatcher, func() bool {
+		state, _, _ := deliveryState(t, fixture.db, eventID)
+		return state == stateDeadletter
+	})
+	deliveryID := eventRowDeliveryID(t, fixture.db, eventID)
+	if err := fixture.dispatcher.ReplayDeadletterAsAdmin(context.Background(), deliveryID); err == nil {
+		t.Fatal("replay without an admin session unexpectedly succeeded")
+	}
+	for _, statement := range []string{
+		`INSERT INTO users(id,username,display_name,role,enabled,initialized,password_phc,row_version,created_at,updated_at) VALUES(1,'admin','Admin','admin',1,1,'fixture',1,'2026-09-01T00:00:00Z','2026-09-01T00:00:00Z')`,
+		`INSERT INTO sessions(id,user_id,session_token_digest,auth_revision_at_issue,client_label,created_at,last_active_at,idle_expires_at,absolute_expires_at) VALUES(1,1,zeroblob(32),1,'plugin-replay','2026-09-01T00:00:00Z','2026-09-01T00:00:00Z','2099-01-01T00:00:00Z','2099-01-01T00:00:00Z')`,
+	} {
+		if _, err := fixture.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adminCtx, err := execution.WithMetadata(context.Background(), execution.Metadata{
+		CorrelationID: "admin-plugin-replay", Actor: execution.Principal{Kind: execution.PrincipalUser, ID: 1},
+		Source:  execution.Source{Kind: execution.SourceHTTP, RequestID: "req-admin-plugin-replay"},
+		Session: execution.SessionRef{ID: 1, AuthRevision: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.dispatcher.ReplayDeadletterAsAdmin(adminCtx, deliveryID); err != nil {
+		t.Fatal(err)
+	}
+	state, _, _ := deliveryState(t, fixture.db, eventID)
+	if state != statePending {
+		t.Fatalf("admin replay did not requeue deadletter: %s", state)
+	}
+	var actorKind string
+	var actorID int64
+	if err := fixture.db.QueryRow(`SELECT actor_type,actor_id FROM audit_events WHERE action='plugin.event.replay_admin' ORDER BY id DESC LIMIT 1`).Scan(&actorKind, &actorID); err != nil || actorKind != "user" || actorID != 1 {
+		t.Fatalf("replay audit actor=%s/%d err=%v", actorKind, actorID, err)
+	}
+}
+
 func TestDisabledSubscriberDeadletters(t *testing.T) {
 	// Both subscribers were enabled when the fact was enqueued; the
 	// delivering boot deploys only "watcher", so "dozing"'s durable delivery

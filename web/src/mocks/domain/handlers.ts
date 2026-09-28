@@ -286,6 +286,14 @@ function typedScope(scope: {
 
 /** All handlers are local deterministic projections; none contacts a remote service. */
 export const domainHandlers = [
+	http.get("*/api/v1/integrations/plugin-events/deadletters", () => {
+		const denied = adminRequired();
+		return denied ?? json({ count: 0, items: [] });
+	}),
+	http.post("*/api/v1/integrations/plugin-events/deadletters/:deliveryId/replay", () => {
+		const denied = adminRequired();
+		return denied ?? problem(404, "离线演示没有插件事件死信。");
+	}),
 	http.get("*/api/v1/integrations/plugins", () => {
 		const denied = adminRequired();
 		if (denied) return denied;
