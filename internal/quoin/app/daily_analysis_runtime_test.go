@@ -492,6 +492,10 @@ func TestDailyAlertsGetToolExecutorBoundsToFrozenWindow(t *testing.T) {
 	}
 	seedAlertOccurrence(t, 101, "2026-09-27T10:00:00Z", "2026-09-27T10:00:05Z", "DB 超时")
 	seedAlertOccurrence(t, 102, "2026-09-27T02:00:00Z", "2026-09-27T02:00:05Z", "队列积压")
+	// The current occurrence state can change after the frozen cutoff. The
+	// daily tool must show what was known at cutoff, not today's state.
+	mustExec(t, db, `UPDATE alert_occurrences SET state='Resolved',resolved_at='2026-09-28T07:00:00Z',last_state_change_at='2026-09-28T07:00:00Z',row_version=2 WHERE id=101`)
+	mustExec(t, db, `UPDATE alert_occurrences SET state='Resolved',resolved_at='2026-09-28T05:00:00Z',last_state_change_at='2026-09-28T05:00:00Z',row_version=2 WHERE id=102`)
 	// 窗口结束之后 0.5 秒（小数边界）：窗口外，绝不出现。
 	seedAlertOccurrence(t, 103, "2026-09-28T00:00:00.5Z", "2026-09-28T00:00:06Z", "越界尾")
 	// 窗口开始之前 0.5 秒：窗口外，绝不出现。
@@ -539,6 +543,7 @@ func TestDailyAlertsGetToolExecutorBoundsToFrozenWindow(t *testing.T) {
 			OccurrenceID string   `json:"occurrenceId"`
 			SourceKey    string   `json:"sourceKey"`
 			Title        string   `json:"title"`
+			State        string   `json:"state"`
 			StartsAt     string   `json:"startsAt"`
 			ViewKeys     []string `json:"viewKeys"`
 		} `json:"alerts"`
@@ -567,6 +572,9 @@ func TestDailyAlertsGetToolExecutorBoundsToFrozenWindow(t *testing.T) {
 		if want.viewKeys != nil && len(want.viewKeys) > 0 && got.ViewKeys[0] != "checkout" {
 			t.Fatalf("alert %s must carry its frozen correlation", want.id)
 		}
+	}
+	if payload.Alerts[0].State != "Firing" || payload.Alerts[2].State != "Resolved" {
+		t.Fatalf("post-cutoff state leaked or pre-cutoff resolution lost: %+v", payload.Alerts)
 	}
 	// 确定性分页：limit=1 逐页取全，hasMore 精确收敛。
 	collected := []string{}

@@ -516,7 +516,7 @@ func (service *RuntimeService) dailyWindowAlertRows(ctx context.Context, attempt
 	sqlEnd := windowEnd.Add(2 * time.Second).UTC().Format(fixedNano)
 	sqlCutoff := cutoff.Add(2 * time.Second).UTC().Format(fixedNano)
 	rows, err := attempts.Reader().QueryContext(ctx, `
-		SELECT o.id, s.source_key, o.severity, o.title, o.state, o.starts_at, o.resource, o.first_seen_at
+		SELECT o.id, s.source_key, o.severity, o.title, o.state, o.starts_at, o.resource, o.first_seen_at, o.resolved_at
 		FROM alert_occurrences o JOIN alert_sources s ON s.id=o.source_id
 		WHERE o.starts_at >= ? AND o.starts_at < ? AND o.first_seen_at <= ?
 		ORDER BY o.starts_at DESC, o.id DESC`, sqlStart, sqlEnd, sqlCutoff)
@@ -527,7 +527,8 @@ func (service *RuntimeService) dailyWindowAlertRows(ctx context.Context, attempt
 	window := []dailyAlertRow{}
 	for rows.Next() {
 		var row dailyAlertRow
-		if err := rows.Scan(&row.OccurrenceID, &row.SourceKey, &row.Severity, &row.Title, &row.State, &row.StartedAt, &row.Resource, &row.FirstSeenAt); err != nil {
+		var resolvedAt sql.NullString
+		if err := rows.Scan(&row.OccurrenceID, &row.SourceKey, &row.Severity, &row.Title, &row.State, &row.StartedAt, &row.Resource, &row.FirstSeenAt, &resolvedAt); err != nil {
 			return nil, err
 		}
 		startedAt, err := time.Parse(time.RFC3339Nano, row.StartedAt)
@@ -540,6 +541,20 @@ func (service *RuntimeService) dailyWindowAlertRows(ctx context.Context, attempt
 		}
 		if startedAt.Before(windowStart) || !startedAt.Before(windowEnd) || firstSeenAt.After(cutoff) {
 			continue
+		}
+		// alert_occurrences.state is mutable. Its first resolved_at is a
+		// committed lifecycle fact and cannot move back to Firing, so derive
+		// the state as of this report's frozen cutoff instead of leaking a
+		// resolution that only arrived on a later day.
+		row.State = "Firing"
+		if resolvedAt.Valid {
+			resolvedTime, parseErr := time.Parse(time.RFC3339Nano, resolvedAt.String)
+			if parseErr != nil {
+				return nil, fmt.Errorf("alert occurrence %d has invalid resolved_at %q: %w", row.OccurrenceID, resolvedAt.String, parseErr)
+			}
+			if !resolvedTime.After(cutoff) {
+				row.State = "Resolved"
+			}
 		}
 		row.startedTime = startedAt
 		window = append(window, row)
