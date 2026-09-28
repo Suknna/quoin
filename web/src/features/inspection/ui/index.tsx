@@ -34,7 +34,17 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import {
+	Empty,
+	EmptyDescription,
+	EmptyHeader,
+	EmptyTitle,
+} from "@/components/ui/empty";
+import { Separator } from "@/components/ui/separator";
 import { DetailSheet } from "@/components/workbench/DetailSheet";
+import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
+import { PropertyList } from "@/components/workbench/PropertyList";
 import {
 	createInspectionRun,
 	formatInspectionTime,
@@ -61,9 +71,9 @@ function parts(route: string) {
 	const { pathname, searchParams } = parseRoute(route);
 	return { path: pathname, query: searchParams };
 }
-function runRoute(runId: string) {
-	// 详情是右侧抽屉，由 query 标志驱动：列表页保持在抽屉下方挂载。
-	return `/inspections?run=${encodeURIComponent(runId)}`;
+function runRoute(runId: string, path = "/inspections") {
+	// 详情是右侧抽屉，由 query 标志驱动：所在页面（概览或计划详情）保持在抽屉下方挂载。
+	return `${path}?run=${encodeURIComponent(runId)}`;
 }
 function newPlanRoute(prefill?: PlanEditorPrefill) {
 	const query = new URLSearchParams();
@@ -214,6 +224,10 @@ export function useInspectionsModule(
 	const creatingPlan = path === "/inspections/plans/new";
 	const editMatch = path.match(/^\/inspections\/plans\/([^/]+)\/edit$/);
 	const editPlanKey = editMatch ? decodeURIComponent(editMatch[1]) : undefined;
+	const detailMatch = path.match(/^\/inspections\/plans\/([^/]+)$/);
+	const detailPlanKey = detailMatch
+		? decodeURIComponent(detailMatch[1])
+		: undefined;
 	const connectionHint = query.get("connectionName") ?? "";
 	const businessViewHint = query.get("businessViewKey") ?? "";
 	// 预填始终来自 URL 提示：概览页操作按钮与 deep-link 升级都把它带给编辑器路由。
@@ -227,31 +241,17 @@ export function useInspectionsModule(
 	const editorPrefill: PlanEditorPrefill | undefined =
 		creatingPlan || editPlanKey ? hintPrefill : undefined;
 	const [plans, setPlans] = useState<InspectionPlan[]>([]);
-	const [planFilter, setPlanFilter] = useState("all");
+	const [latestRuns, setLatestRuns] = useState<
+		Record<string, InspectionRunSummary>
+	>({});
 	const [loaded, setLoaded] = useState(false);
 	const [chooserOpen, setChooserOpen] = useState(false);
 	const [chooserPlan, setChooserPlan] = useState("");
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [hintApplied, setHintApplied] = useState(false);
-	// 巡检记录走统一游标翻页；读取全部由下方 load() 驱动（路径返回、活跃
-	// 轮询、保存后刷新共用同一入口），故关掉 hook 的自动挂载加载。
-	const runsList = useCursorPages<InspectionRunSummary>(
-		(cursor) =>
-			listInspectionRuns({
-				cursor,
-				...(planFilter === "all" ? {} : { planKey: planFilter }),
-			}),
-		{
-			suspended: props.suspended,
-			fallbackError: "无法读取巡检记录。",
-			autoLoad: false,
-		},
-	);
-	const runs = runsList.items;
-	const { refresh: refreshRuns } = runsList;
-	// Runs and plans are independent reads: each settles and updates the UI on its
-	// own, so one hung or failing endpoint can never starve the other.
+	// Plans and the latest-run projection are independent reads: each settles and
+	// updates the UI on its own, so one hung endpoint can never starve the other.
 	const load = useCallback(async () => {
 		const plansRead = listInspectionPlans().then(
 			(items) => {
@@ -260,20 +260,28 @@ export function useInspectionsModule(
 			},
 			(reason: unknown) => setError(messageOf(reason, "无法读取巡检计划。")),
 		);
+		// 概览只取第一页 Run 投影“最近一次结论”；更早的历史归档在计划详情页分页呈现。
+		const latestRead = listInspectionRuns({ limit: 100 }).then(
+			(page) => setLatestRuns(latestByPlan(page.items)),
+			(reason: unknown) => setError(messageOf(reason, "无法读取巡检记录。")),
+		);
 		// The wrapped reads never reject; awaiting them keeps save-reload callers in step.
-		await Promise.allSettled([refreshRuns(), plansRead]);
-	}, [refreshRuns]);
-	// biome-ignore lint/correctness/useExhaustiveDependencies: path 是有意依赖——从编辑器或 Run 页返回概览时必须重新拉取计划与记录。
+		await Promise.allSettled([plansRead, latestRead]);
+	}, []);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: path 是有意依赖——从编辑器或 Run 页返回时必须重新拉取计划与最近结论。
 	useEffect(() => {
 		const timer = window.setTimeout(() => void load(), 0);
 		return () => clearTimeout(timer);
-	}, [load, path, planFilter]);
+	}, [load, path]);
+	// 概览有执行中的 Run 时轮询最近结论；计划详情页对自己的历史归档单独轮询。
+	const hasActiveRun = Object.values(latestRuns).some((run) =>
+		inspectionActive(run.state),
+	);
 	useEffect(() => {
-		if (props.suspended || !runs.some((run) => inspectionActive(run.state)))
-			return;
+		if (props.suspended || !hasActiveRun) return;
 		const timer = window.setTimeout(() => void load(), 2000);
 		return () => clearTimeout(timer);
-	}, [load, props.suspended, runs]);
+	}, [load, props.suspended, hasActiveRun]);
 	// Deep links act once. A business-view hint only ever matches business-view
 	// scoped plans — a same-connection integration plan would widen the range, so
 	// without a match the prefilled editor route is opened instead of any run.
@@ -341,7 +349,7 @@ export function useInspectionsModule(
 			notify.success("已开始巡检");
 			setChooserOpen(false);
 			await load();
-			props.navigate(runRoute(run.id));
+			props.navigate(runRoute(run.id, path));
 		} catch (reason) {
 			// 失败原因保留内联展示：ui/index.test.tsx 断言该文案同时出现在 chooser 与 overview，不迁移到全局 toast。
 			setError(messageOf(reason, "无法创建巡检。"));
@@ -389,123 +397,77 @@ export function useInspectionsModule(
 					</Alert>
 				))}
 			<section className="space-y-3">
-				<h2 className="text-xl font-semibold">巡检计划</h2>
-				<p className="text-sm text-muted-foreground">
-					计划绑定接入与模板，按范围定期或手动采证；每次运行生成一份不可修改的报告。
-				</p>
+				<div className="flex flex-wrap items-start justify-between gap-2">
+					<div className="space-y-1">
+						<h2 className="text-xl font-semibold">巡检计划</h2>
+						<p className="text-sm text-muted-foreground">
+							计划绑定接入与模板，按范围定期或手动采证；点击计划查看最近结论与历史归档。
+						</p>
+					</div>
+					<div className="flex gap-2">
+						<Button
+							variant="outline"
+							size="sm"
+							disabled={props.suspended}
+							onClick={openChooser}
+						>
+							运行巡检
+						</Button>
+						<Button
+							size="sm"
+							disabled={props.suspended}
+							onClick={() => props.navigate(newPlanRoute(hintPrefill))}
+						>
+							新建计划
+						</Button>
+					</div>
+				</div>
 				<EntityList
-					items={plans.map((item) => ({
-						id: item.planKey,
-						title: item.displayName,
-						subtitle: [
-							item.planKey,
-							item.connectionName,
-							inspectionScopeText(item.scope),
-							inspectionScheduleText(item),
-						].join(" · "),
-						badge: {
-							text: item.enabled ? "已启用" : "已停用",
-							variant: item.enabled
-								? ("secondary" as const)
-								: ("outline" as const),
-						},
-						time: formatInspectionTime(item.updatedAt),
-						plan: item,
-					}))}
+					items={plans.map((item) => {
+						const latest = latestRuns[item.planKey];
+						return {
+							id: item.planKey,
+							title: item.displayName,
+							subtitle: [
+								item.planKey,
+								item.connectionName,
+								inspectionScopeText(item.scope),
+								inspectionScheduleText(item),
+							].join(" · "),
+							badge: {
+								text: item.enabled ? "已启用" : "已停用",
+								variant: item.enabled
+									? ("secondary" as const)
+									: ("outline" as const),
+							},
+							// 最近一次结论：最新 Run 的状态与完成时间；从未运行如实标注。
+							time: latest
+								? `最近 ${inspectionStateText[latest.state]} · ${formatInspectionTime(latest.createdAt)}`
+								: "从未运行",
+							plan: item,
+						};
+					})}
 					columns={["title", "subtitle", "status", "time", "actions"]}
 					onSelect={(item) =>
 						props.navigate(
-							`/inspections/plans/${encodeURIComponent(item.plan.planKey)}/edit`,
+							`/inspections/plans/${encodeURIComponent(item.plan.planKey)}`,
 						)
 					}
 					renderActions={(item) => (
-						<div className="flex gap-2">
-							<Button
-								variant="outline"
-								size="sm"
-								aria-label={`编辑 ${item.plan.displayName}`}
-								disabled={props.suspended}
-								onClick={() =>
-									props.navigate(
-										`/inspections/plans/${encodeURIComponent(item.plan.planKey)}/edit`,
-									)
-								}
-							>
-								编辑
-							</Button>
-							<Button
-								variant="outline"
-								size="sm"
-								aria-label={`运行 ${item.plan.displayName}`}
-								disabled={!item.plan.enabled || busy || props.suspended}
-								onClick={() => void startPlan(item.plan.planKey)}
-							>
-								运行
-							</Button>
-						</div>
+						<Button
+							variant="outline"
+							size="sm"
+							aria-label={`运行 ${item.plan.displayName}`}
+							disabled={!item.plan.enabled || busy || props.suspended}
+							onClick={() => void startPlan(item.plan.planKey)}
+						>
+							运行
+						</Button>
 					)}
 					loading={!loaded}
 					loadingLabel="正在读取巡检计划"
 					emptyTitle="还没有巡检计划"
 					emptyDescription="使用标题栏的“新建计划”为接入创建第一个巡检计划。"
-				/>
-			</section>
-			<section className="space-y-3">
-				<div className="flex flex-wrap items-center justify-between gap-2">
-					<h2 className="text-xl font-semibold">巡检记录</h2>
-					<Select value={planFilter} onValueChange={setPlanFilter}>
-						<SelectTrigger aria-label="按计划筛选" className="w-40">
-							<SelectValue placeholder="全部计划" />
-						</SelectTrigger>
-						<SelectContent>
-							<SelectGroup>
-								<SelectItem value="all">全部计划</SelectItem>
-								{plans.map((item) => (
-									<SelectItem key={item.planKey} value={item.planKey}>
-										{item.displayName}
-									</SelectItem>
-								))}
-							</SelectGroup>
-						</SelectContent>
-					</Select>
-				</div>
-				<p className="text-sm text-muted-foreground">
-					每次运行生成一份不可修改的报告。
-				</p>
-				<EntityList
-					items={runs.map((run) => ({
-						id: run.id,
-						title: `${planName(run.planKey)} · Run ${run.id}`,
-						subtitle: [run.connectionName, run.triggerKind === "manual" ? "手动" : "定时"]
-						.filter(Boolean)
-						.join(" · "),
-						badge: {
-							text: inspectionStateText[run.state],
-							variant: "outline" as const,
-							className: statusBadgeClass(run.state),
-						},
-						time: formatInspectionTime(run.createdAt),
-						run,
-					}))}
-					columns={["title", "subtitle", "status", "time"]}
-					selectedId={runId}
-					onSelect={(item) => props.navigate(runRoute(item.run.id))}
-					loading={runsList.loading}
-					loadingLabel="正在读取巡检记录"
-					emptyTitle="没有巡检记录"
-				/>
-				{runsList.error && (
-					<Alert variant="destructive">
-						<AlertDescription>{runsList.error}</AlertDescription>
-					</Alert>
-				)}
-				<CursorPagination
-					page={runsList.page}
-					hasPrev={runsList.hasPrev}
-					hasNext={runsList.hasNext}
-					loading={runsList.navigating}
-					onPrev={runsList.goPrev}
-					onNext={runsList.goNext}
 				/>
 			</section>
 		</div>
@@ -529,29 +491,13 @@ export function useInspectionsModule(
 			/>
 		</Dialog>
 	);
-	const onOverview = !runId && !creatingPlan && !editPlanKey;
-	const actions = onOverview ? (
-		<>
-			<Button
-				variant="outline"
-				disabled={props.suspended}
-				onClick={openChooser}
-			>
-				运行巡检
-			</Button>
-			<Button
-				disabled={props.suspended}
-				onClick={() => props.navigate(newPlanRoute(hintPrefill))}
-			>
-				新建计划
-			</Button>
-		</>
-	) : undefined;
-	const runSummary = runId ? runs.find((run) => run.id === runId) : undefined;
+	const runSummary = runId
+		? Object.values(latestRuns).find((run) => run.id === runId)
+		: undefined;
 	const runSheet = runId && (
 		<DetailSheet
 			open
-			onClose={() => props.navigate("/inspections")}
+			onClose={() => props.navigate(path)}
 			title={
 				runSummary
 					? `${planName(runSummary.planKey)} · Run ${runSummary.id}`
@@ -564,7 +510,7 @@ export function useInspectionsModule(
 					<RunDetail
 						runId={runId}
 						props={props}
-						onOpenRun={(id) => props.navigate(runRoute(id))}
+						onOpenRun={(id) => props.navigate(runRoute(id, path))}
 					/>
 				</div>
 			</div>
@@ -575,18 +521,31 @@ export function useInspectionsModule(
 			? "新建巡检计划"
 			: editPlanKey
 				? "编辑巡检计划"
-				: "巡检",
+				: detailPlanKey
+					? planName(detailPlanKey)
+					: "巡检",
 		crumbs: creatingPlan
 			? [{ label: "巡检", to: "/inspections" }, { label: "新建巡检计划" }]
 			: editPlanKey
 				? [
 						{ label: "巡检", to: "/inspections" },
-						{ label: `编辑 ${planName(editPlanKey)}` },
+						{
+							label: planName(editPlanKey),
+							to: `/inspections/plans/${encodeURIComponent(editPlanKey)}`,
+						},
+						{ label: "编辑" },
 					]
-				: undefined,
+				: detailPlanKey
+					? [
+							{ label: "巡检", to: "/inspections" },
+							{ label: planName(detailPlanKey) },
+						]
+					: undefined,
 		// 记录列表并入右侧概览页：第二栏只保留共享的运维模块导航，与告警列表一致。
 		list: null,
-		actions,
+		// 概览操作内联在页面头行（与用户管理/模型提供方同一模式），不走 shell
+		// actions——概览页因此与其它页面一样没有顶部 sticky 标头。
+		actions: undefined,
 		content: (
 			<>
 				{chooserDialog}
@@ -598,10 +557,182 @@ export function useInspectionsModule(
 						editKey={editPlanKey}
 						prefill={creatingPlan ? editorPrefill : undefined}
 					/>
+				) : detailPlanKey ? (
+					<PlanDetail
+						plan={plans.find((item) => item.planKey === detailPlanKey)}
+						plansLoaded={loaded}
+						props={props}
+						busy={busy}
+						onRun={(planKey) => void startPlan(planKey)}
+					/>
 				) : (
 					overview
 				)}
 			</>
 		),
 	};
+}
+
+/** 概览行的“最近一次结论”：按创建时间倒序取每个计划的最新一条 Run。 */
+function latestByPlan(runs: InspectionRunSummary[]) {
+	const latest: Record<string, InspectionRunSummary> = {};
+	for (const run of [...runs].sort((a, b) =>
+		b.createdAt.localeCompare(a.createdAt),
+	)) {
+		if (!latest[run.planKey]) latest[run.planKey] = run;
+	}
+	return latest;
+}
+
+/**
+ * 计划详情：配置概要 + 操作（运行/编辑）+ 该计划的历史归档（分页 Run 列表）。
+ * 记录是计划的下一级，不再与计划并列堆在概览页。
+ */
+function PlanDetail({
+	plan,
+	plansLoaded,
+	props,
+	busy,
+	onRun,
+}: {
+	plan: InspectionPlan | undefined;
+	plansLoaded: boolean;
+	props: WorkspaceModuleProps;
+	busy: boolean;
+	onRun: (planKey: string) => void;
+}) {
+	const planKey = plan?.planKey ?? "";
+	const history = useCursorPages<InspectionRunSummary>(
+		(cursor) =>
+			planKey
+				? listInspectionRuns({ planKey, cursor })
+				: Promise.resolve({ items: [] }),
+		{
+			suspended: props.suspended,
+			resetKey: planKey,
+			fallbackError: "无法读取巡检记录。",
+		},
+	);
+	const hasActive = history.items.some((run) => inspectionActive(run.state));
+	const { refresh: refreshHistory } = history;
+	useEffect(() => {
+		if (props.suspended || !hasActive) return;
+		const timer = window.setTimeout(() => void refreshHistory(), 2000);
+		return () => window.clearTimeout(timer);
+	}, [props.suspended, hasActive, refreshHistory]);
+	if (plansLoaded && !plan)
+		return (
+			<Empty>
+				<EmptyHeader>
+					<EmptyTitle>计划不存在</EmptyTitle>
+					<EmptyDescription>它可能已被删除，或链接有误。</EmptyDescription>
+				</EmptyHeader>
+				<Button
+					variant="outline"
+					size="sm"
+					onClick={() => props.navigate("/inspections")}
+				>
+					返回巡检概览
+				</Button>
+			</Empty>
+		);
+	if (!plan) return <DetailSkeleton label="正在读取巡检计划" />;
+	return (
+		<div className="space-y-6">
+			<section className="space-y-3">
+				<div className="flex flex-wrap items-center gap-2">
+					<h2 className="text-xl font-semibold">{plan.displayName}</h2>
+					<Badge variant={plan.enabled ? "secondary" : "outline"}>
+						{plan.enabled ? "已启用" : "已停用"}
+					</Badge>
+					<div className="ml-auto flex gap-2">
+						<Button
+							variant="outline"
+							size="sm"
+							disabled={props.suspended}
+							onClick={() =>
+								props.navigate(
+									`/inspections/plans/${encodeURIComponent(plan.planKey)}/edit`,
+								)
+							}
+						>
+							编辑
+						</Button>
+						<Button
+							size="sm"
+							disabled={!plan.enabled || busy || props.suspended}
+							onClick={() => onRun(plan.planKey)}
+						>
+							运行
+						</Button>
+					</div>
+				</div>
+				<PropertyList
+					layout="grid-2"
+					entries={[
+						{
+							label: "计划 Key",
+							value: <span className="font-mono text-xs">{plan.planKey}</span>,
+						},
+						{ label: "接入", value: plan.connectionName },
+						{
+							label: "插件 · 模板",
+							value: `${plan.pluginId} · ${plan.templateId}${plan.templateVersion ? `@${plan.templateVersion}` : ""}`,
+						},
+						{ label: "范围", value: inspectionScopeText(plan.scope) },
+						{ label: "调度", value: inspectionScheduleText(plan) },
+						{ label: "更新时间", value: formatInspectionTime(plan.updatedAt) },
+					]}
+				/>
+			</section>
+			<Separator />
+			<section className="space-y-3">
+				<h3 className="text-sm font-medium">历史归档</h3>
+				<p className="text-sm text-muted-foreground">
+					每次运行生成一份不可修改的报告。
+				</p>
+				<EntityList
+					items={history.items.map((run) => ({
+						id: run.id,
+						title: `Run ${run.id}`,
+						subtitle: [run.triggerKind === "manual" ? "手动" : "定时"]
+							.filter(Boolean)
+							.join(" · "),
+						badge: {
+							text: inspectionStateText[run.state],
+							variant: "outline" as const,
+							className: statusBadgeClass(run.state),
+						},
+						time: formatInspectionTime(run.createdAt),
+						run,
+					}))}
+					columns={["title", "subtitle", "status", "time"]}
+					onSelect={(item) =>
+						props.navigate(
+							runRoute(
+								item.run.id,
+								`/inspections/plans/${encodeURIComponent(plan.planKey)}`,
+							),
+						)
+					}
+					loading={history.loading}
+					loadingLabel="正在读取巡检记录"
+					emptyTitle="没有巡检记录"
+				/>
+				{history.error && (
+					<Alert variant="destructive">
+						<AlertDescription>{history.error}</AlertDescription>
+					</Alert>
+				)}
+				<CursorPagination
+					page={history.page}
+					hasPrev={history.hasPrev}
+					hasNext={history.hasNext}
+					loading={history.navigating}
+					onPrev={history.goPrev}
+					onNext={history.goNext}
+				/>
+			</section>
+		</div>
+	);
 }

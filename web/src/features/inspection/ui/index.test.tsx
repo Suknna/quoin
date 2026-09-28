@@ -786,35 +786,40 @@ describe("plan workspace", () => {
 		expect(screen.queryByText("还没有巡检计划")).not.toBeInTheDocument();
 	});
 
-	it("lists real plans and a single server page of runs without business systems", async () => {
+	it("lists plans with the latest conclusion and drills into the plan detail", async () => {
 		api.listInspectionPlans.mockResolvedValue([integrationPlan]);
 		api.listInspectionRuns.mockResolvedValue({ items: [runSummary] });
 		render(<InspectionView />);
 		expect(await screen.findByText("Prometheus 连通巡检")).toBeInTheDocument();
-		// One page request, no business-system precondition and no full cursor walk.
+		// 概览只取一页 Run 投影“最近一次结论”，不遍历游标、不前置业务系统。
 		expect(api.listInspectionRuns).toHaveBeenCalledTimes(1);
-		expect(api.listInspectionRuns).toHaveBeenCalledWith({});
-		// 记录列表并入概览页右侧行式列表（与告警同款），整行点击进入详情。
-		const row = screen.getByRole("button", {
-			name: /Prometheus 连通巡检 · Run 1/,
-		});
-		expect(row).toHaveTextContent("lab-prometheus");
-		fireEvent.click(row);
-		expect(props.navigate).toHaveBeenCalledWith("/inspections?run=1");
+		expect(api.listInspectionRuns).toHaveBeenCalledWith({ limit: 100 });
+		// 计划行展示最近一次结论（状态 · 时间）；行内还有独立的“运行”按钮。
+		const row = screen
+			.getAllByRole("button", { name: /Prometheus 连通巡检/ })
+			.find((el) => el.textContent?.includes("最近 已完成"));
+		expect(row).toBeDefined();
+		// 记录是计划的下一级：点击计划进入详情页。
+		fireEvent.click(row as HTMLElement);
+		expect(props.navigate).toHaveBeenCalledWith("/inspections/plans/prom-up");
 	});
 
-	it("filters runs by a selected plan server-side", async () => {
+	it("archives run history under the plan detail and opens runs beneath it", async () => {
 		api.listInspectionPlans.mockResolvedValue([integrationPlan]);
-		render(<InspectionView />);
-		await screen.findByText("Prometheus 连通巡检");
-		fireEvent.click(screen.getByRole("combobox", { name: "按计划筛选" }));
-		fireEvent.click(
-			await screen.findByRole("option", { name: "Prometheus 连通巡检" }),
-		);
+		api.listInspectionRuns.mockResolvedValue({ items: [runSummary] });
+		render(<InspectionView route="/inspections/plans/prom-up" />);
+		expect(await screen.findByText("历史归档")).toBeInTheDocument();
+		// 详情页的记录读取天然按计划过滤（记录的上一级就是计划本身）。
 		await waitFor(() =>
-			expect(api.listInspectionRuns).toHaveBeenLastCalledWith({
-				planKey: "prom-up",
-			}),
+			expect(api.listInspectionRuns).toHaveBeenCalledWith(
+				expect.objectContaining({ planKey: "prom-up" }),
+			),
+		);
+		const row = await screen.findByRole("button", { name: /Run 1/ });
+		expect(row).toHaveTextContent("已完成");
+		fireEvent.click(row);
+		expect(props.navigate).toHaveBeenCalledWith(
+			"/inspections/plans/prom-up?run=1",
 		);
 	});
 
@@ -1000,18 +1005,15 @@ describe("plan editor", () => {
 			thanosPlugin,
 		]);
 		render(<InspectionView route="/inspections/plans/new" />);
-		fireEvent.click(await screen.findByRole("combobox", { name: "接入连接" }));
 		// 回归：接入候选以 inspection_templates 插件能力为依据——
 		// prometheus/thanos 保留，model_provider（如 deepseek-ollama-acceptance）排除。
 		expect(
-			await screen.findByRole("option", {
-				name: /lab-prometheus（prometheus）/,
-			}),
+			await screen.findByRole("radio", { name: /lab-prometheus/ }),
 		).toBeInTheDocument();
 		expect(
-			screen.getByRole("option", { name: /mall-shop-thanos（thanos）/ }),
+			screen.getByRole("radio", { name: /mall-shop-thanos/ }),
 		).toBeInTheDocument();
-		expect(screen.queryByRole("option", { name: /model_provider/ })).toBeNull();
+		expect(screen.queryByRole("radio", { name: /model_provider/ })).toBeNull();
 		expect(screen.queryByText(/deepseek-ollama-acceptance/)).toBeNull();
 	});
 
@@ -1045,11 +1047,8 @@ describe("plan editor", () => {
 			target: { value: "Prometheus 连通巡检" },
 		});
 		// 接入与插件从实时列表选择；选中接入后按接入类型自动预选插件。
-		fireEvent.click(screen.getByRole("combobox", { name: "接入连接" }));
 		fireEvent.click(
-			await screen.findByRole("option", {
-				name: /lab-prometheus（prometheus）/,
-			}),
+			await screen.findByRole("radio", { name: /lab-prometheus/ }),
 		);
 		fireEvent.change(screen.getByLabelText("模板 ID"), {
 			target: { value: "prometheus-up" },
@@ -1096,13 +1095,13 @@ describe("plan editor", () => {
 		render(
 			<InspectionView route="/inspections/plans/new?connectionName=lab-prometheus&businessViewKey=payments-core" />,
 		);
-		const connection = await screen.findByRole("combobox", {
-			name: "接入连接",
+		const connection = await screen.findByRole("radio", {
+			name: /lab-prometheus/,
 		});
-		expect(connection).toHaveTextContent("lab-prometheus（prometheus）");
+		expect(connection).toHaveAttribute("aria-checked", "true");
 		expect(
-			screen.getByRole("combobox", { name: "巡检范围" }),
-		).toHaveTextContent("业务视图");
+			screen.getByRole("radio", { name: /只巡检所选业务视图/ }),
+		).toHaveAttribute("aria-checked", "true");
 		expect(
 			await screen.findByRole("combobox", { name: "业务视图" }),
 		).toHaveTextContent("支付核心（payments-core）");
@@ -1117,17 +1116,13 @@ describe("plan editor", () => {
 		fireEvent.change(screen.getByLabelText("显示名称"), {
 			target: { value: "指定对象巡检" },
 		});
-		fireEvent.click(screen.getByRole("combobox", { name: "接入连接" }));
 		fireEvent.click(
-			await screen.findByRole("option", {
-				name: /lab-prometheus（prometheus）/,
-			}),
+			await screen.findByRole("radio", { name: /lab-prometheus/ }),
 		);
 		fireEvent.change(screen.getByLabelText("模板 ID"), {
 			target: { value: "pod-check" },
 		});
-		fireEvent.click(screen.getByRole("combobox", { name: "巡检范围" }));
-		fireEvent.click(await screen.findByRole("option", { name: "指定对象" }));
+		fireEvent.click(await screen.findByRole("radio", { name: /指定对象/ }));
 		fireEvent.change(await screen.findByLabelText("对象类型"), {
 			target: { value: "kubernetes_pod" },
 		});
@@ -1158,17 +1153,15 @@ describe("plan editor", () => {
 		fireEvent.change(screen.getByLabelText("显示名称"), {
 			target: { value: "业务视图巡检" },
 		});
-		fireEvent.click(screen.getByRole("combobox", { name: "接入连接" }));
 		fireEvent.click(
-			await screen.findByRole("option", {
-				name: /lab-prometheus（prometheus）/,
-			}),
+			await screen.findByRole("radio", { name: /lab-prometheus/ }),
 		);
 		fireEvent.change(screen.getByLabelText("模板 ID"), {
 			target: { value: "bv-check" },
 		});
-		fireEvent.click(screen.getByRole("combobox", { name: "巡检范围" }));
-		fireEvent.click(await screen.findByRole("option", { name: "业务视图" }));
+		fireEvent.click(
+			await screen.findByRole("radio", { name: /只巡检所选业务视图/ }),
+		);
 		fireEvent.click(await screen.findByRole("combobox", { name: "业务视图" }));
 		fireEvent.click(
 			await screen.findByRole("option", { name: /支付核心（payments-core）/ }),
@@ -1253,10 +1246,10 @@ describe("plan editor", () => {
 			connectionName: "retired-prometheus",
 		});
 		render(<InspectionView route="/inspections/plans/old-plan/edit" />);
-		const connection = await screen.findByRole("combobox", {
-			name: "接入连接",
+		const connection = await screen.findByRole("radio", {
+			name: /retired-prometheus（当前值）/,
 		});
-		expect(connection).toHaveTextContent("retired-prometheus（当前值）");
+		expect(connection).toHaveAttribute("aria-checked", "true");
 	});
 });
 
@@ -1317,11 +1310,12 @@ describe("workspace shell integration", () => {
 		expect(api.createInspectionRun).not.toHaveBeenCalled();
 	});
 
-	it("opens the chooser once from any duplicated header trigger", async () => {
+	it("opens the chooser once from the inline overview trigger", async () => {
 		api.listInspectionPlans.mockResolvedValue([integrationPlan]);
-		const { getAllByRole } = render(<ShellHost route="/inspections" />);
+		render(<ShellHost route="/inspections" />);
 		await screen.findByText("Prometheus 连通巡检");
-		fireEvent.click(getAllByRole("button", { name: "运行巡检" })[0]);
+		// 概览操作内联在页面头行：触发器恰好一个，对话框恰好一个。
+		fireEvent.click(screen.getByRole("button", { name: "运行巡检" }));
 		const dialogs = await screen.findAllByRole("dialog", { name: "运行巡检" });
 		expect(dialogs).toHaveLength(1);
 		expect(screen.getAllByRole("button", { name: "开始巡检" })).toHaveLength(1);

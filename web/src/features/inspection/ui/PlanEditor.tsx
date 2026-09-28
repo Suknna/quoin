@@ -23,7 +23,9 @@ import {
 	FieldGroup,
 	FieldLabel,
 } from "@/components/ui/field";
+import { cn } from "cn";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
 	Select,
 	SelectContent,
@@ -205,6 +207,119 @@ interface ResourceOption {
 	value: string;
 	label: string;
 	disabled?: boolean;
+}
+
+interface CardOption {
+	value: string;
+	title: string;
+	description?: string;
+	disabled?: boolean;
+}
+
+/**
+ * 点击选择卡片组（radio 语义）：少量候选直接平铺成可点卡片，比下拉少一次
+ * 展开、候选项的描述也直接可见。读取失败降级为输入框 + 重试（不阻塞编辑）；
+ * 当前值不在候选里（如已退休的接入）以“当前值”卡片保留。
+ */
+function OptionCards({
+	id,
+	label,
+	value,
+	onChange,
+	options,
+	state,
+	onRetry,
+	placeholder,
+	description,
+	disabled,
+}: {
+	id: string;
+	label: string;
+	value: string;
+	onChange: (value: string) => void;
+	options: CardOption[];
+	state: ResourceState<unknown>;
+	onRetry: () => void;
+	placeholder: string;
+	description?: string;
+	disabled?: boolean;
+}) {
+	if (state.error)
+		return (
+			<Field>
+				<FieldLabel htmlFor={id}>{label}</FieldLabel>
+				<Alert variant="destructive">
+					<AlertDescription>读取选项失败，可重试或直接输入。</AlertDescription>
+				</Alert>
+				<Input
+					id={id}
+					aria-label={label}
+					value={value}
+					disabled={disabled}
+					onChange={(event) => onChange(event.target.value)}
+					placeholder={placeholder}
+				/>
+				<Button
+					type="button"
+					size="sm"
+					variant="outline"
+					className="w-fit"
+					onClick={onRetry}
+				>
+					重试读取
+				</Button>
+				{description && <FieldDescription>{description}</FieldDescription>}
+			</Field>
+		);
+	if (state.items === null)
+		return (
+			<Field>
+				<FieldLabel>{label}</FieldLabel>
+				<div className="grid gap-2 sm:grid-cols-2">
+					<Skeleton className="h-16" />
+					<Skeleton className="h-16" />
+				</div>
+			</Field>
+		);
+	const effective =
+		value && !options.some((option) => option.value === value)
+			? [{ value, title: `${value}（当前值）` }, ...options]
+			: options;
+	return (
+		<Field>
+			<FieldLabel id={`${id}-label`}>{label}</FieldLabel>
+			<div
+				role="radiogroup"
+				aria-labelledby={`${id}-label`}
+				className="grid gap-2 sm:grid-cols-2"
+			>
+				{effective.map((option) => (
+					<button
+						type="button"
+						role="radio"
+						aria-checked={value === option.value}
+						key={option.value}
+						disabled={disabled || option.disabled}
+						onClick={() => onChange(option.value)}
+						className={cn(
+							"rounded-lg border p-3 text-left transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+							value === option.value
+								? "border-primary bg-primary/5 ring-1 ring-primary/30"
+								: "border-input",
+						)}
+					>
+						<div className="text-sm font-medium">{option.title}</div>
+						{option.description && (
+							<div className="mt-0.5 text-xs text-muted-foreground">
+								{option.description}
+							</div>
+						)}
+					</button>
+				))}
+			</div>
+			{description && <FieldDescription>{description}</FieldDescription>}
+		</Field>
+	);
 }
 
 /**
@@ -490,21 +605,21 @@ export function PlanEditor({
 	const inspectionPlugins = plugins.items ?? [];
 	// 采证来源候选只认“接入类型有插件提供巡检模板能力”的连接——以现有插件能力
 	// 目录为依据，不新增字段；model_provider 等模型接入只提供推理端点，不是采证来源。
-	const connectionOptions: ResourceOption[] =
+	const connectionOptions: CardOption[] =
 		connections.items
 			?.filter((connection) =>
 				inspectionPlugins.some((plugin) => plugin.id === connection.type),
 			)
 			.map((connection) => ({
 				value: connection.name,
-				label: `${connection.name}（${connection.type}）${
-					connection.enabled ? "" : " · 已停用"
-				}`,
+				title: connection.name,
+				description: `${connection.type}${connection.enabled ? "" : " · 已停用"}`,
 				disabled: !connection.enabled,
 			})) ?? [];
-	const pluginOptions: ResourceOption[] = inspectionPlugins.map((plugin) => ({
+	const pluginOptions: CardOption[] = inspectionPlugins.map((plugin) => ({
 		value: plugin.id,
-		label: `${plugin.displayName}（${plugin.id}）`,
+		title: `${plugin.displayName}（${plugin.id}）`,
+		description: plugin.description,
 	}));
 	const selectedPlugin = inspectionPlugins.find(
 		(plugin) => plugin.id === form.pluginId,
@@ -584,7 +699,7 @@ export function PlanEditor({
 					</CardHeader>
 					<CardContent className="grid gap-4">
 						<div className="grid gap-4 md:grid-cols-2">
-							<ResourceSelect
+							<OptionCards
 								id="plan-connection"
 								label="接入连接"
 								value={form.connectionName}
@@ -596,7 +711,7 @@ export function PlanEditor({
 								description="采证数据来自该接入；已停用的接入不可选。"
 								disabled={busy || suspended}
 							/>
-							<ResourceSelect
+							<OptionCards
 								id="plan-plugin"
 								label="插件"
 								value={form.pluginId}
@@ -607,7 +722,7 @@ export function PlanEditor({
 								placeholder="选择插件"
 								description={
 									selectedPlugin
-										? selectedPlugin.description
+										? undefined
 										: "按接入类型自动预选，可手动改选。"
 								}
 								disabled={busy || suspended}
@@ -671,10 +786,11 @@ export function PlanEditor({
 					</CardHeader>
 					<CardContent className="grid gap-4">
 						<Field>
-							<FieldLabel htmlFor="plan-scope">范围类型</FieldLabel>
-							<Select
+							<OptionCards
+								id="plan-scope"
+								label="范围类型"
 								value={form.scopeKind}
-								onValueChange={(value) =>
+								onChange={(value) =>
 									update({
 										scopeKind: value as PlanFormState["scopeKind"],
 										objects:
@@ -683,25 +799,28 @@ export function PlanEditor({
 												: form.objects,
 									})
 								}
+								options={[
+									{
+										value: "integration",
+										title: inspectionScopeKindText.integration,
+										description: "巡检该接入授权范围内的全部目标。",
+									},
+									{
+										value: "businessView",
+										title: inspectionScopeKindText.businessView,
+										description: "只巡检所选业务视图范围内的对象。",
+									},
+									{
+										value: "objects",
+										title: inspectionScopeKindText.objects,
+										description: "按对象类型与标识逐个指定。",
+									},
+								]}
+								state={{ items: [], error: false }}
+								onRetry={() => undefined}
+								placeholder="选择范围类型"
 								disabled={busy || suspended}
-							>
-								<SelectTrigger id="plan-scope" aria-label="巡检范围">
-									<SelectValue />
-								</SelectTrigger>
-								<SelectContent>
-									<SelectGroup>
-										{(
-											Object.keys(inspectionScopeKindText) as Array<
-												keyof typeof inspectionScopeKindText
-											>
-										).map((kind) => (
-											<SelectItem key={kind} value={kind}>
-												{inspectionScopeKindText[kind]}
-											</SelectItem>
-										))}
-									</SelectGroup>
-								</SelectContent>
-							</Select>
+							/>
 						</Field>
 						{form.scopeKind === "businessView" && (
 							<ResourceSelect
