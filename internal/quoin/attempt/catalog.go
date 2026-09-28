@@ -100,23 +100,36 @@ var generationAccepts = map[string]map[string]bool{
 	"inspection-analysis-v5": {},
 	// 日报总结与巡检报告分析同一边界：它是"重新叙述既有封存事实"的冻结代理，
 	// 不接受任何插件工具（实时平台查询、发现/采证工具都不进目录）；重分析
-	// 绝不混入执行时刻的实时数据。
+	// 绝不混入执行时刻的实时数据。v2 是分页/告警上下文代。
 	"inspection-daily-analysis-v1": {},
+	"inspection-daily-analysis-v2": {},
 }
 
-// dailyReportGetToolGenerations lists the agent identities whose base catalog
-// carries the daily-report platform tool. The sealed report document is the
-// frozen fact source of exactly one scope (the daily summary attempt); other
-// generations never see the tool, so an unrelated analysis can neither
-// discover nor read daily reports through it.
-var dailyReportGetToolGenerations = map[string]bool{
-	"inspection-daily-analysis-v1": true,
+// dailyFactToolGenerations lists the agent identities whose base catalog
+// carries the daily-report frozen-fact platform tools (daily_report_get and
+// daily_alerts_get). The sealed report document and the window-bound alert
+// context are the frozen fact sources of exactly one scope (the daily summary
+// attempt); other generations never see these tools, so an unrelated analysis
+// can neither discover nor read daily reports or their alert window through
+// them.
+var dailyFactToolGenerations = map[string]bool{
+	"inspection-daily-analysis-v2": true,
 }
 
-// generationCarriesDailyReportTool reports whether one agent generation's
-// base catalog carries the daily-report retrieval tool.
-func generationCarriesDailyReportTool(agentVersion string) bool {
-	return dailyReportGetToolGenerations[agentVersion]
+// generationCarriesDailyFactTools reports whether one agent generation's
+// base catalog carries the daily-report frozen-fact retrieval tools.
+func generationCarriesDailyFactTools(agentVersion string) bool {
+	return dailyFactToolGenerations[agentVersion]
+}
+
+// dailySupersededPlatformTools lists platform tools the daily summary
+// generation must NOT carry once it has the window-bound daily_alerts_get:
+// alerts_recent anchors on "now" and would let the frozen daily agent pull
+// alerts outside the report's frozen window (non-deterministic across
+// analysis retries of the same version, and post-window leaks). Every other
+// generation keeps alerts_recent unchanged.
+var dailySupersededPlatformTools = map[string]bool{
+	"alerts_recent": true,
 }
 
 // platformToolNames are the compiled tools no plugin owns (workspace and
@@ -327,7 +340,11 @@ func BuildCatalogs(registry *plugins.Registry, enabledPluginIDs []string) (*Cata
 			if knowledgeToolNames[def.Name] && !generationCarriesKnowledgeTool(agentVersion) {
 				continue
 			}
-			if def.Name == "daily_report_get" && !generationCarriesDailyReportTool(agentVersion) {
+			isDailyFact := def.Name == "daily_report_get" || def.Name == "daily_alerts_get"
+			if isDailyFact && !generationCarriesDailyFactTools(agentVersion) {
+				continue
+			}
+			if generationCarriesDailyFactTools(agentVersion) && dailySupersededPlatformTools[def.Name] {
 				continue
 			}
 			catalog.Tools = append(catalog.Tools, frozenToolFromDefinition(def))
@@ -382,6 +399,10 @@ func catalogSchemaVersionFor(agentVersion string) string {
 	if agentVersion == "inspection-daily-analysis-v1" {
 		// 日报总结目录代：同样按 attempt 冻结，独立 provenance 标签。
 		return "inspection-daily-analysis-tools-v1"
+	}
+	if agentVersion == "inspection-daily-analysis-v2" {
+		// 日报总结 v2（分页 + 窗口级告警上下文）：同一独立 provenance 序列。
+		return "inspection-daily-analysis-tools-v2"
 	}
 	return ToolSchemaVersion
 }

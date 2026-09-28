@@ -108,10 +108,16 @@ type DailyCheckItem struct {
 }
 
 // DailyMeasurement is the bounded projection of one check's immutable
-// Evidence result: result type, series/sample counts and the first/last
-// sample values with the last sample's timestamp. It is a deterministic
-// summary derived from committed evidence — never a truncated raw payload
-// and never a secret carrier; the full result stays locatable by evidenceId.
+// Evidence result: result type, series/sample counts, the first/last sample
+// values with the last sample's timestamp, and per-series bounded entries
+// (labels + numeric extremes) so a middle-series anomalous value and the
+// labels that identify it stay analyzable without the raw payload. It is a
+// deterministic summary derived from committed evidence — never a truncated
+// raw payload and never a secret carrier; series beyond the entry bound are
+// marked truncated and the full result stays locatable by evidenceId.
+// Field order is part of the frozen-byte contract: new fields append AFTER
+// the established ones so previously sealed documents round-trip identically
+// through decode→marshal.
 type DailyMeasurement struct {
 	ResultType string  `json:"resultType"`
 	Series     int     `json:"series"`
@@ -119,6 +125,35 @@ type DailyMeasurement struct {
 	FirstValue *string `json:"firstValue,omitempty"`
 	LastValue  *string `json:"lastValue,omitempty"`
 	LastAt     *string `json:"lastAt,omitempty"`
+	// Entries 是逐序列的有界摘要（按结果数组的确定性顺序，取前
+	// DailyMeasurementEntryBound 个）；Truncated 为真表示其余序列被省略。
+	Entries   []DailyMeasurementSeriesEntry `json:"entries,omitempty"`
+	Truncated bool                          `json:"truncated,omitempty"`
+}
+
+// DailyMeasurementEntryBound 是一个检查项测量摘要携带的逐序列条目上限：
+// 超出按确定性顺序省略并以 truncated 标记，摘要保持有界。
+const DailyMeasurementEntryBound = 32
+
+// DailyMeasurementLabelBound 是一个序列条目携带的标签数上限：超出按键的
+// 确定性字典序省略并以 labelsTruncated 标记。
+const DailyMeasurementLabelBound = 16
+
+// DailyMeasurementSeriesEntry is one series' bounded summary: the PromQL
+// label set (bounded), its sample count, first/last values and — when the
+// values are numeric — the min/max extremes with their timestamps, so an
+// intermediate spike or dip is visible without every sample.
+type DailyMeasurementSeriesEntry struct {
+	Labels          map[string]string `json:"labels,omitempty"`
+	LabelsTruncated bool              `json:"labelsTruncated,omitempty"`
+	Samples         int               `json:"samples"`
+	FirstValue      *string           `json:"firstValue,omitempty"`
+	LastValue       *string           `json:"lastValue,omitempty"`
+	LastAt          *string           `json:"lastAt,omitempty"`
+	MinValue        *string           `json:"minValue,omitempty"`
+	MinAt           *string           `json:"minAt,omitempty"`
+	MaxValue        *string           `json:"maxValue,omitempty"`
+	MaxAt           *string           `json:"maxAt,omitempty"`
 }
 
 // DailySourceReport is the sealed aggregation for one contributing plan: the

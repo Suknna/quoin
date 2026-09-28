@@ -48,8 +48,11 @@ const InspectionAgentVersion = "inspection-analysis-v5"
 // prompts, so its attempts and model calls carry a distinct version identity.
 // Its attempts never embed the report body: the frozen input carries the
 // bounded provenance index, and the model retrieves the sealed version
-// document through the Quoin-owned daily_report_get tool.
-const InspectionDailyAgentVersion = "inspection-daily-analysis-v1"
+// document through the Quoin-owned daily_report_get tool. v2 is the pagination
+// generation: daily_report_get returns bounded pages with an exact
+// cursor/nextCursor continuation instead of a truncating 64KB preview, and
+// the frozen measurement index carries per-series labels and extremes.
+const InspectionDailyAgentVersion = "inspection-daily-analysis-v2"
 
 // ToolSchemaVersion names the fixed callable tool-schema generation of the
 // initial-analysis catalog. Quoin resolves tool names only against a frozen
@@ -117,6 +120,7 @@ var platformTools = []ToolDef{
 	knowledgeSearchTool(),
 	knowledgeGetTool(),
 	dailyReportGetTool(),
+	dailyAlertsGetTool(),
 }
 
 // knowledgeSearchTool 是检索 Quoin 自有知识库的平台工具（ADR-0012 归属判据：
@@ -230,33 +234,40 @@ var dailyLocalDatePattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
 // dailyReportGetTool 是读取 Quoin 自有已封存日报版本的平台工具（ADR-0014：
 // 读 Quoin 自有数据 = 平台工具）。日报总结 Attempt 的模型不从提示词拿到
-// 报告正文，只能用本工具按冻结定位符取回封存版本文档；执行器额外把请求
-// 定位符与 Attempt 冻结身份逐一比对，越界读取确定性失败。参数带形状边界，
-// 与插件工具同款手写 Parameters + ValidateArguments 闭包。
+// 报告正文，只能用本工具按冻结定位符取回封存版本文档：返回按确定性位置
+// 分页的有界页（sources 片段），nextCursor 非空时以相同定位符加 cursor 续读，
+// 直至 nextCursor 为 null 才是完整取回；执行器额外把请求定位符与 Attempt
+// 冻结身份逐一比对，越界读取确定性失败。参数带形状边界，与插件工具同款
+// 手写 Parameters + ValidateArguments 闭包。v2：分页契约（cursor/nextCursor）
+// 取代旧的一体正文 + 截断预览。
 func dailyReportGetTool() ToolDef {
 	parameters := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"configKey": map[string]any{
 				"type":        "string",
-				"description": "日报配置 key（冻结上下文已给出的精瓢值，逐字使用）。",
+				"description": "日报配置 key（冻结上下文已给出的精确值，逐字使用）。",
 			},
 			"localDate": map[string]any{
 				"type":        "string",
-				"description": "日报本地日期，格式 YYYY-MM-DD（冻结上下文已给出的精瓢值）。",
+				"description": "日报本地日期，格式 YYYY-MM-DD（冻结上下文已给出的精确值）。",
 			},
 			"version": map[string]any{
 				"type":        "number",
-				"description": "要读取的封存版本号（十进制正整数，冻结上下文已给出的精瓢值）。",
+				"description": "要读取的封存版本号（十进制正整数，冻结上下文已给出的精确值）。",
+			},
+			"cursor": map[string]any{
+				"type":        "string",
+				"description": "可选续读位置：上一页返回的 nextCursor 原文（形如 s3:c12）；缺省读取首页。必须逐字回传，不得自行拼造。",
 			},
 		},
 		"required": []any{"configKey", "localDate", "version"},
 	}
 	return ToolDef{
-		Name: "daily_report_get", Version: "1", ExecutionMode: "quoin_routed", FailureMode: "return_to_model",
+		Name: "daily_report_get", Version: "2", ExecutionMode: "quoin_routed", FailureMode: "return_to_model",
 		ResultSchemaKind: "daily_report_get_result_v1",
-		Description:      "按 configKey/localDate/version 读取一份已封存日报版本的完整事实文档（来源、检查、缺口、窗口）。这是日报总结的唯一事实来源：正文不随提示词下发，必须先用本工具取回并按原文引用，缺口不得当作 0 或健康。",
-		Arguments:        map[string]ArgumentKind{"configKey": KindString, "localDate": KindString, "version": KindNumber},
+		Description:      "按 configKey/localDate/version 读取一份已封存日报版本的事实文档（来源、检查、缺口、窗口），以有界分页返回：每页携带相同定位符与 nextCursor；nextCursor 非空时必须以完全相同的定位参数加 cursor=<nextCursor 原文> 继续调用，直到 nextCursor 为 null 才算取回完整文档。这是日报总结的唯一事实来源：正文不随提示词下发，必须先取回并按原文引用，缺口不得当作 0 或健康。",
+		Arguments:        map[string]ArgumentKind{"configKey": KindString, "localDate": KindString, "version": KindNumber, "cursor": KindString},
 		Parameters:       parameters,
 		ValidateArguments: func(raw []byte) error {
 			var arguments map[string]any
@@ -265,7 +276,7 @@ func dailyReportGetTool() ToolDef {
 			}
 			for key := range arguments {
 				switch key {
-				case "configKey", "localDate", "version":
+				case "configKey", "localDate", "version", "cursor":
 				default:
 					return fmt.Errorf("tool daily_report_get argument %q is not part of the fixed schema", key)
 				}
@@ -287,9 +298,110 @@ func dailyReportGetTool() ToolDef {
 					return fmt.Errorf("tool daily_report_get argument %q must be a positive integer", "version")
 				}
 			}
+			if value, exists := arguments["cursor"]; exists && value != nil {
+				if text, ok := value.(string); !ok || text == "" {
+					return fmt.Errorf("tool daily_report_get argument %q must be a non-empty nextCursor value", "cursor")
+				}
+			}
 			for _, key := range []string{"configKey", "localDate", "version"} {
 				if _, exists := arguments[key]; !exists {
 					return fmt.Errorf("tool daily_report_get requires argument %q", key)
+				}
+			}
+			return nil
+		},
+	}
+}
+
+// dailyAlertsGetTool 是读取 Quoin 自有告警库中「冻结日报窗口内」已提交归
+// 一化告警观测的平台工具（用户故事 11：日报汇总含告警上下文）。窗口与封存
+// 截止都来自 Attempt 冻结的报告行，不是模型参数：执行器把请求定位符与
+// Attempt 冻结身份逐一比对（越界确定性失败），SQL 恒限定
+// starts_at ∈ [windowStartUtc, windowEndUtc) 且 first_seen_at ≤ cutoff_at
+// ——迟到的采证与窗口外告警绝不出现，同一报告版本的多次分析取回同一
+// 事实集。返回窗口级有界页（sourceKey/occurrenceId/severity/title/state/
+// startsAt/resource/viewKeys + total/offset/hasMore 续读），绝不携带原始
+// 载荷或凭据；告警上下文是窗口级事实，不与任何日报来源/计划建立未声明的
+// 归属关系。
+func dailyAlertsGetTool() ToolDef {
+	parameters := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"configKey": map[string]any{
+				"type":        "string",
+				"description": "日报配置 key（冻结上下文已给出的精确值，逐字使用）。",
+			},
+			"localDate": map[string]any{
+				"type":        "string",
+				"description": "日报本地日期，格式 YYYY-MM-DD（冻结上下文已给出的精确值）。",
+			},
+			"version": map[string]any{
+				"type":        "number",
+				"description": "要读取的封存版本号（十进制正整数，冻结上下文已给出的精确值）。",
+			},
+			"offset": map[string]any{
+				"type":        "number",
+				"minimum":     0,
+				"description": "确定性结果序内的起始偏移（缺省 0）；hasMore 为 true 时以 offset+limit 续读。",
+			},
+			"limit": map[string]any{
+				"type":        "number",
+				"minimum":     1,
+				"maximum":     50,
+				"description": "单页返回条数上限（缺省 20，上限 50）。",
+			},
+		},
+		"required": []any{"configKey", "localDate", "version"},
+	}
+	return ToolDef{
+		Name: "daily_alerts_get", Version: "1", ExecutionMode: "quoin_routed", FailureMode: "return_to_model",
+		ResultSchemaKind: "daily_alerts_get_result_v1",
+		Description:      "按冻结日报定位符读取该报告时间窗内、采证截止前已提交的归一化告警观测（sourceKey/occurrenceId/severity/title/state/startsAt/resource/viewKeys + total 与 hasMore 分页）。这是窗口级告警上下文：不隶属于任何日报来源/计划，不得据此推断归属；窗口与截止由系统冻结，不能改查其它时间范围。",
+		Arguments:        map[string]ArgumentKind{"configKey": KindString, "localDate": KindString, "version": KindNumber, "offset": KindNumber, "limit": KindNumber},
+		Parameters:       parameters,
+		ValidateArguments: func(raw []byte) error {
+			var arguments map[string]any
+			if err := json.Unmarshal(raw, &arguments); err != nil {
+				return fmt.Errorf("tool daily_alerts_get arguments unparseable: %w", err)
+			}
+			for key := range arguments {
+				switch key {
+				case "configKey", "localDate", "version", "offset", "limit":
+				default:
+					return fmt.Errorf("tool daily_alerts_get argument %q is not part of the fixed schema", key)
+				}
+			}
+			if value, exists := arguments["configKey"]; exists {
+				if text, ok := value.(string); !ok || strings.TrimSpace(text) == "" {
+					return fmt.Errorf("tool daily_alerts_get argument %q must be a non-empty string", "configKey")
+				}
+			}
+			if value, exists := arguments["localDate"]; exists {
+				text, ok := value.(string)
+				if !ok || !dailyLocalDatePattern.MatchString(text) {
+					return fmt.Errorf("tool daily_alerts_get argument %q must be a YYYY-MM-DD local date", "localDate")
+				}
+			}
+			bounds := map[string]struct {
+				min, max float64
+			}{
+				"version": {1, math.MaxInt64},
+				"offset":  {0, math.MaxInt64},
+				"limit":   {1, 50},
+			}
+			for key, bound := range bounds {
+				value, exists := arguments[key]
+				if !exists || value == nil {
+					continue
+				}
+				number, ok := value.(float64)
+				if !ok || number < bound.min || number > bound.max || number != math.Trunc(number) {
+					return fmt.Errorf("tool daily_alerts_get argument %q must be an integer within [%v,%v]", key, bound.min, bound.max)
+				}
+			}
+			for _, key := range []string{"configKey", "localDate", "version"} {
+				if _, exists := arguments[key]; !exists {
+					return fmt.Errorf("tool daily_alerts_get requires argument %q", key)
 				}
 			}
 			return nil

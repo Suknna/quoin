@@ -2352,7 +2352,7 @@ export interface components {
                 observedAt?: components["schemas"]["Timestamp"];
                 /** @description 已提交的不可变 Evidence 定位；缺口可能没有证据。 */
                 evidenceId?: number;
-                /** @description 从冻结 Evidence 派生的有界结构化观测摘要，不是原始平台响应。 */
+                /** @description 从冻结 Evidence 派生的有界结构化观测摘要，不是原始平台响应；逐序列条目携带标签与数值极值（min/max 及时间戳），超界序列按确定性顺序省略并标记 truncated。 */
                 measurement?: {
                     resultType: string;
                     series: number;
@@ -2360,6 +2360,25 @@ export interface components {
                     firstValue?: string;
                     lastValue?: string;
                     lastAt?: components["schemas"]["Timestamp"];
+                    /** @description 为 true 表示逐序列条目超过有界上限，超出部分按确定性顺序省略（计数仍为全量）。 */
+                    truncated?: boolean;
+                    /** @description 前 32 个序列的有界摘要（按结果数组确定性顺序）。 */
+                    entries?: {
+                        /** @description 该序列的 PromQL 标签集（至多 16 个键，按键字典序）。 */
+                        labels?: {
+                            [key: string]: string;
+                        };
+                        labelsTruncated?: boolean;
+                        samples: number;
+                        firstValue?: string;
+                        lastValue?: string;
+                        lastAt?: components["schemas"]["Timestamp"];
+                        /** @description 数值极值（仅有限浮点参与；样本值保持证据文本）。 */
+                        minValue?: string;
+                        minAt?: components["schemas"]["Timestamp"];
+                        maxValue?: string;
+                        maxAt?: components["schemas"]["Timestamp"];
+                    }[];
                 };
             }[];
         };

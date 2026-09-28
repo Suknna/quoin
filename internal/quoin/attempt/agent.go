@@ -964,6 +964,9 @@ func promptRendererVersionFor(agentVersion string) string {
 	case "inspection-daily-analysis-v1":
 		// 日报总结的首个渲染代：有界 XML 提示词 + 工具取数指令（ADR-0014）。
 		return "inspection-daily-analysis-renderer-v1"
+	case "inspection-daily-analysis-v2":
+		// 日报总结 v2 渲染代：分页续读指令 + 窗口级告警上下文工具调用。
+		return "inspection-daily-analysis-renderer-v2"
 	case AgentVersion:
 		return "initial-analysis-renderer-v7"
 	case "initial-analysis-v3":

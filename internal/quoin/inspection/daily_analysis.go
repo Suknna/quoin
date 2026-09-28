@@ -31,9 +31,10 @@ import (
 const dailyAnalysisInputKind = "inspection_daily_analysis_v1"
 const dailyAnalysisResultKind = "inspection_daily_analysis_result_v1"
 
-// dailyAnalysisRendererVersion 是日报分析输入快照的 renderer 代：首个渲染代
-// 起（有界 XML 提示词 + 工具取数指令）即在 canonical 输入内嵌冻结工具目录。
-const dailyAnalysisRendererVersion = "v1"
+// dailyAnalysisRendererVersion 是日报分析输入快照的 renderer 代：v2 起
+// 渲染携带分页续读指令与窗口级告警上下文工具调用（首代 v1 只携带一体
+// daily_report_get 取数指令）。
+const dailyAnalysisRendererVersion = "v2"
 
 // Command identities: the durable client_commands.command_type values for the
 // system-side daily analysis work (creation retry and result adjudication).
