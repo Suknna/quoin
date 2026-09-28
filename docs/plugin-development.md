@@ -78,6 +78,9 @@ Stele 网关负责 Bearer/digest 认证（"签名对不对"）与 16MiB body 上
 契约（参考 `plugins/alertmanager/alertmanager.go`：payload 保持平台 wire 投影形状）。
 插件必须声明所有可能产出的 `EventTypes`；Stele 会在入队前拒绝未声明的类型，
 Quoin 同样在接收时复核。声明一个新类型不等于核心已有其投影处理器，当前仅 `alerts.batch` 可消费。
+编译入站清单指纹会在 Stele→Quoin 的快照/投递 RPC 上交叉校验；改动事件契约时应
+更新插件 Version，并同批替换两宿主镜像。在更换载荷版本前先排空 Stele 本地队列，
+因为旧排队事件尚无逐条 payload version 可供新消费者迁移。
 
 ## 出向：泛型工具
 
