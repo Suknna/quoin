@@ -318,10 +318,36 @@ CREATE TABLE alert_snapshot_epoch (
   version   INTEGER NOT NULL CHECK (version >= 0)
 ) STRICT;
 INSERT INTO alert_snapshot_epoch(singleton, version) VALUES (1, 0);
+-- Immutable source-scoped non-secret settings at the epoch first exposing
+-- each revision. A queued event pins the epoch at Stele acceptance, not at
+-- its later Quoin delivery: latest revision <= that epoch recovers exactly
+-- the document VerifyAndParse saw, even after an admin changes settings.
+CREATE TABLE alert_source_settings_history (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  source_id        INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  settings_version INTEGER NOT NULL CHECK (settings_version >= 0),
+  snapshot_epoch   INTEGER NOT NULL UNIQUE CHECK (snapshot_epoch > 0),
+  settings_json    TEXT NOT NULL CHECK (json_valid(settings_json) AND length(CAST(settings_json AS BLOB)) <= 65536),
+  UNIQUE(source_id, settings_version)
+) STRICT;
+CREATE INDEX idx_source_settings_history_lookup ON alert_source_settings_history(source_id, snapshot_epoch DESC);
+CREATE TRIGGER trg_source_settings_history_immutable BEFORE UPDATE ON alert_source_settings_history
+BEGIN SELECT RAISE(ABORT, 'source settings history is immutable'); END;
+CREATE TRIGGER trg_source_settings_history_no_delete BEFORE DELETE ON alert_source_settings_history
+BEGIN SELECT RAISE(ABORT, 'source settings history cannot be deleted'); END;
 CREATE TRIGGER trg_alert_snapshot_source_insert AFTER INSERT ON alert_sources
-BEGIN UPDATE alert_snapshot_epoch SET version = version + 1 WHERE singleton = 1; END;
+BEGIN
+  UPDATE alert_snapshot_epoch SET version = version + 1 WHERE singleton = 1;
+  INSERT INTO alert_source_settings_history(source_id,settings_version,snapshot_epoch,settings_json)
+  SELECT NEW.id,NEW.settings_version,version,NEW.settings_json FROM alert_snapshot_epoch WHERE singleton=1;
+END;
 CREATE TRIGGER trg_alert_snapshot_source_update AFTER UPDATE OF enabled,settings_json ON alert_sources
-BEGIN UPDATE alert_snapshot_epoch SET version = version + 1 WHERE singleton = 1; END;
+BEGIN
+  UPDATE alert_snapshot_epoch SET version = version + 1 WHERE singleton = 1;
+  INSERT INTO alert_source_settings_history(source_id,settings_version,snapshot_epoch,settings_json)
+  SELECT NEW.id,NEW.settings_version,version,NEW.settings_json FROM alert_snapshot_epoch WHERE singleton=1
+  AND NEW.settings_version <> OLD.settings_version;
+END;
 CREATE TRIGGER trg_alert_snapshot_credential_insert AFTER INSERT ON alert_source_credentials
 BEGIN UPDATE alert_snapshot_epoch SET version = version + 1 WHERE singleton = 1; END;
 CREATE TRIGGER trg_alert_snapshot_credential_state AFTER UPDATE OF state ON alert_source_credentials

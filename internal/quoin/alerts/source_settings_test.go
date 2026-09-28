@@ -170,6 +170,12 @@ func TestCreateSourcePersistsValidatedSettings(t *testing.T) {
 	if len(sources) != 1 || string(sources[0].Settings) != `{"site":"eu-west"}` {
 		t.Fatalf("snapshot source settings = %+v", sources)
 	}
+	if _, err := database.SQL.Exec(`UPDATE alert_source_settings_history SET settings_json='{}' WHERE source_id=?`, result.SourceID); err == nil {
+		t.Fatal("accepted source settings history must be immutable")
+	}
+	if _, err := database.SQL.Exec(`DELETE FROM alert_source_settings_history WHERE source_id=?`, result.SourceID); err == nil {
+		t.Fatal("accepted source settings history must not be deleted")
+	}
 }
 
 func TestCreateSourceRejectsInvalidSettings(t *testing.T) {

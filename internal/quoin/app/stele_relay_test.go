@@ -756,10 +756,10 @@ func TestSyntheticSourceSettingsEndToEnd(t *testing.T) {
 	// Instance A accepts the batch and filters noise at the edge; instance B
 	// (stricter settings) keeps only core from the SAME body — per-instance
 	// behavior through one compiled source kind.
-	if code := postWebhook(syntheticCredentialLookup{sourceID: sourceA.SourceID, credentialID: sourceA.CredentialID, settings: []byte(`{"ignoredAlertnames":["noise"]}`), snapshotVersion: 7}); code != http.StatusAccepted {
+	if code := postWebhook(syntheticCredentialLookup{sourceID: sourceA.SourceID, credentialID: sourceA.CredentialID, settings: []byte(`{"ignoredAlertnames":["noise"]}`), snapshotVersion: snapshot.GetSnapshotVersion()}); code != http.StatusAccepted {
 		t.Fatalf("instance A webhook status = %d", code)
 	}
-	if code := postWebhook(syntheticCredentialLookup{sourceID: sourceB.SourceID, credentialID: sourceB.CredentialID, settings: []byte(`{"ignoredAlertnames":["noise","keep"]}`), snapshotVersion: 7}); code != http.StatusAccepted {
+	if code := postWebhook(syntheticCredentialLookup{sourceID: sourceB.SourceID, credentialID: sourceB.CredentialID, settings: []byte(`{"ignoredAlertnames":["noise","keep"]}`), snapshotVersion: snapshot.GetSnapshotVersion()}); code != http.StatusAccepted {
 		t.Fatalf("instance B webhook status = %d", code)
 	}
 	queued, err := queue.FetchDueBatch(ctx, 10, time.Now().UTC())
@@ -768,8 +768,8 @@ func TestSyntheticSourceSettingsEndToEnd(t *testing.T) {
 	}
 	bySource := map[int64]stele.QueuedEvent{}
 	for _, event := range queued {
-		if event.CredentialSnapshotVersion != 7 {
-			t.Fatalf("queued provenance version = %d, want 7", event.CredentialSnapshotVersion)
+		if event.CredentialSnapshotVersion != snapshot.GetSnapshotVersion() {
+			t.Fatalf("queued provenance version = %d, want %d", event.CredentialSnapshotVersion, snapshot.GetSnapshotVersion())
 		}
 		bySource[event.SourceID] = event
 		if strings.Contains(string(event.Payload), "noise-1") {
@@ -784,7 +784,7 @@ func TestSyntheticSourceSettingsEndToEnd(t *testing.T) {
 	}
 
 	// Settings update on instance A: keep is now ignored too. The accepted
-	// event above must NOT be reinterpreted — it carries snapshot 7.
+	// event above must NOT be reinterpreted — it carries the accepted epoch.
 	detailA, err := harness.alerts.GetSource(admin, "src-a")
 	if err != nil {
 		t.Fatal(err)
@@ -816,7 +816,7 @@ func TestSyntheticSourceSettingsEndToEnd(t *testing.T) {
 			t.Fatal("filtered alert leaked into a queued payload")
 		}
 	}
-	if !provenance[7] || !provenance[refreshed.GetSnapshotVersion()] {
+	if !provenance[snapshot.GetSnapshotVersion()] || !provenance[refreshed.GetSnapshotVersion()] {
 		t.Fatalf("queued provenance lost one revision: %v", provenance)
 	}
 
@@ -880,7 +880,36 @@ func TestSyntheticSourceSettingsEndToEnd(t *testing.T) {
 		}
 		deliveryVersions[uint64(version)] = true
 	}
-	if !deliveryVersions[7] || !deliveryVersions[refreshed.GetSnapshotVersion()] {
+	if !deliveryVersions[snapshot.GetSnapshotVersion()] || !deliveryVersions[refreshed.GetSnapshotVersion()] {
 		t.Fatalf("delivery provenance missing a revision: %v", deliveryVersions)
+	}
+	deliveryRows.Close()
+	// The history is immutable; the global epoch on each accepted delivery
+	// resolves to the exact instance document used at Stele acceptance, even
+	// after the old event is delivered following an admin update.
+	historyRows, err := harness.database.SQL.Query(`
+		SELECT d.credential_snapshot_version,h.settings_json FROM alert_deliveries d
+		JOIN alert_source_settings_history h ON h.source_id=d.source_id
+		 AND h.snapshot_epoch=(SELECT MAX(x.snapshot_epoch) FROM alert_source_settings_history x
+		   WHERE x.source_id=d.source_id AND x.snapshot_epoch<=d.credential_snapshot_version)
+		WHERE d.source_id=? ORDER BY d.id`, sourceA.SourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer historyRows.Close()
+	resolvedSettings := map[uint64]string{}
+	for historyRows.Next() {
+		var epoch uint64
+		var settings string
+		if err := historyRows.Scan(&epoch, &settings); err != nil {
+			t.Fatal(err)
+		}
+		resolvedSettings[epoch] = settings
+	}
+	if err := historyRows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if resolvedSettings[snapshot.GetSnapshotVersion()] != `{"ignoredAlertnames":["noise"]}` || resolvedSettings[refreshed.GetSnapshotVersion()] != `{"ignoredAlertnames":["noise","keep"]}` {
+		t.Fatalf("frozen source settings cannot be reconstructed: %+v", resolvedSettings)
 	}
 }
