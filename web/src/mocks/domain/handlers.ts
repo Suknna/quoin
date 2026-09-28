@@ -1273,6 +1273,7 @@ export const domainHandlers = [
 					timezone: string;
 					triggerTime: string;
 					planKeys: string[];
+					reportInstructions?: string;
 				}>(request);
 				if (
 					getMockState().dailyReportConfigs.some(
@@ -1292,6 +1293,7 @@ export const domainHandlers = [
 					timezone: input.timezone,
 					triggerTime: input.triggerTime,
 					planKeys: [...(input.planKeys ?? [])],
+					reportInstructions: input.reportInstructions,
 					rowVersion: 1,
 					createdAt: now,
 					updatedAt: now,
@@ -1320,6 +1322,7 @@ export const domainHandlers = [
 						timezone: string;
 						triggerTime: string;
 						planKeys: string[];
+						reportInstructions?: string;
 						expectedRowVersion: number;
 					}>(request);
 					const stale = conflict(input.expectedRowVersion, config.rowVersion);
@@ -1330,6 +1333,7 @@ export const domainHandlers = [
 						timezone: input.timezone,
 						triggerTime: input.triggerTime,
 						planKeys: [...(input.planKeys ?? [])],
+						reportInstructions: input.reportInstructions,
 						updatedAt: "2026-09-09T09:30:00.000Z",
 					});
 					config.rowVersion += 1;
@@ -1419,6 +1423,22 @@ export const domainHandlers = [
 				: problem(404, "未找到该版本。", "not_found");
 		},
 	),
+	http.get(
+		"*/api/v1/inspections/daily-reports/:configKey/:localDate/analyses",
+		({ params }) => {
+			const denied = adminRequired();
+			if (denied) return denied;
+			const exists = getMockState().dailyReports.some((item) => item.configKey === params.configKey && item.localDate === params.localDate);
+			return exists ? json({ items: [] }) : problem(404, "未找到每日报告。");
+		},
+	),
+	http.get(
+		"*/api/v1/inspections/daily-reports/:configKey/:localDate/analyses/:analysisVersion",
+		() => {
+			const denied = adminRequired();
+			return denied ?? problem(404, "尚无已完成的 AI 总结。");
+		},
+	),
 	http.post(
 		"*/api/v1/inspections/daily-reports/:configKey/:localDate/rerun",
 		({ params, request }) =>
@@ -1437,6 +1457,7 @@ export const domainHandlers = [
 				if (content) report.contents[String(nextVersion)] = content;
 				report.versions.unshift({
 					version: nextVersion,
+					expectedOutput: getMockState().dailyReportConfigs.find((config) => config.configKey === report.configKey)?.reportInstructions,
 					createdAt: "2026-09-09T09:30:00.000Z",
 				});
 				report.latestVersion = nextVersion;

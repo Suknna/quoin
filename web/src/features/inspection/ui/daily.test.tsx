@@ -12,6 +12,8 @@ const dailyApi = vi.hoisted(() => ({
 	listDailyReports: vi.fn(),
 	getDailyReport: vi.fn(),
 	getDailyReportVersion: vi.fn(),
+	listDailyReportAnalyses: vi.fn(),
+	getDailyReportAnalysis: vi.fn(),
 	backfillDailyReport: vi.fn(),
 	rerunDailyReport: vi.fn(),
 }));
@@ -78,7 +80,7 @@ const sealedDetail = {
 		windowStartUtc: "2026-09-26T16:00:00Z", windowEndUtc: "2026-09-27T16:00:00Z",
 		sealedAt: "2026-09-28T02:00:00Z",
 		sources: [
-			{ planKey: "prom-up", displayName: "Prom 连通巡检", connectionName: "lab-prometheus", enabled: true, sourceEnabled: true, status: "ok" as const, checks: [{ runId: 7, checkKey: "promql_check", status: "ok", observedAt: "2026-09-27T09:30:00Z" }] },
+			{ planKey: "prom-up", displayName: "Prom 连通巡检", connectionName: "lab-prometheus", enabled: true, sourceEnabled: true, status: "ok" as const, checks: [{ runId: 7, evidenceId: 33, checkKey: "promql_check", status: "ok", observedAt: "2026-09-27T09:30:00Z", measurement: { resultType: "vector", series: 1, samples: 1, lastValue: "1" } }] },
 			{ planKey: "legacy", enabled: false, sourceEnabled: false, missing: true, status: "gap" as const, gapReasons: ["plan_missing"] },
 		],
 		totals: { checksOk: 1, checksGap: 0, checksError: 0, sourcesGap: 1 },
@@ -90,6 +92,7 @@ beforeEach(() => {
 	dailyApi.listDailyReports.mockResolvedValue([sealedSummary]);
 	dailyApi.getDailyReport.mockResolvedValue(sealedDetail);
 	dailyApi.getDailyReportVersion.mockResolvedValue(JSON.stringify(sealedDetail.latest));
+	dailyApi.listDailyReportAnalyses.mockResolvedValue([]);
 	dailyApi.createDailyReportConfig.mockResolvedValue(config);
 	dailyApi.updateDailyReportConfig.mockResolvedValue(config);
 	dailyApi.backfillDailyReport.mockResolvedValue({ ...sealedSummary, state: "Collecting", sealedAt: undefined });
@@ -146,19 +149,35 @@ describe("DailyReportsOverview", () => {
 
 describe("DailyReportDetailView", () => {
 	it("presents gaps as gaps and marks the absent AI summary explicitly", async () => {
+		const openEvidence = vi.fn();
 		render(
 			<DailyReportDetailView
 				configKey="ops-daily"
 				localDate="2026-09-27"
 				suspended={false}
 				navigate={vi.fn()}
+				openEvidence={openEvidence}
 			/>,
 		);
 		expect(await screen.findByText("本报告存在缺口")).toBeInTheDocument();
 		expect(screen.getAllByText("有缺口").length).toBeGreaterThan(0);
 		expect(screen.getAllByText("计划不存在").length).toBeGreaterThan(0);
 		expect(screen.getByText(/暂无 AI 总结/)).toBeInTheDocument();
-		expect(screen.getByText("检查通过")).toBeInTheDocument();
+		expect(screen.getAllByText("采证完整").length).toBeGreaterThan(0);
+		expect(screen.getByText(/末值 1/)).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "证据 #33" }));
+		expect(openEvidence).toHaveBeenCalledWith("33");
+	});
+
+	it("shows the Agent's versioned summary separately from the immutable facts", async () => {
+		dailyApi.listDailyReportAnalyses.mockResolvedValue([{ analysisVersion: 2, id: "19", attemptState: "Succeeded", reportVersion: 1, modelId: "model-a", createdAt: "2026-09-28T03:00:00Z" }]);
+		dailyApi.getDailyReportAnalysis.mockResolvedValue({ analysisVersion: 2, id: "19", attemptState: "Succeeded", reportVersion: 1, modelId: "model-a", createdAt: "2026-09-28T03:00:00Z", content: "建议人工核对缺口（Run 7）" });
+		render(<DailyReportDetailView configKey="ops-daily" localDate="2026-09-27" suspended={false} navigate={vi.fn()} />);
+		expect(await screen.findByText("建议人工核对缺口（Run 7）")).toBeInTheDocument();
+		expect(screen.getByText("本报告存在缺口")).toBeInTheDocument();
+		expect(screen.getByText(/AI 总结是分析意见/)).toBeInTheDocument();
+		expect(dailyApi.getDailyReportAnalysis).toHaveBeenCalledWith("ops-daily", "2026-09-27", 2);
+		expect(screen.getByText("分析 2 · 事实 1")).toBeInTheDocument();
 	});
 
 	it("opens the raw immutable version content on select", async () => {
@@ -175,7 +194,7 @@ describe("DailyReportDetailView", () => {
 		expect(await screen.findByText(/inspection_daily_report_v1/)).toBeInTheDocument();
 	});
 
-	it("keeps a collecting report conclusion-free and offers rerun behind confirmation", async () => {
+	it("keeps a collecting report conclusion-free and blocks rerun until sealing", async () => {
 		dailyApi.getDailyReport.mockResolvedValue({
 			...sealedDetail,
 			state: "Collecting",
@@ -195,11 +214,8 @@ describe("DailyReportDetailView", () => {
 		expect(await screen.findByText("正在采集中")).toBeInTheDocument();
 		expect(screen.getByText("尚未封存")).toBeInTheDocument();
 		expect(screen.queryByText("封存事实")).not.toBeInTheDocument();
-		fireEvent.click(screen.getByRole("button", { name: "重新分析" }));
-		fireEvent.click(await screen.findByRole("button", { name: "发起重分析" }));
-		await waitFor(() =>
-			expect(dailyApi.rerunDailyReport).toHaveBeenCalledWith("ops-daily", "2026-09-28"),
-		);
+		expect(screen.getByRole("button", { name: "重新分析" })).toBeDisabled();
+		expect(dailyApi.rerunDailyReport).not.toHaveBeenCalled();
 	});
 });
 
@@ -229,10 +245,11 @@ describe("DailyConfigEditor", () => {
 		fireEvent.change(screen.getByLabelText("配置标识"), { target: { value: "ops-daily" } });
 		fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "运维每日报告" } });
 		fireEvent.click(screen.getByLabelText("选择计划 Prom 连通巡检"));
+		fireEvent.change(screen.getByLabelText("人类期望输出（可选）"), { target: { value: "按来源列出证据与缺口" } });
 		fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
 		await waitFor(() => expect(dailyApi.createDailyReportConfig).toHaveBeenCalled());
 		const input = dailyApi.createDailyReportConfig.mock.calls[0][0];
-		expect(input).toMatchObject({ configKey: "ops-daily", timezone: "Asia/Shanghai", planKeys: ["prom-up"] });
+		expect(input).toMatchObject({ configKey: "ops-daily", timezone: "Asia/Shanghai", planKeys: ["prom-up"], reportInstructions: "按来源列出证据与缺口" });
 		expect(input.triggerTime).toMatch(/^\d{2}:\d{2}$/);
 		await waitFor(() => expect(navigate).toHaveBeenCalledWith("/inspections/daily"));
 	});

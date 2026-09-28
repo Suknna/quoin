@@ -21,6 +21,8 @@ import { EntityList } from "@/components/EntityList";
 import { PropertyList } from "@/components/workbench/PropertyList";
 import {
 	type DailyCheckItem,
+	type DailyReportAnalysisDetail,
+	type DailyReportAnalysisSummary,
 	type DailyReportContent,
 	type DailyReportDetail,
 	type DailySourceReport,
@@ -31,13 +33,15 @@ import {
 	dailyWindowText,
 	formatDailyTime,
 	getDailyReport,
+	getDailyReportAnalysis,
 	getDailyReportVersion,
+	listDailyReportAnalyses,
 	rerunDailyReport,
 	sourceStatusText,
 } from "@/features/inspection/daily";
 
 /** One contributing source's frozen outcome: identity, gap reasons, per-check facts. */
-function SourceReport({ source }: { source: DailySourceReport }) {
+function SourceReport({ source, navigate, openEvidence }: { source: DailySourceReport; navigate: (to: string) => void; openEvidence?: (id: string) => void }) {
 	const gap = source.status === "gap";
 	return (
 		<div className="rounded-lg border p-4">
@@ -79,7 +83,7 @@ function SourceReport({ source }: { source: DailySourceReport }) {
 			{source.checks?.length ? (
 				<ul className="mt-3 space-y-1.5" aria-label="检查项事实">
 					{source.checks.map((check) => (
-						<CheckItem key={`${check.runId}-${check.checkKey}`} check={check} />
+						<CheckItem key={`${check.runId}-${check.checkKey}`} check={check} navigate={navigate} openEvidence={openEvidence} />
 					))}
 				</ul>
 			) : (
@@ -89,18 +93,18 @@ function SourceReport({ source }: { source: DailySourceReport }) {
 	);
 }
 
-function CheckItem({ check }: { check: DailyCheckItem }) {
-	const gap = Boolean(check.gapReason);
+function CheckItem({ check, navigate, openEvidence }: { check: DailyCheckItem; navigate: (to: string) => void; openEvidence?: (id: string) => void }) {
+	const gap = check.status !== "ok" || Boolean(check.gapReason);
 	return (
 		<li className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-sm">
 			<span className="font-mono text-xs">{check.checkKey}</span>
 			{gap ? (
 				<Badge variant="outline" className="border-destructive/50 text-destructive">
-					{dailyGapText(check.gapReason ?? "")}
+					{check.gapReason ? dailyGapText(check.gapReason) : `采证状态：${check.status}`}
 				</Badge>
 			) : (
 				<Badge variant="outline" className="border-success/50 text-success">
-					正常
+					采证完整
 				</Badge>
 			)}
 			{check.observedAt && (
@@ -108,12 +112,26 @@ function CheckItem({ check }: { check: DailyCheckItem }) {
 					观测于 {formatDailyTime(check.observedAt)}
 				</span>
 			)}
+			<Button variant="link" size="sm" className="h-auto p-0" onClick={() => navigate(`/inspections?run=${encodeURIComponent(String(check.runId))}`)}>
+				运行 #{check.runId}
+			</Button>
+			{check.evidenceId && openEvidence && (
+				<Button variant="link" size="sm" className="h-auto p-0" onClick={() => openEvidence(String(check.evidenceId))}>
+					证据 #{check.evidenceId}
+				</Button>
+			)}
+			{check.measurement && (
+				<span className="text-xs text-muted-foreground">
+					{check.measurement.resultType} · {check.measurement.series} 组序列 · {check.measurement.samples} 个样本
+					{check.measurement.lastValue !== undefined ? ` · 末值 ${check.measurement.lastValue}` : ""}
+				</span>
+			)}
 		</li>
 	);
 }
 
-/** The frozen fact document: totals, per-source facts, and the explicit AI-summary status. */
-function SealedContent({ content }: { content: DailyReportContent }) {
+/** The frozen fact document remains independent of any Agent conclusion. */
+function SealedContent({ content, navigate, openEvidence }: { content: DailyReportContent; navigate: (to: string) => void; openEvidence?: (id: string) => void }) {
 	const { totals } = content;
 	const hasGap =
 		totals.checksGap > 0 || totals.checksError > 0 || totals.sourcesGap > 0;
@@ -121,7 +139,7 @@ function SealedContent({ content }: { content: DailyReportContent }) {
 		<div className="space-y-4">
 			<div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
 				<span>
-					检查通过 <span className="font-medium tabular-nums">{totals.checksOk}</span>
+					采证完整 <span className="font-medium tabular-nums">{totals.checksOk}</span>
 				</span>
 				<span>
 					检查缺口 <span className="font-medium tabular-nums">{totals.checksGap}</span>
@@ -143,17 +161,9 @@ function SealedContent({ content }: { content: DailyReportContent }) {
 			) : null}
 			<div className="grid gap-3 lg:grid-cols-2">
 				{content.sources.map((source) => (
-					<SourceReport key={source.planKey} source={source} />
+					<SourceReport key={source.planKey} source={source} navigate={navigate} openEvidence={openEvidence} />
 				))}
 			</div>
-			<Separator />
-			<section aria-label="AI 总结">
-				<h3 className="text-sm font-medium">AI 总结</h3>
-				<p className="mt-1 text-sm text-muted-foreground">
-					暂无 AI 总结。事实已封存，可由 Agent
-					读取本报告冻结事实后另行生成，不影响以上结论。
-				</p>
-			</section>
 		</div>
 	);
 }
@@ -167,11 +177,13 @@ export function DailyReportDetailView({
 	localDate,
 	suspended,
 	navigate,
+	openEvidence,
 }: {
 	configKey: string;
 	localDate: string;
 	suspended: boolean;
 	navigate: (to: string) => void;
+	openEvidence?: (id: string) => void;
 }) {
 	const [detail, setDetail] = useState<DailyReportDetail>();
 	const [loading, setLoading] = useState(true);
@@ -181,12 +193,33 @@ export function DailyReportDetailView({
 	const [versionText, setVersionText] = useState("");
 	const [versionOpen, setVersionOpen] = useState(false);
 	const [versionLoading, setVersionLoading] = useState(false);
+	const [analysis, setAnalysis] = useState<DailyReportAnalysisDetail>();
+	const [analysisVersions, setAnalysisVersions] = useState<DailyReportAnalysisSummary[]>([]);
+	const [analysisError, setAnalysisError] = useState("");
+	const [analysisLoading, setAnalysisLoading] = useState(false);
 
 	const load = useCallback(async () => {
 		setLoading(true);
 		setError("");
 		try {
-			setDetail(await getDailyReport(configKey, localDate));
+			const report = await getDailyReport(configKey, localDate);
+			setDetail(report);
+			setAnalysis(undefined);
+			setAnalysisVersions([]);
+			setAnalysisError("");
+			if (report.state === "Sealed") {
+				setAnalysisLoading(true);
+				try {
+					const versions = await listDailyReportAnalyses(configKey, localDate);
+					setAnalysisVersions(versions);
+					const latest = versions.find((item) => item.reportVersion === report.latestVersion);
+					if (latest) setAnalysis(await getDailyReportAnalysis(configKey, localDate, latest.analysisVersion));
+				} catch (reason) {
+					setAnalysisError(messageOf(reason, "无法读取 AI 总结。"));
+				} finally {
+					setAnalysisLoading(false);
+				}
+			}
 		} catch (reason) {
 			setError(messageOf(reason, "无法读取每日报告。"));
 		} finally {
@@ -208,6 +241,18 @@ export function DailyReportDetailView({
 			setVersionText(`读取失败：${messageOf(reason, "无法读取该版本。")}`);
 		} finally {
 			setVersionLoading(false);
+		}
+	}
+
+	async function openAnalysis(version: number) {
+		setAnalysisLoading(true);
+		setAnalysisError("");
+		try {
+			setAnalysis(await getDailyReportAnalysis(configKey, localDate, version));
+		} catch (reason) {
+			setAnalysisError(messageOf(reason, "无法读取该 AI 分析版本。"));
+		} finally {
+			setAnalysisLoading(false);
 		}
 	}
 
@@ -275,10 +320,13 @@ export function DailyReportDetailView({
 						{dailyTriggerText[detail.triggerKind]}
 					</Badge>
 					<div className="ml-auto">
+						<Button size="sm" variant="ghost" disabled={suspended || busy} onClick={() => void load()}>
+							刷新
+						</Button>
 						<Button
 							size="sm"
 							variant="outline"
-							disabled={suspended || busy}
+							disabled={suspended || busy || collecting}
 							onClick={() => setRerunOpen(true)}
 						>
 							重新分析
@@ -347,7 +395,37 @@ export function DailyReportDetailView({
 			{detail.latest ? (
 				<section className="space-y-3">
 					<h3 className="text-sm font-medium">封存事实</h3>
-					<SealedContent content={detail.latest} />
+					<SealedContent content={detail.latest} navigate={navigate} openEvidence={openEvidence} />
+				</section>
+			) : null}
+			{detail.latest ? (
+				<section className="space-y-2" aria-label="AI 总结">
+					<Separator />
+					<h3 className="text-sm font-medium">AI 总结</h3>
+					{analysisLoading ? (
+						<p className="text-sm text-muted-foreground" role="status">正在读取 AI 总结…</p>
+					) : analysisError ? (
+						<Alert variant="destructive"><AlertDescription>{analysisError} 事实仍可独立阅读，请稍后刷新。</AlertDescription></Alert>
+					) : analysis ? (
+						<div className="space-y-2 rounded-lg border p-4">
+							<p className="text-xs text-muted-foreground">分析版本 {analysis.analysisVersion} · 事实版本 {analysis.reportVersion} · 模型 {analysis.modelId}</p>
+							{analysis.reportVersion !== detail.latestVersion && <p className="text-xs text-warning">这是旧事实版本的分析，不适用于当前最新封存事实。</p>}
+							<div className="whitespace-pre-wrap text-sm leading-6">{analysis.content}</div>
+							<p className="text-xs text-muted-foreground">AI 总结是分析意见，不代表巡检事实已验证健康。</p>
+						</div>
+					) : (
+						<p className="text-sm text-muted-foreground">暂无 AI 总结。模型不可用或分析失败时，以上封存事实与缺口仍可阅读；请稍后刷新。</p>
+					)}
+					{analysisVersions.length > 0 && (
+						<div className="space-y-2">
+							<h4 className="text-xs font-medium">历史分析</h4>
+							<EntityList
+								items={analysisVersions.map((item) => ({ id: String(item.analysisVersion), title: `分析 ${item.analysisVersion} · 事实 ${item.reportVersion}`, subtitle: `模型 ${item.modelId}`, time: formatDailyTime(item.createdAt) }))}
+								columns={["title", "subtitle", "time"]}
+								onSelect={(item) => void openAnalysis(Number(item.id))}
+							/>
+						</div>
+					)}
 				</section>
 			) : null}
 			<section className="space-y-3">

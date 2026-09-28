@@ -23,6 +23,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { DetailSkeleton } from "@/components/workbench/DetailSkeleton";
 import {
 	createDailyReportConfig,
@@ -45,6 +46,7 @@ interface FormState {
 	timezone: string;
 	triggerTime: string;
 	planKeys: string[];
+	reportInstructions: string;
 }
 
 function emptyForm(): FormState {
@@ -55,6 +57,7 @@ function emptyForm(): FormState {
 		timezone: defaultTimezone(),
 		triggerTime: "08:00",
 		planKeys: [],
+		reportInstructions: "",
 	};
 }
 
@@ -121,6 +124,7 @@ export function DailyConfigEditor({
 					timezone: config.timezone,
 					triggerTime: config.triggerTime,
 					planKeys: [...config.planKeys],
+					reportInstructions: config.reportInstructions ?? "",
 				});
 			})
 			.catch((reason) => {
@@ -158,6 +162,10 @@ export function DailyConfigEditor({
 			setError("至少选择一个参与日报的巡检计划。");
 			return;
 		}
+		if (Array.from(form.reportInstructions).length > 4000) {
+			setError("报告期望不能超过 4000 个字符。");
+			return;
+		}
 		const payload: DailyReportConfigInput = {
 			configKey: form.configKey.trim(),
 			displayName: form.displayName.trim(),
@@ -165,6 +173,7 @@ export function DailyConfigEditor({
 			timezone: form.timezone.trim(),
 			triggerTime: form.triggerTime,
 			planKeys: form.planKeys,
+			reportInstructions: form.reportInstructions.trim() || undefined,
 		};
 		setBusy(true);
 		setError("");
@@ -264,7 +273,7 @@ export function DailyConfigEditor({
 					<CardHeader>
 						<CardTitle>触发</CardTitle>
 						<CardDescription>
-							每天在报告时区的本地触发时间创建报告；触发后两小时为采证截止。
+							每天在报告时区的本地触发时间汇总前一完整自然日已有的巡检事实；两小时后封存，缺失结果明确记为缺口。
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="grid gap-4 md:grid-cols-2">
@@ -297,6 +306,26 @@ export function DailyConfigEditor({
 								}
 							/>
 							<FieldDescription>24 小时制 HH:MM，报告时区的本地时间。</FieldDescription>
+						</Field>
+					</CardContent>
+				</Card>
+				<Card>
+					<CardHeader>
+						<CardTitle>报告期望</CardTitle>
+						<CardDescription>告诉 Agent 希望看到哪些分析与建议；不会改变采证事实或扩展工具权限。</CardDescription>
+					</CardHeader>
+					<CardContent>
+						<Field>
+							<FieldLabel htmlFor="daily-config-instructions">人类期望输出（可选）</FieldLabel>
+							<Textarea
+								id="daily-config-instructions"
+								value={form.reportInstructions}
+								onChange={(event) => update({ reportInstructions: event.target.value })}
+								maxLength={4000}
+								disabled={busy || suspended}
+								placeholder="如：按来源列出异常和缺口，引用 Run/Evidence 编号，再给出需要人工核对的下一步。"
+							/>
+							<FieldDescription>留空时使用默认结构：来源状态、事实变化、缺口、风险与下一步，并引用证据。</FieldDescription>
 						</Field>
 					</CardContent>
 				</Card>

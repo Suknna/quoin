@@ -137,6 +137,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/inspections/daily-reports/{configKey}/{localDate}/analyses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+                localDate: string;
+            };
+            cookie?: never;
+        };
+        /** 读取独立于事实版本的成功 Agent 分析列表 */
+        get: operations["listInspectionDailyReportAnalyses"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inspections/daily-reports/{configKey}/{localDate}/analyses/{analysisVersion}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+                localDate: string;
+                analysisVersion: number;
+            };
+            cookie?: never;
+        };
+        /** 读取一次不可变的日报 Agent 总结 */
+        get: operations["getInspectionDailyReportAnalysis"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/inspections/plans": {
         parameters: {
             query?: never;
@@ -2217,6 +2258,8 @@ export interface components {
             /** @description 本地 HH:MM 触发时间 */
             triggerTime: string;
             planKeys: string[];
+            /** @description 可选的人类期望输出；作为有界不可信文本冻结在各日报版本，不能扩大工具权限。缺省使用安全结构。 */
+            reportInstructions?: string;
         };
         DailyReportConfig: {
             configKey: string;
@@ -2225,6 +2268,7 @@ export interface components {
             timezone: string;
             triggerTime: string;
             planKeys: string[];
+            reportInstructions?: string;
             rowVersion: number;
             createdAt: components["schemas"]["Timestamp"];
             updatedAt: components["schemas"]["Timestamp"];
@@ -2264,6 +2308,17 @@ export interface components {
                 status: string;
                 gapReason?: string;
                 observedAt?: components["schemas"]["Timestamp"];
+                /** @description 已提交的不可变 Evidence 定位；缺口可能没有证据。 */
+                evidenceId?: number;
+                /** @description 从冻结 Evidence 派生的有界结构化观测摘要，不是原始平台响应。 */
+                measurement?: {
+                    resultType: string;
+                    series: number;
+                    samples: number;
+                    firstValue?: string;
+                    lastValue?: string;
+                    lastAt?: components["schemas"]["Timestamp"];
+                };
             }[];
         };
         DailyReportContribution: {
@@ -2283,6 +2338,7 @@ export interface components {
             contributions: components["schemas"]["DailyReportContribution"][];
             versions: {
                 version: number;
+                expectedOutput?: string;
                 createdAt: components["schemas"]["Timestamp"];
             }[];
             latest?: {
@@ -2303,6 +2359,18 @@ export interface components {
                     sourcesGap: number;
                 };
             };
+        };
+        DailyReportAnalysisSummary: {
+            analysisVersion: number;
+            id: components["schemas"]["LocatorId"];
+            attemptState: string;
+            reportVersion: number;
+            modelId: string;
+            createdAt: components["schemas"]["Timestamp"];
+        };
+        DailyReportAnalysisDetail: components["schemas"]["DailyReportAnalysisSummary"] & {
+            /** @description Agent 文本结论；冻结事实需从 DailyReportDetail 独立读取 */
+            content: string;
         };
         PluginInspectionPlan: {
             planKey: components["schemas"]["StableKey"];
@@ -3973,6 +4041,8 @@ export type DailyReportSummary = components['schemas']['DailyReportSummary'];
 export type DailyReportSource = components['schemas']['DailyReportSource'];
 export type DailyReportContribution = components['schemas']['DailyReportContribution'];
 export type DailyReportDetail = components['schemas']['DailyReportDetail'];
+export type DailyReportAnalysisSummary = components['schemas']['DailyReportAnalysisSummary'];
+export type DailyReportAnalysisDetail = components['schemas']['DailyReportAnalysisDetail'];
 export type PluginInspectionPlan = components['schemas']['PluginInspectionPlan'];
 export type BusinessView = components['schemas']['BusinessView'];
 export type PluginInspectionPlanInput = components['schemas']['PluginInspectionPlanInput'];
@@ -4416,6 +4486,60 @@ export interface operations {
                     "application/json": {
                         content: string;
                     };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listInspectionDailyReportAnalyses: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+                localDate: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已封存的 Agent 分析，最新在前；缺模型或失败时为空，不表示健康。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["DailyReportAnalysisSummary"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getInspectionDailyReportAnalysis: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                configKey: string;
+                localDate: string;
+                analysisVersion: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 对指定事实版本的成功 Agent 总结；不得代替采证事实。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailyReportAnalysisDetail"];
                 };
             };
             401: components["responses"]["Unauthorized"];

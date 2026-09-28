@@ -199,6 +199,8 @@ func accessDeclarationTable() map[string]operations.Declaration {
 		declaration("getInspectionDailyReportVersion", http.MethodGet, "/api/v1/inspections/daily-reports/{configKey}/{localDate}/versions/{version}", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
 		declaration("backfillInspectionDailyReport", http.MethodPost, "/api/v1/inspections/daily-reports/backfill", operations.LevelAdmin, operations.KindCommand, "inspection_daily_report"),
 		declaration("rerunInspectionDailyReport", http.MethodPost, "/api/v1/inspections/daily-reports/{configKey}/{localDate}/rerun", operations.LevelAdmin, operations.KindCommand, "inspection_daily_report"),
+		declaration("listInspectionDailyReportAnalyses", http.MethodGet, "/api/v1/inspections/daily-reports/{configKey}/{localDate}/analyses", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
+		declaration("getInspectionDailyReportAnalysis", http.MethodGet, "/api/v1/inspections/daily-reports/{configKey}/{localDate}/analyses/{analysisVersion}", operations.LevelAdmin, operations.KindQuery, "inspection_daily_report"),
 	)
 
 	// 业务视图（Admin）。

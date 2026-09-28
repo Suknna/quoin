@@ -23,12 +23,16 @@ type DailyReportConfigRequest struct {
 	// TriggerTime is the local wall clock 'HH:MM' (24h) of the daily trigger.
 	TriggerTime string   `json:"triggerTime" minLength:"5" maxLength:"5" pattern:"^([01][0-9]|2[0-3]):[0-5][0-9]$"`
 	PlanKeys    []string `json:"planKeys" minItems:"1" maxItems:"200"`
+	// Optional human expectation, frozen per report version and escaped in the
+	// XML prompt; it cannot grant tools or expand evidence access.
+	ReportInstructions *string `json:"reportInstructions,omitempty" maxLength:"4000"`
 }
 
 func (input DailyReportConfigRequest) domain() inspection.DailyReportConfigInput {
 	return inspection.DailyReportConfigInput{
 		ConfigKey: input.ConfigKey, DisplayName: input.DisplayName, Enabled: input.Enabled,
 		Timezone: input.Timezone, TriggerTime: input.TriggerTime, PlanKeys: input.PlanKeys,
+		ReportInstructions: input.ReportInstructions,
 	}
 }
 
@@ -251,5 +255,52 @@ func (handler *Handler) registerDailyReports(api huma.API) {
 			CacheControl string `header:"Cache-Control"`
 			Body         inspection.DailyReportSummary
 		}{Status: http.StatusAccepted, CacheControl: noStore(), Body: item}, nil
+	})
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/daily-reports/{configKey}/{localDate}/analyses", OperationID: "listInspectionDailyReportAnalyses"}, func(ctx context.Context, input *struct {
+		Session   string `cookie:"__Host-quoin-session"`
+		ConfigKey string `path:"configKey"`
+		LocalDate string `path:"localDate" pattern:"^\\d{4}-\\d{2}-\\d{2}$"`
+	}) (*struct {
+		CacheControl string `header:"Cache-Control"`
+		Body         struct {
+			Items []inspection.DailyReportAnalysisSummary `json:"items"`
+		}
+	}, error) {
+		if _, err := handler.reader(ctx, input.Session); err != nil {
+			return nil, err
+		}
+		items, err := handler.Inspections.ListDailyReportAnalyses(ctx, input.ConfigKey, input.LocalDate)
+		if err != nil {
+			return nil, mapDomainError(err)
+		}
+		response := &struct {
+			CacheControl string `header:"Cache-Control"`
+			Body         struct {
+				Items []inspection.DailyReportAnalysisSummary `json:"items"`
+			}
+		}{CacheControl: noStore()}
+		response.Body.Items = items
+		return response, nil
+	})
+	huma.Register(api, huma.Operation{Method: http.MethodGet, Path: "/api/v1/inspections/daily-reports/{configKey}/{localDate}/analyses/{analysisVersion}", OperationID: "getInspectionDailyReportAnalysis"}, func(ctx context.Context, input *struct {
+		Session         string `cookie:"__Host-quoin-session"`
+		ConfigKey       string `path:"configKey"`
+		LocalDate       string `path:"localDate" pattern:"^\\d{4}-\\d{2}-\\d{2}$"`
+		AnalysisVersion int64  `path:"analysisVersion" minimum:"1"`
+	}) (*struct {
+		CacheControl string                               `header:"Cache-Control"`
+		Body         inspection.DailyReportAnalysisDetail `json:"body"`
+	}, error) {
+		if _, err := handler.reader(ctx, input.Session); err != nil {
+			return nil, err
+		}
+		item, err := handler.Inspections.GetDailyReportAnalysis(ctx, input.ConfigKey, input.LocalDate, input.AnalysisVersion)
+		if err != nil {
+			return nil, mapDomainError(err)
+		}
+		return &struct {
+			CacheControl string                               `header:"Cache-Control"`
+			Body         inspection.DailyReportAnalysisDetail `json:"body"`
+		}{CacheControl: noStore(), Body: item}, nil
 	})
 }

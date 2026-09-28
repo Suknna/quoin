@@ -595,6 +595,7 @@ export function useInspectionsModule(
 				navigate={props.navigate}
 				configKey={reportKey.configKey}
 				localDate={reportKey.localDate}
+				openEvidence={props.openEvidence}
 			/>
 		) : null,
 	};

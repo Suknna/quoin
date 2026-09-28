@@ -311,6 +311,61 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/inspections/daily-reports/{configKey}/{localDate}/analyses:
+    parameters:
+      - in: path
+        name: configKey
+        required: true
+        schema: {type: string}
+      - in: path
+        name: localDate
+        required: true
+        schema: {type: string, format: date}
+    get:
+      tags: [inspections]
+      operationId: listInspectionDailyReportAnalyses
+      summary: 读取独立于事实版本的成功 Agent 分析列表
+      responses:
+        '200':
+          description: 已封存的 Agent 分析，最新在前；缺模型或失败时为空，不表示健康。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/DailyReportAnalysisSummary'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/inspections/daily-reports/{configKey}/{localDate}/analyses/{analysisVersion}:
+    parameters:
+      - in: path
+        name: configKey
+        required: true
+        schema: {type: string}
+      - in: path
+        name: localDate
+        required: true
+        schema: {type: string, format: date}
+      - in: path
+        name: analysisVersion
+        required: true
+        schema: {type: integer, minimum: 1}
+    get:
+      tags: [inspections]
+      operationId: getInspectionDailyReportAnalysis
+      summary: 读取一次不可变的日报 Agent 总结
+      responses:
+        '200':
+          description: 对指定事实版本的成功 Agent 总结；不得代替采证事实。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DailyReportAnalysisDetail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /api/v1/inspections/plans:
     get:
       tags:
@@ -4550,6 +4605,10 @@ components:
           minItems: 1
           maxItems: 200
           items: {type: string}
+        reportInstructions:
+          type: string
+          maxLength: 4000
+          description: 可选的人类期望输出；作为有界不可信文本冻结在各日报版本，不能扩大工具权限。缺省使用安全结构。
     DailyReportConfig:
       type: object
       required: [configKey, displayName, enabled, timezone, triggerTime, planKeys, rowVersion, createdAt, updatedAt]
@@ -4562,6 +4621,7 @@ components:
         planKeys:
           type: array
           items: {type: string}
+        reportInstructions: {type: string, maxLength: 4000}
         rowVersion: {type: integer, minimum: 1}
         createdAt: {$ref: '#/components/schemas/Timestamp'}
         updatedAt: {$ref: '#/components/schemas/Timestamp'}
@@ -4608,6 +4668,18 @@ components:
               status: {type: string}
               gapReason: {type: string}
               observedAt: {$ref: '#/components/schemas/Timestamp'}
+              evidenceId: {type: integer, minimum: 1, description: 已提交的不可变 Evidence 定位；缺口可能没有证据。}
+              measurement:
+                type: object
+                description: 从冻结 Evidence 派生的有界结构化观测摘要，不是原始平台响应。
+                required: [resultType, series, samples]
+                properties:
+                  resultType: {type: string}
+                  series: {type: integer, minimum: 0}
+                  samples: {type: integer, minimum: 0}
+                  firstValue: {type: string}
+                  lastValue: {type: string}
+                  lastAt: {$ref: '#/components/schemas/Timestamp'}
     DailyReportContribution:
       type: object
       required: [planKey, enabled, sourceEnabled]
@@ -4639,6 +4711,7 @@ components:
                 required: [version, createdAt]
                 properties:
                   version: {type: integer, minimum: 1}
+                  expectedOutput: {type: string, maxLength: 4000}
                   createdAt: {$ref: '#/components/schemas/Timestamp'}
             latest:
               type: object
@@ -4662,6 +4735,23 @@ components:
                     checksGap: {type: integer}
                     checksError: {type: integer}
                     sourcesGap: {type: integer}
+    DailyReportAnalysisSummary:
+      type: object
+      required: [analysisVersion, id, attemptState, reportVersion, modelId, createdAt]
+      properties:
+        analysisVersion: {type: integer, minimum: 1}
+        id: {$ref: '#/components/schemas/LocatorId'}
+        attemptState: {type: string}
+        reportVersion: {type: integer, minimum: 1}
+        modelId: {type: string}
+        createdAt: {$ref: '#/components/schemas/Timestamp'}
+    DailyReportAnalysisDetail:
+      allOf:
+        - $ref: '#/components/schemas/DailyReportAnalysisSummary'
+        - type: object
+          required: [content]
+          properties:
+            content: {type: string, description: Agent 文本结论；冻结事实需从 DailyReportDetail 独立读取}
     PluginInspectionPlan:
       type: object
       required:

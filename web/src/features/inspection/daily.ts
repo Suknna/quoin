@@ -7,6 +7,8 @@ import type {
 	DailyReportDetail as GeneratedDailyReportDetail,
 	DailyReportSource as GeneratedDailyReportSource,
 	DailyReportSummary as GeneratedDailyReportSummary,
+	DailyReportAnalysisSummary as GeneratedDailyReportAnalysisSummary,
+	DailyReportAnalysisDetail as GeneratedDailyReportAnalysisDetail,
 } from "@/api/generated/types";
 /** Reuses the plan/run module's problem+json failure projection. */
 import { InspectionApiError, newClientCommandId } from "./api";
@@ -35,6 +37,8 @@ export type DailyTotals = DailyReportContent["totals"];
 export type DailyReportState = DailyReportSummary["state"];
 export type DailyReportTriggerKind = DailyReportSummary["triggerKind"];
 export type DailyReportVersionSummary = DailyReportDetail["versions"][number];
+export type DailyReportAnalysisSummary = GeneratedDailyReportAnalysisSummary;
+export type DailyReportAnalysisDetail = GeneratedDailyReportAnalysisDetail;
 
 function queryOf(options: { configKey?: string; limit?: number }): string {
 	const query = new URLSearchParams({ limit: String(options.limit ?? 50) });
@@ -135,6 +139,19 @@ export async function getDailyReportVersion(
 	return body.content;
 }
 
+export async function listDailyReportAnalyses(configKey: string, localDate: string): Promise<DailyReportAnalysisSummary[]> {
+	const response = await fetch(`/api/v1/inspections/daily-reports/${encodeURIComponent(configKey)}/${encodeURIComponent(localDate)}/analyses`, { credentials: "include" });
+	if (!response.ok) throw await failure(response);
+	const page = (await response.json()) as { items?: DailyReportAnalysisSummary[] };
+	return page.items ?? [];
+}
+
+export async function getDailyReportAnalysis(configKey: string, localDate: string, analysisVersion: number): Promise<DailyReportAnalysisDetail> {
+	const response = await fetch(`/api/v1/inspections/daily-reports/${encodeURIComponent(configKey)}/${encodeURIComponent(localDate)}/analyses/${analysisVersion}`, { credentials: "include" });
+	if (!response.ok) throw await failure(response);
+	return (await response.json()) as DailyReportAnalysisDetail;
+}
+
 /** 人工补跑（漏过的整日）：窗口仍是请求的原日期，绝不偷换为当前日期。 */
 export async function backfillDailyReport(
 	configKey: string,
@@ -208,7 +225,7 @@ export function dailyStateBadgeClass(
 }
 
 export function sourceStatusText(status: DailySourceReport["status"]): string {
-	return status === "ok" ? "正常" : "有缺口";
+	return status === "ok" ? "采证完整" : "有缺口";
 }
 
 /** Formats the frozen UTC window as one line, e.g. "09-27 16:00 → 09-28 16:00"。 */
