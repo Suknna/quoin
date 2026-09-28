@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
@@ -133,7 +134,7 @@ func selectRelatedAlerts(ctx context.Context, queries queryer, occurrence *Occur
 	if len(viewKeys) > 0 {
 		scope = `EXISTS (
 			  SELECT 1 FROM alert_occurrence_correlations rc
-			  WHERE rc.occurrence_id=o.id AND rc.view_key IN (`+placeholders+`))
+			  WHERE rc.occurrence_id=o.id AND rc.view_key IN (` + placeholders + `))
 			OR o.source_id=(SELECT source_id FROM alert_occurrences WHERE id=?)`
 	}
 	rows, err := queries.QueryContext(ctx, `
@@ -237,30 +238,34 @@ func (service *Service) RebuildInput(ctx context.Context, attemptID int64) ([]by
 	return json.Marshal(input)
 }
 
-// frozenIntegrations reconstructs the frozen source-level authority from the
-// attempt's item lineage: the exact connections and revisions frozen at
+// frozenIntegrations reconstructs the frozen source-level authority from
+// the attempt's item lineage: the exact connections and revisions frozen at
 // creation, so later enablement churn cannot re-interpret the snapshot.
+// The rendered kind derives from the item's own frozen role (the declared
+// scope convention trims the _source suffix), so a rebuild needs no role
+// list and historical attempts reproduce byte-identical integrations.
 func frozenIntegrations(ctx context.Context, queries queryer, attemptID int64) ([]RenderedIntegration, error) {
 	rows, err := queries.QueryContext(ctx, `
-		SELECT CASE WHEN c.type='kubernetes' THEN 'kubernetes' ELSE 'metrics' END AS kind, c.name
+		SELECT item.item_role, c.name
 		FROM attempt_input_snapshots snapshot
 		JOIN attempt_input_items item ON item.snapshot_id=snapshot.id
-			AND item.item_role IN ('metrics_source','kubernetes_source')
 			AND item.connection_revision_id IS NOT NULL
 		JOIN connection_revisions r ON r.id=item.connection_revision_id
 		JOIN connections c ON c.id=r.connection_id
 		WHERE snapshot.attempt_id=?
-		ORDER BY c.name, kind`, attemptID)
+		ORDER BY c.name, item.item_role`, attemptID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var integrations []RenderedIntegration
 	for rows.Next() {
+		var role string
 		var integration RenderedIntegration
-		if err := rows.Scan(&integration.Kind, &integration.Name); err != nil {
+		if err := rows.Scan(&role, &integration.Name); err != nil {
 			return nil, err
 		}
+		integration.Kind = strings.TrimSuffix(role, "_source")
 		integrations = append(integrations, integration)
 	}
 	return integrations, rows.Err()

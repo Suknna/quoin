@@ -15,10 +15,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
 const pluginExecutionSchemaKind = "inspection_plugin_execution_v1"
@@ -51,7 +51,7 @@ type pluginCollectionInput struct {
 
 // CreatePlanRun 启动独立计划的一次人工 Run（执行器账本命令）：每个展开检查在
 // 同一事务成为 run_check 子 Attempt：插件采集子冻结
-// inspection_plugin_execution_v1 与其 config_thanos_query grant。台账与成功/
+// inspection_plugin_execution_v1 与其模板声明用途的连接 grant。台账与成功/
 // 拒绝审计由执行器在同一事务自动持久化。
 func (s *Service) CreatePlanRun(ctx context.Context, principalID int64, clientCommandID, planKey string) (RunDetail, error) {
 	digest := auth.DigestCommand(CommandCreateRun, map[string]any{"planKey": planKey})
@@ -314,8 +314,8 @@ func (s *Service) createPlanRunOn(ctx context.Context, tx execution.Executor, re
 			checkKey: checkKey, pluginID: pluginID, templateID: templateID, templateVersion: frozenVersion,
 			paramsJSON: paramsJSON, target: target, evidenceAt: now, scopeKind: wireKind,
 		}); err != nil {
-			if errors.Is(err, thanos.ErrThanosUnavailable) || errors.Is(err, thanos.ErrGrantNotCurrent) {
-				return RunDetail{}, nil, fmt.Errorf("%w: %s", err, "尚无可用的指标连接，请先创建并启用连接后重试")
+			if errors.Is(err, attempt.ErrSourceUnavailable) || errors.Is(err, attempt.ErrGrantNotCurrent) {
+				return RunDetail{}, nil, fmt.Errorf("%w: %s", err, "尚无可用的来源连接，请先创建并启用连接后重试")
 			}
 			return RunDetail{}, nil, err
 		}
@@ -459,8 +459,10 @@ type pluginCollectionCheck struct {
 	scopeKind       string // wire 值：integration|businessView|objects
 }
 
-// pluginChild 冻结一个 run_check 插件采集子 Attempt：config_thanos_query
-// grant 与版本化输入正文（与既有 PromQL 子 Attempt 的授权边界相同）。
+// pluginChild 冻结一个 run_check 插件采集子 Attempt：模板声明授权用途的
+// 连接 grant 与版本化输入正文（与既有 PromQL 子 Attempt 的授权边界相同）。
+// 授权用途是插件模板声明（InspectionTemplate.GrantPurpose，ADR-0014）：
+// 新插件检查项按声明冻结 grant，宿主不再携带连接类型或用途分支。
 func (s *Service) pluginChild(ctx context.Context, tx execution.Executor, runID, connectionID int64, check pluginCollectionCheck) error {
 	// CreateOn centrally persists the command's correlation metadata onto
 	// the new child attempt in this same transaction (ADR-0006); a context
@@ -471,7 +473,11 @@ func (s *Service) pluginChild(ctx context.Context, tx execution.Executor, runID,
 	if err != nil {
 		return err
 	}
-	grant, err := thanos.ResolveConfigGrantForConnection(ctx, tx, attemptID, connectionID)
+	template, declared := plugins.Default().InspectionTemplate(check.pluginID, check.templateID, check.templateVersion)
+	if !declared {
+		return fmt.Errorf("inspection: check %s binds undeclared template %s/%s of plugin %s", check.checkKey, check.templateID, check.templateVersion, check.pluginID)
+	}
+	grant, err := attempt.FreezeConnectionGrant(ctx, tx, attemptID, connectionID, template.GrantPurpose)
 	if err != nil {
 		return err
 	}

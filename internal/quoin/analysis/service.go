@@ -18,12 +18,12 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/agentcontext"
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
 // SchemaKind is the frozen input schema identifier for initial-analysis
@@ -72,6 +72,12 @@ type Service struct {
 	attempts *attempt.Service
 	evidence *evidence.Service
 	now      func() time.Time
+	// scopes is the derived source-scope plan (attempt.SourceScopes): the
+	// registry-declared roles and connection kinds rendered into the frozen
+	// input and resolved by grant authorizations. The wiring layer pushes
+	// the deployment-resolved plan; the default derives from the process
+	// registry under default enablement.
+	scopes attempt.SourceScopeTable
 	// ProjectTerminalOutcome receives the terminal execution sequence while
 	// the runner's guarded transaction is still open. It projects independent
 	// platform facts atomically with the authoritative attempt transition.
@@ -124,10 +130,13 @@ const (
 )
 
 // NewService builds the analysis service on the product database and
-// wires the deterministic input rebuilder and the tool observation hooks
-// (grant resolution/validation for thanos_query, deterministic Evidence)
-// into the shared attempt machine. The runner owns the writable database;
-// every pure read goes through the runner's fail-closed read seam until the
+// wires the deterministic input rebuilder and the generic tool observation
+// seams (declaration-driven grant resolution/validation, evidence
+// projections registered from the compiled tool entries) into the shared
+// attempt machine. No per-tool switch lives here: a new trusted plugin tool
+// authorizes and seals Evidence by its own declaration alone. The runner
+// owns the writable database; every pure read goes through the
+// runner's fail-closed read seam until the
 // composition layer injects a real read-only pool via SetReader — reads
 // never fall back to the writable pool.
 func NewService(db *sql.DB) *Service {
@@ -136,30 +145,34 @@ func NewService(db *sql.DB) *Service {
 		db:       db,
 		attempts: attempt.NewService(db),
 		now:      now,
+		scopes:   attempt.NewSourceScopeTable(defaultSourceScopes()),
 	}
 	service.attempts.SnapshotRebuilder = service.RebuildInput
 	service.evidence = evidence.NewService(db)
-	service.evidence.RegisterProjector(thanos.QueryToolName, thanos.EvidenceFor)
-	service.attempts.ToolGrantResolver = func(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, tool attempt.ToolDef) (attempt.ToolResolution, error) {
-		switch tool.Name {
-		case thanos.QueryToolName:
-			// ResolveQueryGrant returns the full resolution (grants + preflight).
-			return thanos.ResolveQueryGrant(ctx, conn, attemptID, toolCallID)
-		default:
-			return attempt.ToolResolution{}, fmt.Errorf("tool %s has no grant resolver", tool.Name)
-		}
-	}
-	service.attempts.ToolGrantValidator = func(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, tool attempt.ToolDef) error {
-		switch tool.Name {
-		case thanos.QueryToolName:
-			return thanos.ValidateGrantForExecution(ctx, conn, attemptID, toolCallID)
-		default:
-			return fmt.Errorf("tool %s has no grant validator", tool.Name)
-		}
-	}
+	service.evidence.RegisterEntryProjectors(service.attempts.Catalogs.HandlersTable())
 	service.attempts.EvidenceWriter = service.evidence.WriteForToolCall
 	service.registerOperations(execution.NewRunnerWithClock(db, execution.NewRegistry(), audit.NewWriterWithClock(now), now))
 	return service
+}
+
+// defaultSourceScopes derives the silent-default source scope plan (the
+// process registry under DefaultEnabled); the application wiring replaces
+// it with the deployment-resolved plan via UseSourceScopes.
+func defaultSourceScopes() []attempt.SourceScope {
+	registry := plugins.Default()
+	enabled, err := registry.ResolveEnabled(nil)
+	if err != nil {
+		panic("default plugin enablement must always resolve: " + err.Error())
+	}
+	return attempt.SourceScopes(registry, enabled)
+}
+
+// UseSourceScopes installs the composition layer's deployment-resolved
+// source scope plan. Enablement is deployment-frozen; there is no runtime
+// switch, and each new attempt freezes the resolved plan it was created
+// with.
+func (service *Service) UseSourceScopes(scopes []attempt.SourceScope) {
+	service.scopes = attempt.NewSourceScopeTable(scopes)
 }
 
 // registerOperations declares every active analysis mutation. There is no
@@ -474,7 +487,7 @@ func (service *Service) create(ctx context.Context, occurrenceID, principalID in
 		if err != nil {
 			return CreateResult{}, execution.Unchanged, err
 		}
-		attemptID, err := insertAttempt(ctx, tx, analysisID, digestHex, input, selected, now, string(catalogDocument))
+		attemptID, err := service.insertAttempt(ctx, tx, analysisID, digestHex, input, selected, now, string(catalogDocument))
 		if err != nil {
 			return CreateResult{}, execution.Unchanged, err
 		}
@@ -519,7 +532,7 @@ func (service *Service) renderInput(ctx context.Context, tx audit.Reader, occurr
 	// The enabled integrations are ALWAYS the attempt's source-level
 	// authority (ADR-0004); the retired business_systems declaration context
 	// no longer participates in the input.
-	integrations, err := enabledIntegrations(ctx, tx)
+	integrations, err := service.enabledIntegrations(ctx, tx)
 	if err != nil {
 		return Input{}, ModelContract{}, provider{}, err
 	}
@@ -537,15 +550,22 @@ func (service *Service) renderInput(ctx context.Context, tx audit.Reader, occurr
 	return input, contract, selected, nil
 }
 
-// enabledIntegrations lists the admin-enabled observation integrations in
-// deterministic name order. Each entry freezes the connection's current
-// revision when the attempt items are written, so the model-visible source
-// authority is exactly the grant-eligible set.
-func enabledIntegrations(ctx context.Context, tx audit.Reader) ([]RenderedIntegration, error) {
+// enabledIntegrations lists the admin-enabled source integrations of the
+// declared scope plan in deterministic name order. Each entry freezes the
+// connection's current revision when the attempt items are written, so the
+// model-visible source authority is exactly the grant-eligible set. The
+// scope plan is registry-derived (attempt.SourceScopes): a new trusted
+// plugin's connection kind joins the frozen source authority by
+// declaration alone.
+func (service *Service) enabledIntegrations(ctx context.Context, tx audit.Reader) ([]RenderedIntegration, error) {
+	table := service.scopes
+	if len(table.Types()) == 0 {
+		return []RenderedIntegration{}, nil
+	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT name, type FROM connections
-		WHERE type IN ('thanos','prometheus') AND enabled=1 AND revalidation_required=0
-		ORDER BY name, type`)
+		WHERE type IN (`+table.Placeholders()+`) AND enabled=1 AND revalidation_required=0
+		ORDER BY name, type`, typesAsArgs(table.Types())...)
 	if err != nil {
 		return nil, err
 	}
@@ -556,9 +576,18 @@ func enabledIntegrations(ctx context.Context, tx audit.Reader) ([]RenderedIntegr
 		if err := rows.Scan(&name, &connectionType); err != nil {
 			return nil, err
 		}
-		integrations = append(integrations, RenderedIntegration{Kind: "metrics", Name: name})
+		integrations = append(integrations, RenderedIntegration{Kind: table.KindOf(table.RoleOf(connectionType)), Name: name})
 	}
 	return integrations, rows.Err()
+}
+
+// typesAsArgs renders the scope type list as query arguments.
+func typesAsArgs(types []string) []any {
+	args := make([]any, len(types))
+	for index, value := range types {
+		args[index] = value
+	}
+	return args
 }
 
 // selectModelProvider resolves the single enabled model provider and its
@@ -604,7 +633,7 @@ func selectModelProvider(ctx context.Context, tx audit.Reader) (provider, error)
 
 // insertAttempt persists one Queued attempt with its frozen input snapshot,
 // input items and chat_model grant (DATA-ATTEMPT-001/002).
-func insertAttempt(ctx context.Context, tx writer, analysisID int64, digestHex string, input Input, selected provider, now, toolCatalogJSON string) (int64, error) {
+func (service *Service) insertAttempt(ctx context.Context, tx writer, analysisID int64, digestHex string, input Input, selected provider, now, toolCatalogJSON string) (int64, error) {
 	// CreateOn centrally persists the command's correlation metadata onto
 	// the new attempt in this same transaction (ADR-0006); a context
 	// without execution metadata fails the creation.
@@ -652,7 +681,7 @@ func insertAttempt(ctx context.Context, tx writer, analysisID int64, digestHex s
 	}
 	// Every attempt freezes the enabled integrations at their current
 	// revisions — the authoritative grant-eligible set (ADR-0004).
-	if err := insertSourceLineageItems(ctx, tx, snapshotID, itemCount+1, input.Integrations); err != nil {
+	if err := service.insertSourceLineageItems(ctx, tx, snapshotID, itemCount+1, input.Integrations); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -664,32 +693,37 @@ func insertAttempt(ctx context.Context, tx writer, analysisID int64, digestHex s
 	return attemptID, nil
 }
 
-// insertSourceLineageItems freezes one input item per enabled integration at
-// its current revision. The revision pointer is the frozen fact: later
+// insertSourceLineageItems freezes one input item per enabled integration
+// at its current revision. The revision pointer is the frozen fact: later
 // rotations create new revisions, so the attempt's authorized set stays
 // reconstructible byte-for-byte (and later grants must match these items).
-func insertSourceLineageItems(ctx context.Context, tx writer, snapshotID, firstSeq int64, integrations []RenderedIntegration) error {
-	if len(integrations) == 0 {
+// The per-connection role comes from the declared scope plan, never from a
+// host-side type map.
+func (service *Service) insertSourceLineageItems(ctx context.Context, tx writer, snapshotID, firstSeq int64, integrations []RenderedIntegration) error {
+	table := service.scopes
+	if len(table.Types()) == 0 {
 		return nil
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT name, current_revision_id FROM connections
-		WHERE type IN ('thanos','prometheus','kubernetes') AND enabled=1 AND revalidation_required=0
-		ORDER BY name, type`)
+		SELECT name, type, current_revision_id FROM connections
+		WHERE type IN (`+table.Placeholders()+`) AND enabled=1 AND revalidation_required=0
+		ORDER BY name, type`, typesAsArgs(table.Types())...)
 	if err != nil {
 		return err
 	}
 	type frozen struct {
 		name       string
+		role       string
 		revisionID int64
 	}
 	var frozenIntegrations []frozen
 	for rows.Next() {
 		var item frozen
-		if err := rows.Scan(&item.name, &item.revisionID); err != nil {
+		if err := rows.Scan(&item.name, &item.role, &item.revisionID); err != nil {
 			rows.Close()
 			return err
 		}
+		item.role = table.RoleOf(item.role)
 		frozenIntegrations = append(frozenIntegrations, item)
 	}
 	rows.Close()
@@ -703,14 +737,10 @@ func insertSourceLineageItems(ctx context.Context, tx writer, snapshotID, firstS
 		return fmt.Errorf("integration snapshot drift: %d rendered vs %d frozen", len(integrations), len(frozenIntegrations))
 	}
 	for index, item := range frozenIntegrations {
-		role := "metrics_source"
-		if integrations[index].Kind == "kubernetes" {
-			role = "kubernetes_source"
-		}
 		digest := sha256.Sum256([]byte("connection-revision:" + strconv.FormatInt(item.revisionID, 10)))
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,connection_revision_id)
-			VALUES(?,?,?, ?,?)`, snapshotID, firstSeq+int64(index), role, hex.EncodeToString(digest[:]), item.revisionID); err != nil {
+			VALUES(?,?,?, ?,?)`, snapshotID, firstSeq+int64(index), item.role, hex.EncodeToString(digest[:]), item.revisionID); err != nil {
 			return err
 		}
 	}

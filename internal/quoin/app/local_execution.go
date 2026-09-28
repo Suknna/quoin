@@ -221,11 +221,12 @@ type localConnection struct {
 	plugins.Connection
 }
 
-// loadLocalConnection 从 attempt 的 config_thanos_query grant 解析连接身份与
-// revision 配置（观察/巡检采集共用），并在派发前于 runner 守卫事务内复核
-// 冻结 grant 的可执行性（连接禁用/轮换/复验待定后，已冻结排队的采集不得
-// 再取材料或发起平台调用；探测不经此守卫——探测本身就是 Enable 的资格
-// 前提，必须能在未启用连接上运行）。
+// loadLocalConnection 从 attempt 的采集 grant（模板/发现声明用途，每 Attempt
+// 恰一个 config_* grant，schema 唯一索引闭合）解析连接身份与 revision 配置
+// （观察/巡检采集共用），并在派发前于 runner 守卫事务内复核冻结 grant 的可
+// 执行性（连接禁用/轮换/复验待定后，已冻结排队的采集不得再取材料或发起平
+// 台调用；探测不经此守卫——探测本身就是 Enable 的资格前提，必须能在未启用
+// 连接上运行）。
 func (service *RuntimeService) loadLocalConnection(ctx context.Context, reader audit.Reader, attemptID int64) (localConnection, error) {
 	var connectionID, revisionID int64
 	var connectionType, configJSON string
@@ -234,11 +235,11 @@ func (service *RuntimeService) loadLocalConnection(ctx context.Context, reader a
 		FROM attempt_connection_grants g
 		JOIN connections c ON c.id = g.connection_id
 		JOIN connection_revisions r ON r.id = g.connection_revision_id
-		WHERE g.attempt_id=? AND g.purpose='config_thanos_query'
+		WHERE g.attempt_id=? AND g.purpose GLOB 'config_*'
 		ORDER BY g.id LIMIT 1`, attemptID).
 		Scan(&connectionID, &connectionType, &revisionID, &configJSON)
 	if err != nil {
-		return localConnection{}, fmt.Errorf("resolve metrics connection for attempt %d: %w", attemptID, err)
+		return localConnection{}, fmt.Errorf("resolve source connection for attempt %d: %w", attemptID, err)
 	}
 	if service.Connections == nil {
 		// 无连接服务即无凭据授权面：fail closed，绝不带着未复核的 grant 派发。

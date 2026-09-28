@@ -25,7 +25,6 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
 // runDetail read note: runDetailOn/activeRunOn compose on the audit.Reader
@@ -221,9 +220,10 @@ func createObservationAttempts(ctx context.Context, conn execution.Executor, run
 		}
 		input.AttemptID = attemptID
 		// The grant binds the attempt to the connection's exact current
-		// (revision, generation) pair — a real source grant, not a business
-		// config projection. Resolution refuses disabled or rotated connections.
-		grant, err := thanos.ResolveConfigGrantForConnection(ctx, conn, input.AttemptID, connectionID)
+		// (revision, generation) pair under the object's DECLARED grant
+		// purpose — a real source grant, not a business config projection.
+		// Resolution refuses disabled or rotated connections.
+		grant, err := attempt.FreezeConnectionGrant(ctx, conn, input.AttemptID, connectionID, object.GrantPurpose)
 		if err != nil {
 			return err
 		}
@@ -344,7 +344,7 @@ func (service *Service) rebuildObservationAttempt(ctx context.Context, attemptID
 	var grant sql.NullInt64
 	err := service.runner.Reader().QueryRowContext(ctx, `
 		SELECT a.scope_id,a.discovery_key,r.plugin_id,
-		       (SELECT id FROM attempt_connection_grants WHERE attempt_id=a.id AND purpose='config_thanos_query')
+		       (SELECT id FROM attempt_connection_grants WHERE attempt_id=a.id)
 		FROM execution_attempts a
 		JOIN observation_runs r ON r.id=a.scope_id
 		WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='observation_run'`, attemptID).Scan(&input.ObservationRunID, &input.ObjectType, &pluginID, &grant)

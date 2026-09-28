@@ -1,4 +1,4 @@
-package thanos
+package attempt
 
 import (
 	"context"
@@ -13,8 +13,9 @@ import (
 )
 
 // Exercise the production SQL and predicate inside a real guarded transaction,
-// independently of connection creation, probes, and the inspection fixture.
-func TestValidateConfigGrantForExecutionDenialReasons(t *testing.T) {
+// independently of connection creation, probes, and the inspection fixture
+// (the generic collection-grant fence, ADR-0014).
+func TestValidateConnectionGrantRowCurrentDenialReasons(t *testing.T) {
 	cases := []struct {
 		name   string
 		change string
@@ -28,7 +29,7 @@ func TestValidateConfigGrantForExecutionDenialReasons(t *testing.T) {
 		{"revision missing", "UPDATE connections SET current_revision_id=NULL", "frozen revision/generation pair no longer current"},
 		{"generation missing", "UPDATE connections SET current_credential_generation_id=NULL", "frozen revision/generation pair no longer current"},
 		{"root rebound", "UPDATE root_key_state SET binding_revision=2", "credential root binding drifted"},
-		{"grant missing", "DELETE FROM attempt_connection_grants", "config grant binding missing"},
+		{"grant missing", "DELETE FROM attempt_connection_grants", "grant binding missing"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -43,11 +44,11 @@ func TestValidateConfigGrantForExecutionDenialReasons(t *testing.T) {
 				CREATE TABLE connections(id INTEGER PRIMARY KEY, enabled INTEGER, revalidation_required INTEGER, current_revision_id INTEGER, current_credential_generation_id INTEGER);
 				CREATE TABLE credential_generations(id INTEGER PRIMARY KEY, key_binding_revision INTEGER);
 				CREATE TABLE root_key_state(binding_revision INTEGER);
-				CREATE TABLE attempt_connection_grants(attempt_id INTEGER, purpose TEXT, connection_id INTEGER, connection_revision_id INTEGER, credential_generation_id INTEGER);
+				CREATE TABLE attempt_connection_grants(id INTEGER PRIMARY KEY, attempt_id INTEGER, purpose TEXT, connection_id INTEGER, connection_revision_id INTEGER, credential_generation_id INTEGER);
 				INSERT INTO connections VALUES(1,1,0,10,20);
 				INSERT INTO credential_generations VALUES(20,1);
 				INSERT INTO root_key_state VALUES(1);
-				INSERT INTO attempt_connection_grants VALUES(1,'config_thanos_query',1,10,20);`)
+				INSERT INTO attempt_connection_grants VALUES(1,1,'config_synthetic_check',1,10,20);`)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -58,14 +59,14 @@ func TestValidateConfigGrantForExecutionDenialReasons(t *testing.T) {
 			}
 			registry := execution.NewRegistry()
 			op, err := registry.Register(execution.Operation{
-				Name: "test.config-grant.validate", Class: execution.ClassWrite, ObjectType: "attempt",
+				Name: "test.toolgrant.validate", Class: execution.ClassWrite, ObjectType: "attempt",
 				Authorize: func(context.Context, *execution.Tx) error { return nil },
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			ctx, err := execution.WithMetadata(context.Background(), execution.Metadata{
-				CorrelationID: "config-grant-regression",
+				CorrelationID: "toolgrant-regression",
 				Actor:         execution.Principal{Kind: execution.PrincipalSystem},
 				Source:        execution.Source{Kind: execution.SourceTask},
 			})
@@ -78,7 +79,7 @@ func TestValidateConfigGrantForExecutionDenialReasons(t *testing.T) {
 			var validationErr error
 			_, err = execution.Execute(ctx, execution.NewRunner(db, registry, nil), op,
 				func(tx *execution.Tx) (int64, error) {
-					validationErr = ValidateConfigGrantForExecution(ctx, tx, 1)
+					validationErr = ValidateConnectionGrantRowCurrent(ctx, tx, 1)
 					return 0, rollback
 				}, func(id int64) int64 { return id })
 			if !errors.Is(err, rollback) {

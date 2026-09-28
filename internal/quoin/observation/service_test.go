@@ -143,7 +143,7 @@ func observationTestRegistry(t *testing.T) (*plugins.Registry, []string) {
 			ConnectionKind: "prometheus", ConnectionTransport: plugins.ConnectionTransportHTTP,
 			ConnectionAuthModes: []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
 			DiscoverObjects: []plugins.DiscoverObject{
-				{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
+				{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500, GrantPurpose: "config_thanos_query"},
 			},
 		},
 		{
@@ -151,7 +151,7 @@ func observationTestRegistry(t *testing.T) (*plugins.Registry, []string) {
 			ConnectionKind: "thanos", ConnectionTransport: plugins.ConnectionTransportHTTP,
 			ConnectionAuthModes: []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
 			DiscoverObjects: []plugins.DiscoverObject{
-				{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
+				{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500, GrantPurpose: "config_thanos_query"},
 			},
 		},
 	}

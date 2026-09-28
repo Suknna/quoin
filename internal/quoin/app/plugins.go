@@ -47,6 +47,14 @@ func (application *apiServer) configurePlugins(configured []string) ([]string, e
 	application.investigations.Attempts().Catalogs = catalogs
 	application.inspections.Attempts().Catalogs = catalogs
 	application.knowledgeService.Attempts().Catalogs = catalogs
+	// The deployment-resolved source scope plan (ADR-0014): registry-declared
+	// roles × connection kinds of enabled plugins drive the frozen agent
+	// input integrations and every grant resolution. A new trusted plugin
+	// joins the frozen source authority through this generic derivation —
+	// no per-plugin wiring.
+	scopes := attempt.SourceScopes(application.pluginRegistry, enabled)
+	application.analyses.UseSourceScopes(scopes)
+	application.investigations.UseSourceScopes(scopes)
 	application.alerts.UseEnabledPlugins(enabled)
 	application.enabledPlugins = enabled
 	return enabled, nil

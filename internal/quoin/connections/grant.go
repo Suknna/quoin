@@ -24,8 +24,8 @@ import (
 	"time"
 
 	"github.com/Suknna/quoin/internal/plugins"
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
 // GrantPayload is the typed fulfillment returned to the runtime over the
@@ -165,11 +165,14 @@ func (service *Service) fulfillGrantOn(ctx context.Context, tx *execution.Tx, gr
 	if revisionConfig.Valid && revisionConfig.String != "" {
 		payload.RevisionConfigJSON = json.RawMessage(revisionConfig.String)
 	}
-	// Config Verification freezes a grant for reproducibility, but must not
-	// execute a grant invalidated by a committed disable/rotation/rebind.
-	// Re-read its currentness in this same write transaction before decrypting.
-	if purpose == "config_thanos_query" {
-		if err := thanos.ValidateConfigGrantForExecution(ctx, conn, attemptID); err != nil {
+	// Collection grants (inspection/discovery children) freeze for
+	// reproducibility, but must not execute a grant invalidated by a
+	// committed disable/rotation/rebind. The gated purposes are the
+	// registry-DECLARED collection vocabulary (ADR-0014) — no host-side
+	// purpose literal. Re-read the exact fulfilled row's currentness in
+	// this same write transaction before decrypting.
+	if plugins.IsCollectionGrantPurpose(purpose) {
+		if err := attempt.ValidateConnectionGrantRowCurrent(ctx, conn, grantID); err != nil {
 			return GrantPayload{}, fmt.Errorf("%w: %v", ErrGrantDenied, err)
 		}
 	}
@@ -200,12 +203,12 @@ func (service *Service) fulfillGrantOn(ctx context.Context, tx *execution.Tx, gr
 }
 
 // ValidateMetricsExecutionGrant 在一次非 probe 本地执行（观察发现 / 巡检
-// 采集）派发前，于 runner 守卫事务内复核冻结的 config_thanos_query
-// grant：连接必须仍启用且无待复验，grant 冻结的 revision/generation 对
-// 必须仍是当前指针，root binding 不得漂移（与 FulfillGrant 同一复核纪律，
-// DATA-CONN-002——管理员禁用/轮换之后，已冻结排队的采集不得再取凭据或
-// 发起平台调用）。连接探测不经过本守卫：探测是 Enable 的资格前提，必须
-// 能在未启用/待复验的连接上运行（acquire 缝隙已按此语义放开 enabled）。
+// 采集）派发前，于 runner 守卫事务内复核该 Attempt 的全部连接 grant：连接
+// 必须仍启用且无待复验，grant 冻结的 revision/generation 对必须是当前指针，
+// root binding 不得漂移（与 FulfillGrant 同一复核纪律，DATA-CONN-002——
+// 管理员禁用/轮换之后，已冻结排队的采集不得再取凭据或发起平台调用）。连接
+// 探测不经过本守卫：探测是 Enable 的资格前提，必须能在未启用/待复验的连接
+// 上运行（acquire 缝隙已按此语义放开 enabled）。
 func (service *Service) ValidateMetricsExecutionGrant(ctx context.Context, attemptID int64) error {
 	scope, err := service.probeLifecycleContext(ctx, attemptID)
 	if err != nil {
@@ -213,7 +216,7 @@ func (service *Service) ValidateMetricsExecutionGrant(ctx context.Context, attem
 	}
 	_, err = execution.Execute(scope, service.commands.runner, service.commands.grantValidate,
 		func(tx *execution.Tx) (int64, error) {
-			if err := thanos.ValidateConfigGrantForExecution(ctx, tx, attemptID); err != nil {
+			if err := attempt.ValidateAttemptConnectionGrantsCurrent(ctx, tx, attemptID); err != nil {
 				return 0, fmt.Errorf("%w: %v", ErrGrantDenied, err)
 			}
 			return attemptID, nil

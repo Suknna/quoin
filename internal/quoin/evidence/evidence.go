@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
@@ -70,6 +71,37 @@ func NewService(db *sql.DB) *Service {
 // (wired once at application startup; the catalog is fixed per release).
 func (service *Service) RegisterProjector(toolName string, projector Projector) {
 	service.projector[toolName] = projector
+}
+
+// RegisterEntryProjectors wires the deterministic evidence projections
+// declared by compiled plugin tools (ADR-0014): one generic registration
+// over the assembled tool entries — a new observation tool publishes its
+// Evidence projection by declaration alone, and no host adds per-tool
+// registration switches. A tool without a declared projector stays
+// unregistered and fails closed at the evidence write.
+func (service *Service) RegisterEntryProjectors(entries []plugins.ToolEntry) {
+	for _, entry := range entries {
+		projector := entry.Definition.EvidenceProjector
+		if !entry.Definition.ProducesEvidence || projector == nil {
+			continue
+		}
+		name := entry.Definition.Name
+		service.projector[name] = func(argumentsJSON, payloadJSON []byte, artifactID int64) (Projection, error) {
+			projection, err := projector(argumentsJSON, payloadJSON, artifactID)
+			if err != nil {
+				return Projection{}, err
+			}
+			return Projection{
+				ParamsJSON:   projection.ParamsJSON,
+				ObservedAt:   projection.ObservedAt,
+				Integrity:    projection.Integrity,
+				ResultJSON:   projection.ResultJSON,
+				ArtifactID:   projection.ArtifactID,
+				WarningsJSON: projection.WarningsJSON,
+				ErrorsJSON:   projection.ErrorsJSON,
+			}, nil
+		}
+	}
 }
 
 // SetReader installs the composition layer's real read-only reader for every
@@ -237,7 +269,7 @@ func (service *Service) inspectionProducer(ctx context.Context, attemptID int64)
 			SELECT c.name,c.type
 			FROM attempt_connection_grants ag
 			JOIN connections c ON c.id=ag.connection_id
-			WHERE ag.attempt_id=? AND ag.purpose='config_thanos_query'
+			WHERE ag.attempt_id=?
 			ORDER BY ag.id`, attemptID)
 		if grantErr != nil {
 			return nil, nil, grantErr
@@ -279,7 +311,7 @@ func (service *Service) inspectionProducer(ctx context.Context, attemptID int64)
 		SELECT c.name,c.type
 		FROM attempt_connection_grants ag
 		JOIN connections c ON c.id=ag.connection_id
-		WHERE ag.attempt_id=? AND ag.purpose='config_thanos_query'
+		WHERE ag.attempt_id=?
 		ORDER BY ag.id`, attemptID)
 	if err != nil {
 		return nil, nil, err

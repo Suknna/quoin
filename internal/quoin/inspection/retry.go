@@ -12,10 +12,10 @@ import (
 	"fmt"
 	"unicode/utf8"
 
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
 // AttemptSummary is the frozen AttemptSummary response used when an explicit
@@ -189,8 +189,8 @@ func (s *Service) RerunInspection(ctx context.Context, principalID int64, client
 		}
 		for _, key := range checkKeys {
 			if err = s.pluginChildForRerun(ctx, tx, runID, sourceRunID, key, now); err != nil {
-				if errors.Is(err, thanos.ErrThanosUnavailable) || errors.Is(err, thanos.ErrGrantNotCurrent) {
-					return RunDetail{}, execution.Unchanged, fmt.Errorf("%w: 尚无可用的指标连接，请先创建并启用连接后重试", err)
+				if errors.Is(err, attempt.ErrSourceUnavailable) || errors.Is(err, attempt.ErrGrantNotCurrent) {
+					return RunDetail{}, execution.Unchanged, fmt.Errorf("%w: 尚无可用的来源连接，请先创建并启用连接后重试", err)
 				}
 				return RunDetail{}, execution.Unchanged, err
 			}

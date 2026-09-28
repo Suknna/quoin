@@ -35,9 +35,9 @@ type MetricsConnectionPayload struct {
 // AcquireConnectionCredential 按 connection_id 投递一次出向执行材料：读
 // connections + current_revision + 最新 credential_generations，校验连接
 // type 是注册表声明的受信 HTTP 连接种类（不校验 enabled：连接探测是 Enable
-// 的资格前提，必须能在新建未启用/轮换待复验的连接上执行；模型可见查询的
-// enabled 门禁在授权侧——config_thanos_query grant 创建与执行前校验均要求
-// enabled=1 且无待复验——不依赖本缝隙重复把关），然后复用 FulfillGrant 的
+// 的资格前提，必须能在新建未启用/轮换待复验的连接上执行；模型可见查询与
+// 插件采集的 enabled 门禁在授权侧——声明用途的 grant 创建与执行前校验均要
+// 求 enabled=1 且无待复验——不依赖本缝隙重复把关），然后复用 FulfillGrant 的
 // 解密管线在 runner 守卫事务内打开 envelope（敏感读的审计纪律与 grant
 // reveal 一致，DATA-CONN-002）。model_provider 与未知/已撤销（插件被停用）
 // 的种类在此确定性拒绝——模型凭据只走 Plinth grant（FetchCredentialGrant），

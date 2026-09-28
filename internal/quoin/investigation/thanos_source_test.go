@@ -21,7 +21,6 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
 // investigationAdminContext is the trusted-entry execution metadata the
@@ -151,7 +150,7 @@ func pendingSourceThanosCall(t *testing.T, db *sql.DB, attemptID, callID int64, 
 	response, err := json.Marshal(map[string]any{
 		"assistantText": "", "finishReason": "tool_calls",
 		"tool_calls": []any{map[string]any{
-			"id": "raw-source-thanos", "name": thanos.QueryToolName,
+			"id": "raw-source-thanos", "name": "thanos_query",
 			"arguments": json.RawMessage(arguments),
 		}},
 	})
@@ -166,7 +165,7 @@ func pendingSourceThanosCall(t *testing.T, db *sql.DB, attemptID, callID int64, 
 	}
 	insert, err := db.Exec(`INSERT INTO tool_calls(attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?)`,
-		attemptID, callID, 1, 0, "raw-source-thanos", thanos.QueryToolName, thanos.QueryToolVersion, arguments, fmt.Sprintf("%x", sha256.Sum256([]byte(arguments))), "quoin_routed", "return_to_model", now)
+		attemptID, callID, 1, 0, "raw-source-thanos", "thanos_query", "4", arguments, fmt.Sprintf("%x", sha256.Sum256([]byte(arguments))), "quoin_routed", "return_to_model", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +175,7 @@ func pendingSourceThanosCall(t *testing.T, db *sql.DB, attemptID, callID int64, 
 
 func resolveSourceThanosCall(t *testing.T, db *sql.DB, service *Service, attemptID, toolCallID int64) (attempt.ToolResolution, error) {
 	t.Helper()
-	tool, ok := attempt.DefaultCatalogs().Implementation(thanos.QueryToolName)
+	tool, ok := attempt.DefaultCatalogs().Implementation("thanos_query")
 	if !ok {
 		t.Fatal("thanos_query missing from the assembled implementation table")
 	}
@@ -290,7 +289,7 @@ func TestSourceInvestigationThanosGrantResolvesBySourceRef(t *testing.T) {
 	if err := db.QueryRow(`SELECT purpose,connection_id FROM attempt_connection_grants WHERE id=?`, resolution.Grants[0].GrantID).Scan(&purpose, &grantedConnection); err != nil {
 		t.Fatal(err)
 	}
-	if purpose != thanos.QueryToolPurpose || grantedConnection != connectionID {
+	if purpose != "thanos_query" || grantedConnection != connectionID {
 		t.Fatalf("grant purpose=%s connection=%v", purpose, grantedConnection)
 	}
 	var executionJSON string
@@ -331,7 +330,7 @@ func TestSourceInvestigationAmbiguousSourcesPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolution.PreflightCode != thanos.PreflightTargetAmbiguous {
+	if resolution.PreflightCode != attempt.PreflightTargetAmbiguous {
 		t.Fatalf("preflight=%+v, want target_ambiguous", resolution)
 	}
 	for _, name := range names {

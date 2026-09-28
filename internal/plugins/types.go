@@ -22,6 +22,12 @@ type InspectionTemplate struct {
 	// Title and Description are human-facing, non-secret text.
 	Title       string
 	Description string
+	// GrantPurpose is the attempt_connection_grants.purpose value every
+	// collection child of this template freezes (ADR-0014). It is a
+	// declaration, not a host constant: the inspection plan-run freezes
+	// grants under the declared purpose and the credential fulfiller
+	// re-validates exactly the declared purposes.
+	GrantPurpose string
 }
 
 // DiscoverObject declares one bounded object type a plugin can observe. The
@@ -42,6 +48,10 @@ type DiscoverObject struct {
 	// Limit is the hard per-pass result budget; a truncated pass reports
 	// incompleteness instead of fabricating absence.
 	Limit int
+	// GrantPurpose is the attempt_connection_grants.purpose value every
+	// discovery child of this object type freezes (ADR-0014), mirroring
+	// InspectionTemplate.GrantPurpose.
+	GrantPurpose string
 }
 
 // DiscoveredObject is one object observed at a point in time. CanonicalIdentity
