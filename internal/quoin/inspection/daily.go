@@ -818,6 +818,13 @@ func (s *Service) buildDailyReportContent(ctx context.Context, tx execution.Exec
 // frozen evidence_at window with second precision (both sides are canonical
 // UTC RFC3339 timestamps, so the fixed-width prefix comparison is exact at
 // the minute-precision window boundaries).
+//
+// 每个 Run 的缺口语义只按冻结截止时刻的事实裁决，绝不读 Run 当下的可变
+// state：state 只进不改出（终态是吸收态），因此任何严格晚于截止的 Run
+// 活动（迟到结果提交、子 Attempt 结束/创建）都证明截止时仍未收敛——延迟
+// 封存或重分析重放时，截止后被取消/中断的 Run 仍必须报 cutoff_exceeded，
+// 绝不能追认成 run_cancelled/run_interrupted。判定只用不可变事实（检查
+// 结果提交时间、子 Attempt 生命周期时间戳），重放同一截止得到同一内容。
 func (s *Service) dailySourceReportOn(ctx context.Context, tx execution.Executor, contribution dailyContribution, windowStartUTC, windowEndUTC, cutoffAt string) (dailySourceReport, error) {
 	source := dailySourceReport{DailyContribution: contribution, Status: "ok", Checks: []dailyCheckItem{}}
 	addReason := func(reason string) {
@@ -833,6 +840,10 @@ func (s *Service) dailySourceReportOn(ctx context.Context, tx execution.Executor
 	}
 	if !contribution.SourceEnabled {
 		addReason(dailyGapSourceDisabled)
+	}
+	cutoff, err := time.Parse(time.RFC3339Nano, cutoffAt)
+	if err != nil {
+		return source, fmt.Errorf("daily report cutoff %q is invalid: %w", cutoffAt, err)
 	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id,state FROM inspection_runs
@@ -861,21 +872,45 @@ func (s *Service) dailySourceReportOn(ctx context.Context, tx execution.Executor
 	}
 	rows.Close()
 	for _, run := range runs {
-		switch run.state {
-		case "Queued", "Running":
-			// 采证截止时仍未收敛：显式超时 gap，绝不等待无界完成。
-			addReason(dailyGapCutoffExceeded)
-		case "Failed":
-			addReason(dailyGapRunFailed)
-		case "Cancelled":
-			addReason(dailyGapRunCancelled)
-		case "Interrupted":
-			addReason(dailyGapRunInterrupted)
-		}
-		markUnsettled := run.state != "Failed" && run.state != "Cancelled" && run.state != "Interrupted"
-		checks, err := s.dailyCheckItemsOn(ctx, tx, run.id, cutoffAt, markUnsettled)
+		// 截止前已收敛否：子 Attempt 生命周期 + 迟到结果，两个不可变事实源。
+		childrenSettled, err := s.dailyRunChildrenSettledByCutoffOn(ctx, tx, run.id, cutoff)
 		if err != nil {
 			return source, err
+		}
+		checks, hadLateResult, err := s.dailyCheckItemsOn(ctx, tx, run.id, cutoff)
+		if err != nil {
+			return source, err
+		}
+		pendingAtCutoff := hadLateResult || !childrenSettled
+		switch run.state {
+		case "Queued", "Running":
+			// 采证截止必然早于封存边界：此刻仍未收敛的 Run 是显式超时 gap，
+			// 绝不等待无界完成。
+			addReason(dailyGapCutoffExceeded)
+		case "Failed", "Cancelled", "Interrupted":
+			// 终态可能发生在冻结截止之后（延迟封存/重分析重放时尤其如此）：
+			// 只有可由不可变事实证明「截止前已终结」的终态才按当时事实命名。
+			if pendingAtCutoff {
+				addReason(dailyGapCutoffExceeded)
+			} else {
+				switch run.state {
+				case "Failed":
+					addReason(dailyGapRunFailed)
+				case "Cancelled":
+					addReason(dailyGapRunCancelled)
+				case "Interrupted":
+					addReason(dailyGapRunInterrupted)
+				}
+			}
+		}
+		// 只有「截止前已终结」的失败终态才豁免逐检查缺口枚举（run_<t> 已
+		// 命名整段缺口）；其余一律枚举截止缺口——缺失项绝不被静默吞掉。
+		terminalGapState := run.state == "Failed" || run.state == "Cancelled" || run.state == "Interrupted"
+		if !(terminalGapState && !pendingAtCutoff) {
+			checks, err = s.appendDailyUnsettledCheckGapsOn(ctx, tx, run.id, checks)
+			if err != nil {
+				return source, err
+			}
 		}
 		source.Checks = append(source.Checks, checks...)
 		for _, check := range checks {
@@ -904,14 +939,58 @@ func (s *Service) dailySourceReportOn(ctx context.Context, tx execution.Executor
 	return source, nil
 }
 
+// dailyRunChildrenSettledByCutoffOn reports whether the run had provably
+// settled (reached a terminal state) by the frozen cutoff, using only
+// immutable committed facts. Every run terminal transition commits in the
+// same transaction as its last active run_check child attempt's end (result
+// convergence, interruption, or the synchronous cancellation of queued
+// children), so the children's lifecycle timestamps bound the settle moment:
+// a child created after the cutoff, ended after the cutoff, or still active
+// proves the run was still collecting at the cutoff. A run without any child
+// attempt rows (historic rows predating child tracking) falls back vacuously
+// to "settled" — the run's current state then stands in, exactly as before
+// this derivation existed.
+func (s *Service) dailyRunChildrenSettledByCutoffOn(ctx context.Context, tx execution.Executor, runID int64, cutoff time.Time) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT check_key, created_at, ended_at FROM execution_attempts
+		WHERE attempt_type='inspection_collection' AND scope_type='run_check' AND scope_id=?`, runID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var checkKey, createdAt string
+		var endedAt sql.NullString
+		if err := rows.Scan(&checkKey, &createdAt, &endedAt); err != nil {
+			return false, err
+		}
+		created, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return false, fmt.Errorf("run %d check %s child attempt has invalid created_at %q: %w", runID, checkKey, createdAt, err)
+		}
+		if created.After(cutoff) {
+			return false, nil
+		}
+		if !endedAt.Valid {
+			return false, nil // 仍有活跃子 Attempt：截止时必然未收敛。
+		}
+		ended, err := time.Parse(time.RFC3339Nano, endedAt.String)
+		if err != nil {
+			return false, fmt.Errorf("run %d check %s child attempt has invalid ended_at %q: %w", runID, checkKey, endedAt.String, err)
+		}
+		if ended.After(cutoff) {
+			return false, nil
+		}
+	}
+	return true, rows.Err()
+}
+
 // dailyCheckItemsOn lists only facts committed by the frozen cutoff, even if
 // the sealing tick runs late. A later result remains in its Run/Evidence but
-// never upgrades a daily version that had a gap at cutoff.
-func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, runID int64, cutoffAt string, markUnsettled bool) ([]dailyCheckItem, error) {
-	cutoff, err := time.Parse(time.RFC3339Nano, cutoffAt)
-	if err != nil {
-		return nil, fmt.Errorf("daily report cutoff %q is invalid: %w", cutoffAt, err)
-	}
+// never upgrades a daily version that had a gap at cutoff. The second return
+// value reports whether any result was committed strictly after the cutoff —
+// an immutable fact proving the run was still collecting at the cutoff.
+func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, runID int64, cutoff time.Time) ([]dailyCheckItem, bool, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT x.check_key, x.status, x.gap_reason,
 		       COALESCE(json_extract(x.meta_json,'$.observedAt'), e.observed_at),
@@ -920,11 +999,11 @@ func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, 
 		LEFT JOIN evidence e ON e.id=x.evidence_id
 		WHERE x.run_id=? ORDER BY x.check_key`, runID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	items := []dailyCheckItem{}
-	settled := map[string]bool{}
+	hadLateResult := false
 	for rows.Next() {
 		var item dailyCheckItem
 		item.RunID = runID
@@ -933,16 +1012,16 @@ func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, 
 		var resultJSON sql.NullString
 		var committedAt string
 		if err := rows.Scan(&item.CheckKey, &item.Status, &gapReason, &observedAt, &evidenceID, &resultJSON, &committedAt); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		committed, err := time.Parse(time.RFC3339Nano, committedAt)
 		if err != nil {
-			return nil, fmt.Errorf("run %d check %s has invalid commit time: %w", runID, item.CheckKey, err)
+			return nil, false, fmt.Errorf("run %d check %s has invalid commit time: %w", runID, item.CheckKey, err)
 		}
 		if committed.After(cutoff) {
+			hadLateResult = true
 			continue
 		}
-		settled[item.CheckKey] = true
 		if gapReason.Valid {
 			item.GapReason = &gapReason.String
 		}
@@ -959,21 +1038,29 @@ func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, 
 		if evidenceID.Valid && resultJSON.Valid {
 			measurement, err := dailyMeasurementFromEvidence(evidenceID.Int64, item.CheckKey, resultJSON.String)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			item.Measurement = measurement
 		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	rows.Close()
-	if !markUnsettled {
-		return items, nil // run_failed/cancelled/interrupted already names the gap
+	return items, hadLateResult, nil
+}
+
+// appendDailyUnsettledCheckGapsOn enumerates the run's frozen check directory
+// and appends an explicit cutoff_exceeded gap for every check still missing a
+// timely result. The directory — not the run's current terminal state — is
+// authoritative, so a pending-at-cutoff run's missing checks stay named
+// instead of being silently swallowed.
+func (s *Service) appendDailyUnsettledCheckGapsOn(ctx context.Context, tx execution.Executor, runID int64, items []dailyCheckItem) ([]dailyCheckItem, error) {
+	settled := map[string]bool{}
+	for _, item := range items {
+		settled[item.CheckKey] = true
 	}
-	// The run's frozen check directory is authoritative, not its current
-	// terminal state. Any check still missing at cutoff is an explicit gap.
 	checkRows, err := tx.QueryContext(ctx, `SELECT check_key FROM inspection_run_checks WHERE run_id=? ORDER BY check_key`, runID)
 	if err != nil {
 		return nil, err

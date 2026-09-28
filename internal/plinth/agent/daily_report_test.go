@@ -7,6 +7,7 @@ package agent
 import (
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -259,6 +260,139 @@ func TestDailyReportPromptEscapesAdminExpectedOutput(t *testing.T) {
 }
 
 func ptrString(value string) *string { return &value }
+
+// TestDailyReportPromptBoundsProvenanceIndexUnderContextBudget 钉住有界导览：
+// 数千个检查项在配置的上下文预算下必须产生有界提示词，截断显式可见——
+// 精确的 shown/total 计数随截断标记下发，未列出绝不静默等于不存在。
+func TestDailyReportPromptBoundsProvenanceIndexUnderContextBudget(t *testing.T) {
+	input := dailyReportTestInput()
+	input.ModelContract.ContextBudgetTokens = 8000 // 预算 4000 字节的导览索引
+	input.Sources = nil
+	for source := 0; source < 2; source++ {
+		source_ := dailySourceFor(fmt.Sprintf("plan-%02d", source))
+		source_.Checks = nil
+		for check := 0; check < 1250; check++ {
+			source_.Checks = append(source_.Checks, agentcontext.DailyCheckItem{
+				RunID: int64(source*10000 + check + 1), CheckKey: fmt.Sprintf("check-%02d-%04d", source, check),
+				Status: "ok", ObservedAt: ptrString("2026-09-26T16:05:00Z"),
+				Measurement: &agentcontext.DailyMeasurement{ResultType: "vector", Series: 1, Samples: 1,
+					Entries: []agentcontext.DailyMeasurementSeriesEntry{{
+						Labels:  map[string]string{"job": "quoin", "instance": fmt.Sprintf("host-%02d-%04d", source, check)},
+						Samples: 1, FirstValue: ptrString("1"), LastValue: ptrString("1"),
+					}},
+				},
+			})
+		}
+		input.Sources = append(input.Sources, source_)
+	}
+	messages, err := BuildDailyReportMessages(input)
+	if err != nil {
+		t.Fatalf("render daily prompt: %v", err)
+	}
+	prompt := messages[1].Content
+	// 数千检查项的完整逐项渲染会远超预算：提示词必须有界。
+	if len(prompt) > 64*1024 {
+		t.Fatalf("prompt carries %d bytes, want a bounded initial prompt under the configured budget", len(prompt))
+	}
+	parsed := parseDailyPrompt(t, prompt)
+	shownChecks := 0
+	for _, source := range parsed.Sources {
+		shownChecks += len(source.Checks)
+	}
+	if shownChecks == 0 || shownChecks >= 2500 {
+		t.Fatalf("shown checks = %d, want a bounded non-empty prefix of the 2500 sealed checks", shownChecks)
+	}
+	if len(parsed.Sources) != 1 {
+		t.Fatalf("rendered sources = %d, want only the source whose entries fit the budget", len(parsed.Sources))
+	}
+	if !strings.Contains(prompt, "provenanceTruncation") {
+		t.Fatalf("truncated index must carry the explicit truncation marker:\n%s", prompt[len(prompt)-2000:])
+	}
+	if !strings.Contains(prompt, fmt.Sprintf("shownChecks=\"%d\"", shownChecks)) ||
+		!strings.Contains(prompt, "totalChecks=\"2500\"") ||
+		!strings.Contains(prompt, "totalSources=\"2\"") {
+		t.Fatalf("truncation marker must carry the exact shown/total counts")
+	}
+	if !strings.Contains(prompt, "未列出绝不等于不存在或健康") {
+		t.Fatalf("truncation marker must forbid reading absence as truth")
+	}
+	// 首条检查项永远保留：索引至少携带一个真实条目形状。
+	if len(parsed.Sources[0].Checks) == 0 {
+		t.Fatalf("the bounded index must always include at least one real check entry")
+	}
+	// 系统提示钉住索引的有界性与工具事实源。
+	if !strings.Contains(messages[0].Content, "有界导览") || !strings.Contains(messages[0].Content, "daily_report_get") {
+		t.Fatalf("system prompt must pin the index-is-bounded clause: %q", messages[0].Content)
+	}
+}
+
+// TestDailyReportPromptRendersFullIndexWithinLargeBudget 钉住预算内的完整
+// 渲染：小输入 + 宽预算不产生截断标记，逐项内容与既有契约一致。
+func TestDailyReportPromptRendersFullIndexWithinLargeBudget(t *testing.T) {
+	input := dailyReportTestInput()
+	input.ModelContract.ContextBudgetTokens = 1_000_000
+	messages, err := BuildDailyReportMessages(input)
+	if err != nil {
+		t.Fatalf("render daily prompt: %v", err)
+	}
+	parsed := parseDailyPrompt(t, messages[1].Content)
+	if len(parsed.Sources) != 1 || len(parsed.Sources[0].Checks) != 2 {
+		t.Fatalf("full index = %+v", parsed.Sources)
+	}
+	if strings.Contains(messages[1].Content, "provenanceTruncation") || strings.Contains(messages[1].Content, "indexPartial") {
+		t.Fatalf("within-budget index must not carry truncation markers")
+	}
+}
+
+func TestDailyProvenanceBudgetClamps(t *testing.T) {
+	if dailyProvenanceBudget(0) != dailyProvenanceMaxBytes {
+		t.Fatal("undeclared budget must fall back to the hard cap")
+	}
+	if dailyProvenanceBudget(2) != dailyProvenanceMinBytes {
+		t.Fatal("tiny budgets must clamp to the usable minimum")
+	}
+	if dailyProvenanceBudget(1<<30) != dailyProvenanceMaxBytes {
+		t.Fatal("huge budgets must clamp to the hard cap")
+	}
+	if dailyProvenanceBudget(16384) != 8192 {
+		t.Fatal("mid budgets must derive as half the configured token budget")
+	}
+}
+
+// TestDailyReportPromptElidesOversizedMeasurementExplicitly 钉住单条目的
+// 测量摘要省略：超长标签值在索引中显式标注 measurementElided，绝不无声
+// 丢弃，也绝不把无界正文带进导览。
+func TestDailyReportPromptElidesOversizedMeasurementExplicitly(t *testing.T) {
+	input := dailyReportTestInput()
+	input.Sources[0].Checks = input.Sources[0].Checks[:1]
+	input.Sources[0].Checks[0].Status = "ok"
+	input.Sources[0].Checks[0].Measurement = &agentcontext.DailyMeasurement{
+		ResultType: "vector", Series: 1, Samples: 1,
+		Entries: []agentcontext.DailyMeasurementSeriesEntry{{
+			Labels: map[string]string{"job": "quoin", "dump": strings.Repeat("v", 64*1024)}, Samples: 1,
+			FirstValue: ptrString("1"), LastValue: ptrString("1"),
+		}},
+	}
+	messages, err := BuildDailyReportMessages(input)
+	if err != nil {
+		t.Fatalf("render daily prompt: %v", err)
+	}
+	prompt := messages[1].Content
+	parsed := parseDailyPrompt(t, prompt)
+	check := parsed.Sources[0].Checks[0]
+	if check.Measurement.Truncated != "true" && len(prompt) > 16*1024 {
+		t.Fatalf("oversized measurement must be elided from the index, prompt = %d bytes", len(prompt))
+	}
+	if !strings.Contains(prompt, "measurementElided=\"true\"") {
+		t.Fatalf("elision must be explicit: %q", prompt[len(prompt)-1500:])
+	}
+	if strings.Contains(prompt, strings.Repeat("v", 4096)) {
+		t.Fatalf("the huge label dump must not travel in the index")
+	}
+	if check.Key != "latency" || check.Status != "ok" {
+		t.Fatalf("elided entry must keep its identity: %+v", check)
+	}
+}
 
 func TestParseDailyReportInputRejectsUnknownFieldsAndIncompleteIdentity(t *testing.T) {
 	valid := map[string]any{

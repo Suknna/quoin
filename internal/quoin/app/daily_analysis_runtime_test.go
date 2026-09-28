@@ -6,6 +6,7 @@ package app
 // 行：同一输入重复调用返回同一载荷，绝不触发任何平台查询。
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	gen "github.com/Suknna/quoin/internal/gen/contracts"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
@@ -475,6 +477,293 @@ func buildOversizedDailyReportDocument(t *testing.T, configKey, localDate string
 		t.Fatal(err)
 	}
 	return string(body)
+}
+
+// buildHugeCheckDailyReportDocument marshals a sealed document whose middle
+// check alone exceeds the page bound through pathological metric label
+// values: ASCII quote/backslash runs (worst-case JSON escaping inflation),
+// control characters, and multi-byte CJK runes crossing window boundaries.
+func buildHugeCheckDailyReportDocument(t *testing.T) string {
+	t.Helper()
+	quotes := "q\"\\" + strings.Repeat("\"x\\\t\n", 4096) // 转义膨胀最坏输入：引号/反斜杠/控制字符
+	cjk := "站点「生产」" + strings.Repeat("指標値超長標籤測試", 4096)   // 多字节 rune 跨窗口边界
+	document := map[string]any{
+		"schemaKind": "inspection_daily_report_v1", "configKey": "huge-check", "localDate": "2026-09-22",
+		"timezone": "UTC", "windowStartUtc": "2026-09-22T00:00:00Z", "windowEndUtc": "2026-09-23T00:00:00Z",
+		"sealedAt": "2026-09-23T02:00:00Z",
+		"totals":   map[string]any{"checksOk": 3, "checksGap": 0, "checksError": 0, "sourcesGap": 0},
+	}
+	smallCheck := func(key string, runID int64) map[string]any {
+		return map[string]any{
+			"runId": runID, "checkKey": key, "status": "ok", "observedAt": "2026-09-22T12:00:00Z",
+			"evidenceId": runID,
+			"measurement": map[string]any{"resultType": "vector", "series": 1, "samples": 1,
+				"entries": []map[string]any{{"labels": map[string]string{"job": "quoin"}, "samples": 1,
+					"firstValue": "1", "lastValue": "1"}}},
+		}
+	}
+	hugeCheck := map[string]any{
+		"runId": int64(99), "checkKey": "huge-labels", "status": "ok", "observedAt": "2026-09-22T12:30:00Z",
+		"evidenceId": int64(99),
+		"measurement": map[string]any{
+			"resultType": "vector", "series": 2, "samples": 2,
+			"entries": []map[string]any{
+				{"labels": map[string]string{"job": "quoin", "dump": quotes}, "samples": 1,
+					"firstValue": "1", "lastValue": "2"},
+				{"labels": map[string]string{"job": "quoin", "dump": cjk}, "samples": 1,
+					"firstValue": "2", "lastValue": "3", "maxValue": "3", "maxAt": "1790000009"},
+			},
+		},
+	}
+	document["sources"] = []map[string]any{{
+		"planKey": "plan-huge", "displayName": "超界检查来源", "connectionName": "core-prom",
+		"enabled": true, "sourceEnabled": true, "status": "ok",
+		"checks": []map[string]any{smallCheck("head", 97), hugeCheck, smallCheck("tail", 98)},
+	}}
+	body, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+func TestDailyReportGetToolExecutorFragmentsSingleHugeCheckLosslessly(t *testing.T) {
+	db, reader := newDailyReportToolTestDB(t)
+	seedDailyReportToolFixture(t, db)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	document := buildHugeCheckDailyReportDocument(t)
+	var original struct {
+		Sources []struct {
+			PlanKey string            `json:"planKey"`
+			Checks  []json.RawMessage `json:"checks"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal([]byte(document), &original); err != nil {
+		t.Fatal(err)
+	}
+	huge := original.Sources[0].Checks[1]
+	if len(huge) <= dailyReportToolPageBound {
+		t.Fatalf("fixture check must exceed the page bound alone, got %d bytes", len(huge))
+	}
+	mustExec(t, db, `INSERT INTO inspection_daily_reports(id,config_id,config_key,config_row_version,local_date,timezone,window_start_utc,window_end_utc,trigger_kind,scheduled_for,cutoff_at,contributions_json,state,sealed_at,row_version,created_at)
+		VALUES(3,1,'huge-check',1,'2026-09-22','UTC','2026-09-22T00:00:00Z','2026-09-23T00:00:00Z','manual',NULL,?,'[]','Sealed',?,1,?)`,
+		now, now, now)
+	mustExec(t, db, `INSERT INTO inspection_daily_report_versions(report_id,version,content,created_at) VALUES(3,1,?,?)`, document, now)
+	mustExec(t, db, `INSERT INTO execution_attempts(id,attempt_type,scope_type,scope_id,state,quoin_release_version,agent_version,created_at)
+		VALUES(4,'inspection_daily_analysis','daily_report',3,'Queued','tool-test','inspection-daily-analysis-v2',?)`, now)
+	mustExec(t, db, `INSERT INTO attempt_input_snapshots(id,attempt_id,schema_kind,renderer_version,content_digest,inspection_report_version,created_at)
+		VALUES(5,4,'inspection_daily_analysis_v1','v3',?,1,?)`, strings.Repeat("0", 64), now)
+	mustExec(t, db, `INSERT INTO attempt_input_items(snapshot_id,item_seq,item_role,source_digest,inspection_daily_report_id)
+		VALUES(5,1,'daily_report',?,3)`, strings.Repeat("0", 64))
+	mustExec(t, db, `INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,qualified_probe_result_id,created_at)
+		VALUES(4,'chat_model',1,1,1,1,?)`, now)
+	mustExec(t, db, `UPDATE execution_attempts SET state='Assigned',runtime_slot='plinth',boot_id='boot',connection_epoch=1,lease_until=?,runtime_release_version='tool-test',row_version=row_version+1 WHERE id=4`, now)
+	mustExec(t, db, `UPDATE execution_attempts SET state='Running',accepted_at=?,row_version=row_version+1 WHERE id=4`, now)
+
+	attempts := attempt.NewService(db)
+	if err := attempts.SetReader(reader); err != nil {
+		t.Fatal(err)
+	}
+	service := &RuntimeService{}
+	ctx := context.Background()
+
+	type pageEnvelope struct {
+		ConfigKey      string            `json:"configKey"`
+		LocalDate      string            `json:"localDate"`
+		Version        int64             `json:"version"`
+		SchemaKind     string            `json:"schemaKind"`
+		Timezone       string            `json:"timezone"`
+		WindowStart    string            `json:"windowStartUtc"`
+		WindowEnd      string            `json:"windowEndUtc"`
+		SealedAt       string            `json:"sealedAt"`
+		Totals         json.RawMessage   `json:"totals"`
+		Cursor         string            `json:"cursor"`
+		NextCursor     *string           `json:"nextCursor"`
+		Sources        []json.RawMessage `json:"sources"`
+		CheckFragments []struct {
+			SourceIndex int64  `json:"sourceIndex"`
+			CheckIndex  int64  `json:"checkIndex"`
+			ByteOffset  int64  `json:"byteOffset"`
+			ByteLength  int64  `json:"byteLength"`
+			TotalBytes  int64  `json:"totalBytes"`
+			Text        string `json:"text"`
+			Note        string `json:"note"`
+		} `json:"checkFragments"`
+	}
+	locator := func(cursor string) string {
+		arguments := `{"configKey":"huge-check","localDate":"2026-09-22","version":1`
+		if cursor != "" {
+			return arguments + `,"cursor":"` + cursor + `"}`
+		}
+		return arguments + `}`
+	}
+	stitched := []byte{}
+	lastOffset := int64(0)
+	sourceChecks := []json.RawMessage{}
+	cursor := ""
+	visited := map[string]bool{}
+	fragmentPages, sourcePages := 0, 0
+	for page := 0; ; page++ {
+		if page > 64 {
+			t.Fatal("fragment traversal did not terminate within 64 pages")
+		}
+		seal := service.invokeDailyReportGetTool(ctx, attempts, dailyToolLoaded(4, locator(cursor)))
+		if seal.outcome != "succeeded" {
+			t.Fatalf("page %d seal = %s/%s/%s", page, seal.outcome, seal.errorCode, seal.errorDetail)
+		}
+		if len(seal.canonical) > dailyReportToolPageBound+512 {
+			t.Fatalf("page %d carries %d bytes, want every page bounded even for a single huge check", page, len(seal.canonical))
+		}
+		replay := service.invokeDailyReportGetTool(ctx, attempts, dailyToolLoaded(4, locator(cursor)))
+		if replay.outcome != "succeeded" || string(replay.canonical) != string(seal.canonical) {
+			t.Fatalf("cursor %q must replay the identical page", cursor)
+		}
+		var payload pageEnvelope
+		if err := json.Unmarshal(seal.canonical, &payload); err != nil {
+			t.Fatal(err)
+		}
+		// 完整响应信封随每一页重复：定位符、窗口、时区、封存时刻与汇总缺一不可。
+		if payload.ConfigKey != "huge-check" || payload.LocalDate != "2026-09-22" || payload.Version != 1 ||
+			payload.SchemaKind != "inspection_daily_report_v1" || payload.Timezone != "UTC" ||
+			payload.WindowStart != "2026-09-22T00:00:00Z" || payload.WindowEnd != "2026-09-23T00:00:00Z" ||
+			len(payload.Totals) == 0 || payload.SealedAt == "" {
+			t.Fatalf("page %d envelope incomplete: %+v", page, payload)
+		}
+		wantCursor := cursor
+		if wantCursor == "" {
+			wantCursor = "s0:c0"
+		}
+		if payload.Cursor != wantCursor {
+			t.Fatalf("page %d cursor echo = %q, want %q", page, payload.Cursor, wantCursor)
+		}
+		if visited[payload.Cursor] {
+			t.Fatalf("page %d revisits cursor %q: traversal must not loop", page, payload.Cursor)
+		}
+		visited[payload.Cursor] = true
+		if len(payload.CheckFragments) > 0 && len(payload.Sources) != 0 {
+			t.Fatalf("fragment pages must carry an empty sources array")
+		}
+		for _, raw := range payload.Sources {
+			var fragment struct {
+				PlanKey string            `json:"planKey"`
+				Checks  []json.RawMessage `json:"checks"`
+			}
+			if err := json.Unmarshal(raw, &fragment); err != nil {
+				t.Fatal(err)
+			}
+			if fragment.PlanKey != "plan-huge" {
+				t.Fatalf("unexpected source %q", fragment.PlanKey)
+			}
+			sourceChecks = append(sourceChecks, fragment.Checks...)
+		}
+		for _, fragment := range payload.CheckFragments {
+			if fragment.SourceIndex != 0 || fragment.CheckIndex != 1 {
+				t.Fatalf("unexpected fragment position %d/%d", fragment.SourceIndex, fragment.CheckIndex)
+			}
+			if fragment.TotalBytes != int64(len(huge)) {
+				t.Fatalf("fragment totalBytes = %d, want %d", fragment.TotalBytes, len(huge))
+			}
+			if fragment.ByteOffset != lastOffset {
+				t.Fatalf("fragment byteOffset %d, want contiguous %d", fragment.ByteOffset, lastOffset)
+			}
+			if int64(len(fragment.Text)) != fragment.ByteLength {
+				t.Fatalf("fragment byteLength %d disagrees with text %d", fragment.ByteLength, len(fragment.Text))
+			}
+			if !utf8.ValidString(fragment.Text) {
+				t.Fatalf("fragment window at offset %d is not valid UTF-8: rune split across windows", fragment.ByteOffset)
+			}
+			if fragment.Note == "" || !strings.Contains(fragment.Note, "byteOffset") {
+				t.Fatalf("fragment page must carry the reassembly protocol note: %q", fragment.Note)
+			}
+			stitched = append(stitched, fragment.Text...)
+			lastOffset += fragment.ByteLength
+			fragmentPages++
+		}
+		if len(payload.Sources) > 0 {
+			sourcePages++
+		}
+		if payload.NextCursor == nil {
+			break
+		}
+		cursor = *payload.NextCursor
+	}
+	if fragmentPages < 2 {
+		t.Fatalf("a single >48KiB check must span multiple fragment pages, got %d", fragmentPages)
+	}
+	if sourcePages < 2 {
+		t.Fatalf("the huge check's neighbours must still arrive as source pages, got %d", sourcePages)
+	}
+	// 无损：分片按序拼接后与封存字节逐字节一致；相邻检查项不受影响。
+	if string(stitched) != string(huge) {
+		t.Fatalf("stitched fragment bytes drifted from the sealed check: %d vs %d", len(stitched), len(huge))
+	}
+	if len(sourceChecks) != 2 {
+		t.Fatalf("source pages carried %d checks, want the two small neighbours", len(sourceChecks))
+	}
+	if string(sourceChecks[0]) != string(original.Sources[0].Checks[0]) || string(sourceChecks[1]) != string(original.Sources[0].Checks[2]) {
+		t.Fatalf("neighbour checks drifted across the fragment pages")
+	}
+
+	// 伪造/越界游标确定性失败：越过检查序号、越过分片序号、越过来源末尾。
+	for name, arguments := range map[string]string{
+		"past the checks":    `{"configKey":"huge-check","localDate":"2026-09-22","version":1,"cursor":"s0:c9"}`,
+		"past the fragments": `{"configKey":"huge-check","localDate":"2026-09-22","version":1,"cursor":"s0:c1:f999"}`,
+		"past the sources":   `{"configKey":"huge-check","localDate":"2026-09-22","version":1,"cursor":"s9:c0"}`,
+	} {
+		seal := service.invokeDailyReportGetTool(ctx, attempts, dailyToolLoaded(4, arguments))
+		if seal.outcome != "failed" || seal.errorCode != "invalid_cursor" {
+			t.Fatalf("%s: seal = %s/%s, want failed/invalid_cursor", name, seal.outcome, seal.errorCode)
+		}
+	}
+}
+
+// TestDailyCheckJSONFragmentsLossless pins the pure fragment geometry: the
+// same bytes always produce the same bounded UTF-8-safe windows, and the
+// concatenation reproduces the input exactly — for token-friendly JSON, for
+// worst-case escaping runs, and for bytes that do not parse at all.
+func TestDailyCheckJSONFragmentsLossless(t *testing.T) {
+	inputs := map[string]string{
+		"plain json":     `{"runId":7,"checkKey":"latency","measurement":{"entries":[{"labels":{"job":"quoin"},"firstValue":"1"}]}}`,
+		"escaping worst": strings.Repeat("\"\\\n\t\x01", 3000),
+		"cjk runes":      strings.Repeat("指標値超長標籤測試", 3000),
+		"not json":       strings.Repeat("zz", 5000),
+		"huge token":     `{"a":"` + strings.Repeat("v", 40000) + `","b":2}`,
+	}
+	for name, input := range inputs {
+		first := dailyCheckJSONFragments([]byte(input), dailyReportCheckWindowBytes)
+		var joined bytes.Buffer
+		offset := 0
+		for _, window := range first {
+			if len(window) == 0 {
+				t.Fatalf("%s: empty window", name)
+			}
+			if !utf8.Valid(window) {
+				t.Fatalf("%s: window %d is not valid UTF-8", name, offset)
+			}
+			joined.Write(window)
+			offset += len(window)
+		}
+		if joined.String() != input {
+			t.Fatalf("%s: fragments are not lossless", name)
+		}
+		second := dailyCheckJSONFragments([]byte(input), dailyReportCheckWindowBytes)
+		if len(first) != len(second) {
+			t.Fatalf("%s: fragment count is not deterministic", name)
+		}
+		for index := range first {
+			if string(first[index]) != string(second[index]) {
+				t.Fatalf("%s: fragment %d is not deterministic", name, index)
+			}
+		}
+		if len(input) <= dailyReportCheckWindowBytes && len(first) != 1 {
+			t.Fatalf("%s: small input must stay a single fragment", name)
+		}
+	}
+	// 巨型单 token（超长标签值）允许窗口超过目标，但必须被 rune 对齐再切。
+	hugeToken := dailyCheckJSONFragments([]byte(`{"a":"`+strings.Repeat("測", 20000)+`"}`), dailyReportCheckWindowBytes)
+	if len(hugeToken) < 2 {
+		t.Fatal("an oversized single token must be sub-split at rune boundaries")
+	}
 }
 
 func TestDailyAlertsGetToolExecutorBoundsToFrozenWindow(t *testing.T) {
