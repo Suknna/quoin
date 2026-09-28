@@ -26,6 +26,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/stele"
 	_ "github.com/Suknna/quoin/plugins/alertmanager"
+	"github.com/Suknna/quoin/test/plugins/synthetic"
 	"github.com/Suknna/quoin/test/support"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -140,29 +141,13 @@ type relayTestHarness struct {
 	connection *connections.Service
 }
 
-// A second producer projects into the same stable alert-batch contract. Its
-// registration lives entirely in this test, not in Quoin's relay or alert
-// domain, so the test catches source-kind switches reappearing in the core.
-type syntheticAlertSource struct{}
-
-func (syntheticAlertSource) Kind() string { return "synthetic" }
-func (syntheticAlertSource) VerifyAndParse(_ context.Context, req plugins.InboundRequest) ([]plugins.Event, error) {
-	return []plugins.Event{{Type: "alerts.batch", Payload: req.Body}}, nil
-}
-
-type syntheticAlertNormalizer struct{}
-
-func (syntheticAlertNormalizer) NormalizeAlert([]byte) ([]plugins.NormalizedAlert, error) {
-	return []plugins.NormalizedAlert{{Severity: plugins.SeverityHigh, Title: "Synthetic source", Resource: "test-host"}}, nil
-}
-
 type syntheticCredentialLookup struct {
 	sourceID, credentialID int64
 }
 
 func (syntheticCredentialLookup) Ready() bool { return true }
 func (lookup syntheticCredentialLookup) Credential(bearer, kind string) (int64, int64, uint64, bool) {
-	if bearer != "synthetic-source-secret" || kind != "synthetic" {
+	if bearer != "synthetic-source-secret" || kind != synthetic.Kind {
 		return 0, 0, 0, false
 	}
 	return lookup.sourceID, lookup.credentialID, 1, true
@@ -179,7 +164,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	if err := registry.Register(builtin); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.Register(plugins.Plugin{ID: "synthetic", Version: "1", EventSource: syntheticAlertSource{}, EventTypes: []string{"alerts.batch"}, AlertNormalizer: syntheticAlertNormalizer{}, AlertIdentity: plugins.AlertIdentityExternal}); err != nil {
+	if err := registry.Register(synthetic.Plugin()); err != nil {
 		t.Fatal(err)
 	}
 	if err := harness.alerts.UseSourceRegistry(registry); err != nil {
@@ -187,7 +172,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	}
 	admin := harness.seedAdminContext(t, "registered-source")
 	digest := sha256Sum("synthetic-source-secret")
-	source, _, err := harness.alerts.CreateSource(admin, "register-second-source", "synthetic-source", "synthetic", digest[:])
+	source, _, err := harness.alerts.CreateSource(admin, "register-second-source", "synthetic-source", synthetic.Kind, digest[:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +201,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = queue.Close() })
 	webhook := stele.NewWebhook(queue, syntheticCredentialLookup{source.SourceID, source.CredentialID}, registry, stele.NewMetrics())
-	req := httptest.NewRequest(http.MethodPost, "/webhook/synthetic", strings.NewReader(string(body)))
+	req := httptest.NewRequest(http.MethodPost, "/webhook/"+synthetic.Kind, strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer synthetic-source-secret")
 	writer := httptest.NewRecorder()
 	webhook.Handler().ServeHTTP(writer, req)
@@ -234,22 +219,22 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	if err != nil || len(response.GetResults()) != 1 || response.GetResults()[0] != accepted {
 		t.Fatalf("queued relay status=%v err=%v", response.GetResults(), err)
 	}
-	if got := send(queued[0].ID, "synthetic", "alerts.batch", body); got != accepted {
+	if got := send(queued[0].ID, synthetic.Kind, "alerts.batch", body); got != accepted {
 		t.Fatalf("replayed event: %s", got)
 	}
 	secondIdentity := []byte(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-2","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
-	if got := send("synthetic-2", "synthetic", "alerts.batch", secondIdentity); got != accepted {
+	if got := send("synthetic-2", synthetic.Kind, "alerts.batch", secondIdentity); got != accepted {
 		t.Fatalf("same labels with different external identity: %s", got)
 	}
 	conflictingLabels := []byte(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-1","labels":{"alertname":"Synthetic","instance":"other-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
-	if got := send("synthetic-conflict", "synthetic", "alerts.batch", conflictingLabels); got != accepted {
+	if got := send("synthetic-conflict", synthetic.Kind, "alerts.batch", conflictingLabels); got != accepted {
 		t.Fatalf("identity conflict must isolate the item: %s", got)
 	}
 	missingIdentity := []byte(`{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
-	if got := send("synthetic-missing-identity", "synthetic", "alerts.batch", missingIdentity); got != accepted {
+	if got := send("synthetic-missing-identity", synthetic.Kind, "alerts.batch", missingIdentity); got != accepted {
 		t.Fatalf("bad item must be isolated without rejecting the delivery: %s", got)
 	}
-	if got := send("synthetic-wrong-event", "synthetic", "unhandled.event", body); got != rejected {
+	if got := send("synthetic-wrong-event", synthetic.Kind, "unhandled.event", body); got != rejected {
 		t.Fatalf("unhandled event: %s", got)
 	}
 	if got := send("synthetic-wrong-source", "alertmanager", "alerts.batch", body); got != rejected {
@@ -259,7 +244,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 		t.Fatalf("malformed cross-source delivery: %s", got)
 	}
 	var count int
-	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_deliveries WHERE protocol='synthetic'`).Scan(&count); err != nil || count != 4 {
+	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_deliveries WHERE protocol=?`, synthetic.Kind).Scan(&count); err != nil || count != 4 {
 		t.Fatalf("synthetic deliveries = %d, err=%v", count, err)
 	}
 	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_occurrences WHERE source_id=?`, source.SourceID).Scan(&count); err != nil || count != 2 {
@@ -281,22 +266,22 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 		t.Fatalf("normalized title=%q err=%v", title, err)
 	}
 	snapshot, err := harness.alerts.AlertSnapshot(ctx, "Firing", "")
-	if err != nil || len(snapshot.Items) != 2 || snapshot.Items[0].Source != "synthetic" {
+	if err != nil || len(snapshot.Items) != 2 || snapshot.Items[0].Source != synthetic.Kind {
 		t.Fatalf("normalized source in alert list: %+v err=%v", snapshot.Items, err)
 	}
 	item, err := harness.alerts.GetAlert(ctx, snapshot.Items[0].ID)
-	if err != nil || item.Source != "synthetic" {
+	if err != nil || item.Source != synthetic.Kind {
 		t.Fatalf("normalized source in alert detail: %+v err=%v", item, err)
 	}
 	harness.alerts.UseEnabledPlugins([]string{"alertmanager"})
-	if got := send("synthetic-disabled", "synthetic", "alerts.batch", body); got != rejected {
+	if got := send("synthetic-disabled", synthetic.Kind, "alerts.batch", body); got != rejected {
 		t.Fatalf("disabled source result: %s", got)
 	}
 	_, sources, err := harness.alerts.CredentialSnapshot(ctx)
 	if err != nil || len(sources) != 1 || sources[0].Enabled {
 		t.Fatalf("disabled source credential projection: %+v err=%v", sources, err)
 	}
-	if _, _, err := harness.alerts.CreateSource(admin, "register-disabled-source", "synthetic-disabled", "synthetic", digest[:]); err == nil {
+	if _, _, err := harness.alerts.CreateSource(admin, "register-disabled-source", "synthetic-disabled", synthetic.Kind, digest[:]); err == nil {
 		t.Fatal("disabled source kind accepted by admin create")
 	}
 }

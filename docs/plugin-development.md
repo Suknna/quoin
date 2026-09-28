@@ -79,6 +79,9 @@ Stele 网关负责 Bearer/digest 认证（"签名对不对"）与 16MiB body 上
 `Plugin.ID` 是插件包的身份，`EventSource.Kind()` 是来源协议身份，两者可以不同；
 管理目录会分别返回 `id` 和 `sourceKind`，创建实例时提交的是后者，不能把插件 ID
 当成 URL kind 或来源 protocol。
+`test/plugins/synthetic` 是仓库内的最小跨来源告警样例：编译期独立构造
+EventSource + Normalizer + externalId 身份模式，测试从 Stele webhook、本地队列、
+Quoin Relay 到 SQLite 及统一告警读模型，不需要在主流程为其增添品牌分支。
 插件必须声明所有可能产出的 `EventTypes`；Stele 会在入队前拒绝未声明的类型，
 Quoin 同样在接收时复核。声明一个新类型不等于核心已有其投影处理器，当前仅 `alerts.batch` 可消费。
 编译入站清单指纹会在 Stele→Quoin 的快照/投递 RPC 上交叉校验；改动事件契约时应
