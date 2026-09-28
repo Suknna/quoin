@@ -266,6 +266,10 @@ func TestSyntheticHTTPKindProbeLifecycleEnablesConnection(t *testing.T) {
 	if err := database.QueryRow(`SELECT detail_json FROM http_connection_probe_results WHERE probe_result_id=?`, probeResultID).Scan(&detailJSON); err != nil {
 		t.Fatal(err)
 	}
+	views, _, err := service.ProbeResults(ctx, created.ID, "", 10)
+	if err != nil || len(views) != 1 || views[0].DetailJSON != detailJSON {
+		t.Fatalf("generic HTTP probe detail is not visible through the management projection: views=%+v err=%v", views, err)
+	}
 	for _, surface := range map[string]string{"revision config": configJSON, "probe detail": detailJSON} {
 		if strings.Contains(surface, "synth-token") {
 			t.Fatalf("bearer token leaked into %s: %s", surface, "<redacted>")

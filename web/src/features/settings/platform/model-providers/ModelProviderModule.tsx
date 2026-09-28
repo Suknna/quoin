@@ -14,7 +14,6 @@ import {
 	type ConnectionInput,
 	type ConnectionRevisionView,
 	type ConnectionSummaryView,
-	type ConnectionType,
 	type CredentialGenerationView,
 	type ProbeAttemptView,
 	type ProbeResultView,
@@ -91,7 +90,10 @@ const probeOutcomeLabels: Record<string, string> = {
 	interrupted: "已中断",
 };
 
-type EditableConnectionType = ConnectionType;
+// This legacy editor owns only the three built-in forms. Plugin HTTP kinds
+// use the catalog-driven integration editor instead of silently inheriting
+// these model-provider/metrics-specific fields.
+type EditableConnectionType = "prometheus" | "thanos" | "model_provider";
 
 /** Keeps secret values in component memory and removes them when the workspace is suspended. */
 function ConnectionFields({
@@ -290,7 +292,7 @@ function ConnectionDetail({
 	);
 	const polling = useRef(false);
 	const alive = useRef(true);
-	const editableType: EditableConnectionType = selected.type;
+	const editableType: EditableConnectionType = "model_provider";
 	async function loadHistory() {
 		try {
 			const [nextResults, nextRevisions, nextGenerations] = await Promise.all([
@@ -789,7 +791,10 @@ export function ModelProviderPage({
 		detailController.current = controller;
 		try {
 			const next = await workbenchApi.fetchConnection(name, controller.signal);
-			if (!controller.signal.aborted) setSelected(next);
+			if (!controller.signal.aborted) {
+				if (next.type !== "model_provider") throw new Error("该连接不是模型提供方，请在接入管理页查看。");
+				setSelected(next);
+			}
 		} catch (reason) {
 			if (reason instanceof DOMException && reason.name === "AbortError")
 				return;

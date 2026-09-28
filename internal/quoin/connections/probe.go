@@ -544,7 +544,7 @@ func (service *Service) ProbeResults(ctx context.Context, connectionID int64, af
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	rows, err := service.read().QueryContext(ctx, `SELECT r.id,r.attempt_id,r.connection_type,r.connection_revision_id,r.credential_generation_id,r.root_binding_revision,r.action_set_id,r.action_set_version,r.probe_contract_digest,r.outcome,r.result_digest,r.started_at,r.finished_at,COALESCE((SELECT t.detail_json FROM thanos_connection_probe_results t WHERE t.probe_result_id=r.id),''),COALESCE((SELECT m.detail_json FROM model_provider_connection_probe_results m WHERE m.probe_result_id=r.id),'') FROM connection_probe_results r WHERE r.connection_id=? AND (?='' OR r.id < ?) ORDER BY r.id DESC LIMIT ?`, connectionID, after, after, limit+1)
+	rows, err := service.read().QueryContext(ctx, `SELECT r.id,r.attempt_id,r.connection_type,r.connection_revision_id,r.credential_generation_id,r.root_binding_revision,r.action_set_id,r.action_set_version,r.probe_contract_digest,r.outcome,r.result_digest,r.started_at,r.finished_at,COALESCE((SELECT t.detail_json FROM thanos_connection_probe_results t WHERE t.probe_result_id=r.id),''),COALESCE((SELECT m.detail_json FROM model_provider_connection_probe_results m WHERE m.probe_result_id=r.id),''),COALESCE((SELECT h.detail_json FROM http_connection_probe_results h WHERE h.probe_result_id=r.id),'') FROM connection_probe_results r WHERE r.connection_id=? AND (?='' OR r.id < ?) ORDER BY r.id DESC LIMIT ?`, connectionID, after, after, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -552,13 +552,16 @@ func (service *Service) ProbeResults(ctx context.Context, connectionID int64, af
 	var results []ProbeResultView
 	for rows.Next() {
 		var view ProbeResultView
-		var thanosDetail, mpDetail string
-		if err := rows.Scan(&view.ID, &view.AttemptID, &view.ConnectionType, &view.ConnectionRevisionID, &view.CredentialGenerationID, &view.RootBindingRevision, &view.ActionSetID, &view.ActionSetVersion, &view.ProbeContractDigest, &view.Outcome, &view.ResultDigest, &view.StartedAt, &view.FinishedAt, &thanosDetail, &mpDetail); err != nil {
+		var thanosDetail, mpDetail, httpDetail string
+		if err := rows.Scan(&view.ID, &view.AttemptID, &view.ConnectionType, &view.ConnectionRevisionID, &view.CredentialGenerationID, &view.RootBindingRevision, &view.ActionSetID, &view.ActionSetVersion, &view.ProbeContractDigest, &view.Outcome, &view.ResultDigest, &view.StartedAt, &view.FinishedAt, &thanosDetail, &mpDetail, &httpDetail); err != nil {
 			return nil, false, err
 		}
 		view.DetailJSON = thanosDetail
 		if view.DetailJSON == "" {
 			view.DetailJSON = mpDetail
+		}
+		if view.DetailJSON == "" {
+			view.DetailJSON = httpDetail
 		}
 		results = append(results, view)
 	}

@@ -6887,7 +6887,30 @@ components:
         - $ref: '#/components/schemas/PrometheusConnectionSummary'
         - $ref: '#/components/schemas/ThanosConnectionSummary'
         - $ref: '#/components/schemas/ModelProviderConnectionSummary'
-      description: 连接响应按 type 封闭：外层 type 与 config 变体由同一对象强制一致，客户端不会读到相互矛盾的 type/config 组合（HTTP-COMMAND-010）。
+        - $ref: '#/components/schemas/GenericHTTPConnectionSummary'
+      description: 内置类型保持精确判别；其余 type 必须在已启用插件目录声明为 HTTP 连接类型。服务端保证外层 type 与 config.type 同一来源（HTTP-COMMAND-010），不把任意字符串当成注册权限。
+
+    GenericHTTPConnectionSummary:
+      type: object
+      required: [name, type, enabled, rowVersion, config]
+      properties:
+        lastProbe:
+          $ref: '#/components/schemas/ConnectionLastProbe'
+        name:
+          $ref: '#/components/schemas/StableKey'
+        type:
+          type: string
+          pattern: '^[a-z][a-z0-9-]*$'
+          not:
+            enum: [prometheus, thanos, model_provider]
+          description: 注册表中已启用的受控 HTTP 连接类型，不是任意平台或模型供应商凭据。
+        enabled: {type: boolean}
+        rowVersion: {type: integer, minimum: 1}
+        revalidationRequired: {type: boolean}
+        currentRevisionId: {$ref: '#/components/schemas/LocatorId'}
+        currentCredentialGenerationId: {$ref: '#/components/schemas/LocatorId'}
+        config:
+          $ref: '#/components/schemas/GenericHTTPConnectionNonSecret'
     PrometheusConnectionSummary:
       type: object
       required: [name, type, enabled, rowVersion, config]
@@ -6990,7 +7013,7 @@ components:
           $ref: '#/components/schemas/LocatorId'
         connectionType:
           type: string
-          enum: [model_provider, prometheus, thanos]
+          description: 内置连接类型或注册表已启用的 HTTP 连接类型。
         connectionRevisionId:
           $ref: '#/components/schemas/LocatorId'
         credentialGenerationId:
@@ -7021,7 +7044,30 @@ components:
             - $ref: '#/components/schemas/ModelProviderConnectionProbeDetails'
             - $ref: '#/components/schemas/PrometheusConnectionProbeDetails'
             - $ref: '#/components/schemas/ThanosConnectionProbeDetails'
-      description: connectionType 与 details 变体必须一致；该闭合由服务端 typed child 表与 JSON Schema fixtures 共同校验。
+            - $ref: '#/components/schemas/GenericHTTPConnectionProbeDetails'
+      description: connectionType 与 details 变体由服务端 typed child 表闭合；通用 HTTP 类型的探测路径与认证能力来自启用的插件声明。
+    GenericHTTPConnectionProbeDetails:
+      oneOf:
+        - type: object
+          required: [method, path, expectedStatus, observedStatus]
+          additionalProperties: false
+          properties:
+            method: {type: string, const: GET}
+            path: {type: string, pattern: '^/'}
+            expectedStatus: {type: integer, const: 200}
+            observedStatus: {type: integer, minimum: 0}
+            error: {type: string}
+        - type: object
+          required: [kind]
+          minProperties: 2
+          additionalProperties: false
+          properties:
+            kind:
+              type: string
+              not: {enum: [prometheus, thanos, model_provider]}
+            cancelled: {type: boolean}
+            interrupted: {type: boolean}
+      description: 注册表 HTTP GET/200 探测的非秘密响应或未观察到上游的取消/中断收口。
     PrometheusConnectionProbeDetails:
       type: object
       required: [kind, query, responseType, sampleCount, sampleValue]
@@ -7215,9 +7261,26 @@ components:
         username:
           type: string
           description: HTTP Basic Auth 用户名（非秘密）。
+    GenericHTTPConnectionNonSecret:
+      type: object
+      required: [type, baseUrl, authType]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          not: {enum: [prometheus, thanos, model_provider]}
+          description: 已启用插件声明的连接类型；须与 ConnectionSummary.type 一致。
+        baseUrl: {type: string, format: uri}
+        tlsCaPem: {type: string}
+        tlsServerName: {type: string}
+        tlsSkipVerify: {type: boolean}
+        authType: {type: string, enum: [none, basic, bearer]}
+        username:
+          type: string
+          description: 仅 HTTP Basic 的非秘密用户名；没有密码或 Bearer token。
     ModelProviderConnectionNonSecret:
       type: object
-      required: [type, baseUrl, chatModelId, embeddingModelId]
+      required: [type, baseUrl, chatModelId]
       additionalProperties: false
       properties:
         type:
@@ -7301,7 +7364,7 @@ components:
           description: HTTP Bearer token (secret; request-only).
     ModelProviderConnectionInput:
       type: object
-      required: [type, baseUrl, chatModelId, embeddingModelId]
+      required: [type, baseUrl, chatModelId]
       additionalProperties: false
       properties:
         type:
@@ -7325,6 +7388,24 @@ components:
         apiKey:
           type: string
           description: API key（秘密；仅请求内存，服务端加密为 CredentialGeneration 后丢弃）。
+    GenericHTTPConnectionInput:
+      type: object
+      required: [type, baseUrl, authType]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          pattern: '^[a-z][a-z0-9-]*$'
+          not: {enum: [prometheus, thanos, model_provider]}
+          description: 服务端根据启用的插件注册表确认连接种类及允许的认证模式。
+        baseUrl: {type: string, format: uri}
+        tlsCaPem: {type: string}
+        tlsServerName: {type: string}
+        tlsSkipVerify: {type: boolean}
+        authType: {type: string, enum: [none, basic, bearer]}
+        username: {type: string}
+        password: {type: string, description: 仅 HTTP Basic 请求内存中的秘密。}
+        bearerToken: {type: string, description: 仅 HTTP Bearer 请求内存中的秘密。}
     DiscoverProviderModelsRequest:
       type: object
       additionalProperties: false
@@ -7366,7 +7447,8 @@ components:
         - $ref: '#/components/schemas/PrometheusConnectionInput'
         - $ref: '#/components/schemas/ThanosConnectionInput'
         - $ref: '#/components/schemas/ModelProviderConnectionInput'
-      description: "按 type 封闭的判别联合（additionalProperties 为 false）：非秘密配置字段与秘密字段在同一变体内声明，未知字段与跨类型字段被拒绝（DATA-CONN-005）。"
+        - $ref: '#/components/schemas/GenericHTTPConnectionInput'
+      description: "内置三类保持判别联合；通用 HTTP 类型还须经启用插件注册表与认证模式声明校验（additionalProperties 为 false），秘密字段只出现在请求中（DATA-CONN-005）。"
     CreateConnectionRequest:
       allOf:
         - $ref: '#/components/schemas/CommandBase'

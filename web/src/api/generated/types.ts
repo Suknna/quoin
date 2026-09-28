@@ -3440,8 +3440,20 @@ export interface components {
             items: components["schemas"]["FeedbackSummary"][];
             nextCursor?: components["schemas"]["Cursor"];
         };
-        /** @description 连接响应按 type 封闭：外层 type 与 config 变体由同一对象强制一致，客户端不会读到相互矛盾的 type/config 组合（HTTP-COMMAND-010）。 */
-        ConnectionSummary: components["schemas"]["PrometheusConnectionSummary"] | components["schemas"]["ThanosConnectionSummary"] | components["schemas"]["ModelProviderConnectionSummary"];
+        /** @description 内置类型保持精确判别；其余 type 必须在已启用插件目录声明为 HTTP 连接类型。服务端保证外层 type 与 config.type 同一来源（HTTP-COMMAND-010），不把任意字符串当成注册权限。 */
+        ConnectionSummary: components["schemas"]["PrometheusConnectionSummary"] | components["schemas"]["ThanosConnectionSummary"] | components["schemas"]["ModelProviderConnectionSummary"] | components["schemas"]["GenericHTTPConnectionSummary"];
+        GenericHTTPConnectionSummary: {
+            lastProbe?: components["schemas"]["ConnectionLastProbe"];
+            name: components["schemas"]["StableKey"];
+            /** @description 注册表中已启用的受控 HTTP 连接类型，不是任意平台或模型供应商凭据。 */
+            type: string;
+            enabled: boolean;
+            rowVersion: number;
+            revalidationRequired?: boolean;
+            currentRevisionId?: components["schemas"]["LocatorId"];
+            currentCredentialGenerationId?: components["schemas"]["LocatorId"];
+            config: components["schemas"]["GenericHTTPConnectionNonSecret"];
+        };
         PrometheusConnectionSummary: {
             lastProbe?: components["schemas"]["ConnectionLastProbe"];
             name: components["schemas"]["StableKey"];
@@ -3490,12 +3502,12 @@ export interface components {
             /** Format: date-time */
             finishedAt: string;
         };
-        /** @description connectionType 与 details 变体必须一致；该闭合由服务端 typed child 表与 JSON Schema fixtures 共同校验。 */
+        /** @description connectionType 与 details 变体由服务端 typed child 表闭合；通用 HTTP 类型的探测路径与认证能力来自启用的插件声明。 */
         ConnectionProbeResult: {
             id: components["schemas"]["LocatorId"];
             attemptId: components["schemas"]["LocatorId"];
-            /** @enum {string} */
-            connectionType: "model_provider" | "prometheus" | "thanos";
+            /** @description 内置连接类型或注册表已启用的 HTTP 连接类型。 */
+            connectionType: string;
             connectionRevisionId: components["schemas"]["LocatorId"];
             credentialGenerationId: components["schemas"]["LocatorId"];
             rootBindingRevision: number;
@@ -3507,7 +3519,21 @@ export interface components {
             resultDigest: string;
             startedAt: components["schemas"]["Timestamp"];
             finishedAt: components["schemas"]["Timestamp"];
-            details: components["schemas"]["ModelProviderConnectionProbeDetails"] | components["schemas"]["PrometheusConnectionProbeDetails"] | components["schemas"]["ThanosConnectionProbeDetails"];
+            details: components["schemas"]["ModelProviderConnectionProbeDetails"] | components["schemas"]["PrometheusConnectionProbeDetails"] | components["schemas"]["ThanosConnectionProbeDetails"] | components["schemas"]["GenericHTTPConnectionProbeDetails"];
+        };
+        /** @description 注册表 HTTP GET/200 探测的非秘密响应或未观察到上游的取消/中断收口。 */
+        GenericHTTPConnectionProbeDetails: {
+            /** @constant */
+            method: "GET";
+            path: string;
+            /** @constant */
+            expectedStatus: 200;
+            observedStatus: number;
+            error?: string;
+        } | {
+            kind: string;
+            cancelled?: boolean;
+            interrupted?: boolean;
         };
         PrometheusConnectionProbeDetails: {
             /** @constant */
@@ -3610,6 +3636,19 @@ export interface components {
             /** @description HTTP Basic Auth 用户名（非秘密）。 */
             username?: string;
         };
+        GenericHTTPConnectionNonSecret: {
+            /** @description 已启用插件声明的连接类型；须与 ConnectionSummary.type 一致。 */
+            type: string;
+            /** Format: uri */
+            baseUrl: string;
+            tlsCaPem?: string;
+            tlsServerName?: string;
+            tlsSkipVerify?: boolean;
+            /** @enum {string} */
+            authType: "none" | "basic" | "bearer";
+            /** @description 仅 HTTP Basic 的非秘密用户名；没有密码或 Bearer token。 */
+            username?: string;
+        };
         ModelProviderConnectionNonSecret: {
             /** @constant */
             type: "model_provider";
@@ -3621,7 +3660,7 @@ export interface components {
             /** @description Admin 从 /v1/models 选择或在列表/metadata 不可用时手工填写的对话模型 ID；仅真实 probe 可证明能力。 */
             chatModelId: string;
             /** @description Admin 从 /v1/models 选择或手工填写的嵌入模型 ID；能力与向量维度只由真实 probe 证明。 */
-            embeddingModelId: string;
+            embeddingModelId?: string;
             /** @description 优先由 provider metadata 自动发现；metadata 不足时由 Admin 补充，并由 probe 验证可工作。 */
             contextBudgetTokens?: number;
             /** @description 优先由 provider metadata 自动发现；metadata 不足时由 Admin 补充。 */
@@ -3665,11 +3704,27 @@ export interface components {
             /** Format: uri */
             baseUrl: string;
             chatModelId: string;
-            embeddingModelId: string;
+            embeddingModelId?: string;
             contextBudgetTokens?: number;
             maxOutputTokens?: number;
             /** @description API key（秘密；仅请求内存，服务端加密为 CredentialGeneration 后丢弃）。 */
             apiKey?: string;
+        };
+        GenericHTTPConnectionInput: {
+            /** @description 服务端根据启用的插件注册表确认连接种类及允许的认证模式。 */
+            type: string;
+            /** Format: uri */
+            baseUrl: string;
+            tlsCaPem?: string;
+            tlsServerName?: string;
+            tlsSkipVerify?: boolean;
+            /** @enum {string} */
+            authType: "none" | "basic" | "bearer";
+            username?: string;
+            /** @description 仅 HTTP Basic 请求内存中的秘密。 */
+            password?: string;
+            /** @description 仅 HTTP Bearer 请求内存中的秘密。 */
+            bearerToken?: string;
         };
         DiscoverProviderModelsRequest: {
             /** Format: uri */
@@ -3689,8 +3744,8 @@ export interface components {
             /** @description available=false 时供 Admin 理解发现失败；不得包含秘密或原始响应正文。 */
             detail?: string;
         };
-        /** @description 按 type 封闭的判别联合（additionalProperties 为 false）：非秘密配置字段与秘密字段在同一变体内声明，未知字段与跨类型字段被拒绝（DATA-CONN-005）。 */
-        ConnectionInput: components["schemas"]["PrometheusConnectionInput"] | components["schemas"]["ThanosConnectionInput"] | components["schemas"]["ModelProviderConnectionInput"];
+        /** @description 内置三类保持判别联合；通用 HTTP 类型还须经启用插件注册表与认证模式声明校验（additionalProperties 为 false），秘密字段只出现在请求中（DATA-CONN-005）。 */
+        ConnectionInput: components["schemas"]["PrometheusConnectionInput"] | components["schemas"]["ThanosConnectionInput"] | components["schemas"]["ModelProviderConnectionInput"] | components["schemas"]["GenericHTTPConnectionInput"];
         CreateConnectionRequest: components["schemas"]["CommandBase"] & {
             name: components["schemas"]["StableKey"];
             connection: components["schemas"]["ConnectionInput"];
@@ -4248,11 +4303,13 @@ export type FeedbackRequest = components['schemas']['FeedbackRequest'];
 export type FeedbackSummary = components['schemas']['FeedbackSummary'];
 export type FeedbackTimeline = components['schemas']['FeedbackTimeline'];
 export type ConnectionSummary = components['schemas']['ConnectionSummary'];
+export type GenericHTTPConnectionSummary = components['schemas']['GenericHTTPConnectionSummary'];
 export type PrometheusConnectionSummary = components['schemas']['PrometheusConnectionSummary'];
 export type ThanosConnectionSummary = components['schemas']['ThanosConnectionSummary'];
 export type ModelProviderConnectionSummary = components['schemas']['ModelProviderConnectionSummary'];
 export type ConnectionLastProbe = components['schemas']['ConnectionLastProbe'];
 export type ConnectionProbeResult = components['schemas']['ConnectionProbeResult'];
+export type GenericHTTPConnectionProbeDetails = components['schemas']['GenericHTTPConnectionProbeDetails'];
 export type PrometheusConnectionProbeDetails = components['schemas']['PrometheusConnectionProbeDetails'];
 export type ThanosConnectionProbeDetails = components['schemas']['ThanosConnectionProbeDetails'];
 export type ModelProviderConnectionProbeDetails = components['schemas']['ModelProviderConnectionProbeDetails'];
@@ -4261,10 +4318,12 @@ export type RevisionSummary = components['schemas']['RevisionSummary'];
 export type GenerationSummary = components['schemas']['GenerationSummary'];
 export type PrometheusConnectionNonSecret = components['schemas']['PrometheusConnectionNonSecret'];
 export type ThanosConnectionNonSecret = components['schemas']['ThanosConnectionNonSecret'];
+export type GenericHTTPConnectionNonSecret = components['schemas']['GenericHTTPConnectionNonSecret'];
 export type ModelProviderConnectionNonSecret = components['schemas']['ModelProviderConnectionNonSecret'];
 export type PrometheusConnectionInput = components['schemas']['PrometheusConnectionInput'];
 export type ThanosConnectionInput = components['schemas']['ThanosConnectionInput'];
 export type ModelProviderConnectionInput = components['schemas']['ModelProviderConnectionInput'];
+export type GenericHTTPConnectionInput = components['schemas']['GenericHTTPConnectionInput'];
 export type DiscoverProviderModelsRequest = components['schemas']['DiscoverProviderModelsRequest'];
 export type ProviderModelDiscoveryResult = components['schemas']['ProviderModelDiscoveryResult'];
 export type ConnectionInput = components['schemas']['ConnectionInput'];
