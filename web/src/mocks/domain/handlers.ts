@@ -1,5 +1,6 @@
 import { delay, HttpResponse, http, type JsonBodyType } from "msw";
 import type { PluginInspectionScope } from "../../api/generated/types";
+import type { AlertSourceDetail } from "../../features/alerts/api";
 import type { InvestigationMessage } from "../../features/investigation/api";
 import {
 	adminUser,
@@ -521,9 +522,11 @@ export const domainHandlers = [
 	http.post("*/api/v1/alert-sources", async ({ request }) => {
 		const denied = adminRequired();
 		if (denied) return denied;
-		const input = await body<{ key: string; protocol: "alertmanager" }>(
-			request,
-		);
+		const input = await body<{
+			key: string;
+			protocol: "alertmanager";
+			settings?: Record<string, unknown>;
+		}>(request);
 		if (getMockState().alertSources.some((item) => item.key === input.key))
 			return problem(409, "告警源键已存在。", "already_exists");
 		const credentialId = nextId("alert-credential");
@@ -534,7 +537,8 @@ export const domainHandlers = [
 			rowVersion: 1,
 			createdAt: "2026-09-09T09:30:00.000Z",
 			credentialCount: 1,
-		});
+			settings: input.settings ?? {},
+		} as AlertSourceDetail & { settings?: Record<string, unknown> });
 		getMockState().alertCredentials[input.key] = [
 			{
 				id: credentialId,
@@ -609,6 +613,41 @@ export const domainHandlers = [
 			const stale = conflict(input.expectedRowVersion, source.rowVersion);
 			if (stale) return stale;
 			source.enabled = false;
+			source.rowVersion += 1;
+			return json(source);
+		},
+	),
+	// ADR-0014 story 2: per-instance non-secret settings replace command.
+	// The mock store reuses the alerts feature projection, which predates
+	// settings; this handler layer widens it locally instead of touching the
+	// alerts feature types.
+	// The demo catalog declares no settings schemas, so the document is only
+	// shape-checked here; the real server validates against the owning
+	// plugin's closed EventSourceConfigSchema before commit.
+	http.post(
+		"*/api/v1/alert-sources/:key/settings",
+		async ({ params, request }) => {
+			const denied = adminRequired();
+			if (denied) return denied;
+			const source = getMockState().alertSources.find(
+				(item) => item.key === params.key,
+			) as (AlertSourceDetail & {
+				settings?: Record<string, unknown>;
+			}) | undefined;
+			if (!source) return problem(404, "未找到告警源。");
+			const input = await body<{
+				expectedRowVersion?: number;
+				settings?: Record<string, unknown>;
+			}>(request);
+			const stale = conflict(input.expectedRowVersion, source.rowVersion);
+			if (stale) return stale;
+			if (
+				!input.settings ||
+				typeof input.settings !== "object" ||
+				Array.isArray(input.settings)
+			)
+				return problem(422, "设置文档必须为 JSON 对象。", "validation_error");
+			source.settings = input.settings;
 			source.rowVersion += 1;
 			return json(source);
 		},

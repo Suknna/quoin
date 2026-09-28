@@ -93,6 +93,21 @@ describe('offline domain mock handlers', () => {
     expect((await response(`/api/v1/alert-sources/stateful-source/credentials/${createdSource.credentialId}/retire`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRowVersion: 1 }) })).status).toBe(200)
   })
 
+  test('replaces per-source settings behind the admin boundary with row-version fencing', async () => {
+    const path = '/api/v1/alert-sources/demo-alertmanager/settings'
+    setMockScenario('operator')
+    expect((await response(path, { method: 'POST', body: JSON.stringify({ clientCommandId: 'cmd-settings-op', expectedRowVersion: 1, settings: {} }) })).status).toBe(403)
+    setMockScenario('administrator')
+    const write = await response(path, { method: 'POST', body: JSON.stringify({ clientCommandId: 'cmd-settings-1', expectedRowVersion: 1, settings: { ignoredAlertnames: ['Heartbeat'] } }) })
+    expect(write.status).toBe(200)
+    const saved = await write.json() as { rowVersion: number; settings: Record<string, unknown> }
+    expect(saved.rowVersion).toBe(2)
+    expect(saved.settings).toEqual({ ignoredAlertnames: ['Heartbeat'] })
+    // A stale expectedRowVersion fails closed; the fresh row version retries.
+    expect((await response(path, { method: 'POST', body: JSON.stringify({ clientCommandId: 'cmd-settings-2', expectedRowVersion: 1, settings: {} }) })).status).toBe(409)
+    expect((await response(path, { method: 'POST', body: JSON.stringify({ clientCommandId: 'cmd-settings-3', expectedRowVersion: saved.rowVersion, settings: {} }) })).status).toBe(200)
+  })
+
   test('statefully serves business views behind the admin boundary with row-version fencing', async () => {
     setMockScenario('operator')
     expect((await response('/api/v1/business-views')).status).toBe(403)
