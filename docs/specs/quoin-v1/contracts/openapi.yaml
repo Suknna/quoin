@@ -3212,6 +3212,15 @@ paths:
                         sourceKind:
                           type: string
                           description: EventSource.Kind(); only present when event_source is declared. Not necessarily the plugin ID.
+                        connectionKind:
+                          type: string
+                          description: 注册的受控 HTTP 连接类型，独立于插件 ID 与入站 sourceKind。
+                        connectionAuthModes:
+                          type: array
+                          items: {type: string, enum: [none, basic, bearer]}
+                        connectionProbePath:
+                          type: string
+                          description: 插件声明的只读 GET/200 探测路径；无路径的连接类型不得启用新实例。
                         displayName:
                           type: string
                         description:
@@ -3225,7 +3234,7 @@ paths:
                           uniqueItems: true
                           items:
                             type: string
-                            enum: [event_source, alert_normalizer, tools, discover, inspection_templates]
+                            enum: [event_source, alert_normalizer, http_connection, tools, discover, inspection_templates]
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':

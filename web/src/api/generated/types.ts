@@ -7348,11 +7348,16 @@ export interface operations {
                             id: string;
                             /** @description EventSource.Kind(); only present when event_source is declared. Not necessarily the plugin ID. */
                             sourceKind?: string;
+                            /** @description 注册的受控 HTTP 连接类型，独立于插件 ID 与入站 sourceKind。 */
+                            connectionKind?: string;
+                            connectionAuthModes?: ("none" | "basic" | "bearer")[];
+                            /** @description 插件声明的只读 GET/200 探测路径；无路径的连接类型不得启用新实例。 */
+                            connectionProbePath?: string;
                             displayName: string;
                             description: string;
                             enabled: boolean;
                             version: string;
-                            capabilities: ("event_source" | "alert_normalizer" | "tools" | "discover" | "inspection_templates")[];
+                            capabilities: ("event_source" | "alert_normalizer" | "http_connection" | "tools" | "discover" | "inspection_templates")[];
                         }[];
                     };
                 };
