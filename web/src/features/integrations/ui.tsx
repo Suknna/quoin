@@ -387,9 +387,11 @@ function Instances({
 				listMetricsInstances(),
 				listIntegrationPlugins().catch(() => []),
 			]);
-			const generic = await listHttpConnectionInstances(
-				genericHttpConnectionKinds(catalog),
-			);
+			const generic = (
+				await listHttpConnectionInstances(
+					genericHttpConnectionKinds(catalog),
+				)
+			).items;
 			return {
 				items: [...(events.items ?? []), ...metrics, ...generic],
 				nextCursor: events.nextCursor,
@@ -2261,10 +2263,19 @@ function HttpConnectionManager({
 	const kind = item.connectionKind as string;
 	const modes = allowedAuthModes(item.connectionAuthModes);
 	const canEnable = Boolean(item.connectionProbePath);
-	const [instances, setInstances] = useState<HttpConnectionInstance[]>([]);
-	const [instancesLoading, setInstancesLoading] = useState(true);
-	const [instancesError, setInstancesError] = useState("");
-	const [instancesRevision, setInstancesRevision] = useState(0);
+	// 游标翻页复用 useCursorPages：服务端对全部连接按名称整体分页且无 kind
+	// 过滤（HTTP-PAGE-001），每页按 kind 过滤后可能为空但仍有下一页；空页
+	// 不得渲染“尚未创建”空态，而是引导继续翻页，避免把后续页的实例误报
+	// 为不存在。保存/启用后回第一页重读（refresh 语义与保存后刷新一致）。
+	const list = useCursorPages(
+		(cursor) => listHttpConnectionInstances([kind], cursor),
+		{
+			suspended,
+			resetKey: kind,
+			fallbackError: "暂时无法加载连接实例，请重试。",
+		},
+	);
+	const instances = list.items;
 	const [name, setName] = useState("");
 	const [baseUrl, setBaseUrl] = useState("");
 	const [authType, setAuthType] = useState<AuthType>(modes[0] ?? "none");
@@ -2278,20 +2289,6 @@ function HttpConnectionManager({
 	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState("");
 	const [result, setResult] = useState<ConnectionProbeObservation>();
-	const loadInstances = useCallback(async () => {
-		setInstancesLoading(true);
-		try {
-			setInstances(await listHttpConnectionInstances([kind]));
-			setInstancesError("");
-		} catch (reason) {
-			setInstancesError(messageOf(reason, "暂时无法完成操作，请重试。"));
-		} finally {
-			setInstancesLoading(false);
-		}
-	}, [kind]);
-	useEffect(() => {
-		if (!suspended) void loadInstances();
-	}, [loadInstances, suspended, instancesRevision]);
 	useEffect(() => {
 		if (suspended) {
 			setPassword("");
@@ -2339,7 +2336,7 @@ function HttpConnectionManager({
 				// server refuses to qualify this kind, so the instance stays
 				// disabled instead of pretending to be a complete integration.
 				resetForm();
-				setInstancesRevision((value) => value + 1);
+				void list.refresh();
 				notify.success("连接已创建并保持停用");
 				return;
 			}
@@ -2354,7 +2351,7 @@ function HttpConnectionManager({
 			}
 			await enableHttpConnectionInstance(instance, probe.id);
 			resetForm();
-			setInstancesRevision((value) => value + 1);
+			void list.refresh();
 			notify.success("接入已启用");
 		} catch (reason) {
 			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
@@ -2387,56 +2384,60 @@ function HttpConnectionManager({
 						同一连接类型可创建多个相互独立的实例；点击查看状态、停用或轮换。
 					</p>
 				</div>
-				{instancesLoading ? (
-					<DetailSkeleton
-						label="正在加载连接实例"
-						rows={["line", "line", "line"]}
-					/>
-				) : instancesError ? (
-					<Alert variant="destructive">
-						<AlertDescription>{instancesError}</AlertDescription>
-					</Alert>
-				) : instances.length === 0 ? (
-					<Empty className="min-h-32">
-						<EmptyHeader>
-							<EmptyTitle>尚未创建连接实例</EmptyTitle>
-							<EmptyDescription>
-								使用下方表单创建第一个连接。
-							</EmptyDescription>
-						</EmptyHeader>
-					</Empty>
-				) : (
-					<EntityList
-						items={instances.map((instance) => ({
-							id: instance.id,
-							title: instance.displayName,
-							subtitle: `${authModeLabel[instance.authType]} · ${instance.endpoint ?? "—"}`,
-							badge: {
-								text:
-									instance.status === "active"
-										? "已启用"
-										: instance.status === "revalidation_required"
-											? "需要重新验证"
-											: "已停用",
-								variant:
-									instance.status === "active"
-										? ("secondary" as const)
-										: ("outline" as const),
-							},
-							item: instance,
-						}))}
-						columns={["title", "subtitle", "status"]}
-						onSelect={(row) =>
-							navigate(
-								instanceSheetRoute(
-									row.item.platform,
-									row.item.displayName,
-								),
-							)
-						}
-						emptyTitle="尚未创建连接实例"
-					/>
-				)}
+				{/* 空页 ≠ 不存在：后续页可能仍有该类型实例，诚实区分三种空。 */}
+				<EntityList
+					items={instances.map((instance) => ({
+						id: instance.id,
+						title: instance.displayName,
+						subtitle: `${authModeLabel[instance.authType]} · ${instance.endpoint ?? "—"}`,
+						badge: {
+							text:
+								instance.status === "active"
+									? "已启用"
+									: instance.status === "revalidation_required"
+										? "需要重新验证"
+										: "已停用",
+							variant:
+								instance.status === "active"
+									? ("secondary" as const)
+									: ("outline" as const),
+						},
+						item: instance,
+					}))}
+					columns={["title", "subtitle", "status"]}
+					onSelect={(row) =>
+						navigate(
+							instanceSheetRoute(
+								row.item.platform,
+								row.item.displayName,
+							),
+						)
+					}
+					error={list.error}
+					onRetry={list.retry}
+					emptyTitle={
+						list.hasNext
+							? "本页没有该类型的连接实例"
+							: list.page > 1
+								? "已浏览全部连接实例"
+								: "尚未创建连接实例"
+					}
+					emptyDescription={
+						list.hasNext
+							? "后续页可能仍包含该类型的实例；请点击“下一页”继续查看。"
+							: list.page > 1
+								? "后续页没有更多该类型的实例。"
+								: "使用下方表单创建第一个连接。"
+					}
+				/>
+				<CursorPagination
+					page={list.page}
+					hasPrev={list.hasPrev}
+					hasNext={list.hasNext}
+					loading={list.navigating}
+					onPrev={list.goPrev}
+					onNext={list.goNext}
+				/>
 			</section>
 			<form onSubmit={submit}>
 				<Card>

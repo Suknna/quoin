@@ -352,18 +352,35 @@ function httpConnectionInstance(value: object): HttpConnectionInstance {
 	};
 }
 
-/** Lists the generic HTTP connection instances of the given plugin-declared
- * kinds; the kinds always come from the enabled server catalog. */
+export interface HttpConnectionInstancePage {
+	items: HttpConnectionInstance[];
+	nextCursor?: string;
+}
+
+/** Lists one cursor page of the generic HTTP connection instances of the given
+ * plugin-declared kinds; the kinds always come from the enabled server catalog.
+ * The server paginates all connections by name with no kind filter
+ * (HTTP-PAGE-001), so each page is filtered client-side while `nextCursor` is
+ * always passed through verbatim: a page with zero matches may still be
+ * followed by pages containing matches, and callers must offer continued
+ * navigation instead of rendering an empty state. */
 export async function listHttpConnectionInstances(
 	connectionKinds: string[],
-): Promise<HttpConnectionInstance[]> {
-	if (connectionKinds.length === 0) return [];
-	const page = await request<{ items?: Record<string, unknown>[] }>(
-		"/api/v1/connections?limit=100",
-	);
-	return (page.items ?? [])
-		.filter((item) => connectionKinds.includes(String(item.type)))
-		.map(httpConnectionInstance);
+	cursor?: string,
+): Promise<HttpConnectionInstancePage> {
+	if (connectionKinds.length === 0) return { items: [] };
+	const query = new URLSearchParams({ limit: "100" });
+	if (cursor) query.set("cursor", cursor);
+	const page = await request<{
+		items?: Record<string, unknown>[];
+		nextCursor?: string;
+	}>(`/api/v1/connections?${query}`);
+	return {
+		items: (page.items ?? [])
+			.filter((item) => connectionKinds.includes(String(item.type)))
+			.map(httpConnectionInstance),
+		nextCursor: page.nextCursor,
+	};
 }
 
 export async function fetchHttpConnectionInstance(
