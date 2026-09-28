@@ -136,8 +136,9 @@ type dailyTotals = agentcontext.DailyTotals
 
 // dailyReportContent is the frozen sealed document. All fields come from
 // immutable rows plus the seal moment; re-deriving it later from the same
-// facts yields the same document modulo late results, which only ever enter a
-// new version.
+// facts by the same frozen cutoff yields the same check content; a later
+// version may freeze a different human output expectation, but never imports
+// a check committed after the original cutoff.
 type dailyReportContent struct {
 	SchemaKind     string              `json:"schemaKind"`
 	ConfigKey      string              `json:"configKey"`
@@ -715,13 +716,13 @@ func (s *Service) dueSealReportIDs(ctx context.Context, boundary time.Time) ([]i
 // transaction: the state transition and the version append commit together,
 // so a sealed report always has exactly the version the seal produced.
 func (s *Service) sealDailyReportOn(ctx context.Context, tx execution.Executor, reportID int64, boundary time.Time) error {
-	var configKey, localDate, timezone, windowStartUTC, windowEndUTC, contributionsJSON string
+	var configKey, localDate, timezone, windowStartUTC, windowEndUTC, cutoffAt, contributionsJSON string
 	var expectedOutput sql.NullString
 	err := tx.QueryRowContext(ctx, `
-		SELECT config_key,local_date,timezone,window_start_utc,window_end_utc,contributions_json,expected_output
+		SELECT config_key,local_date,timezone,window_start_utc,window_end_utc,cutoff_at,contributions_json,expected_output
 		FROM inspection_daily_reports WHERE id=? AND state='Collecting' AND cutoff_at<=?`,
 		reportID, dailyTimeText(boundary)).
-		Scan(&configKey, &localDate, &timezone, &windowStartUTC, &windowEndUTC, &contributionsJSON, &expectedOutput)
+		Scan(&configKey, &localDate, &timezone, &windowStartUTC, &windowEndUTC, &cutoffAt, &contributionsJSON, &expectedOutput)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Already sealed (or cutoff not yet reached in this transaction's
 		// view): the winner owns the seal, a replay records nothing.
@@ -737,7 +738,7 @@ func (s *Service) sealDailyReportOn(ctx context.Context, tx execution.Executor, 
 	content, err := s.buildDailyReportContent(ctx, tx, dailyReportContent{
 		SchemaKind: dailyReportContentKind, ConfigKey: configKey, LocalDate: localDate, Timezone: timezone,
 		WindowStartUTC: windowStartUTC, WindowEndUTC: windowEndUTC,
-	}, contributions, windowStartUTC, windowEndUTC)
+	}, contributions, windowStartUTC, windowEndUTC, cutoffAt)
 	if err != nil {
 		return err
 	}
@@ -781,10 +782,10 @@ func (s *Service) sealDailyReportOn(ctx context.Context, tx execution.Executor, 
 // belongs to the day its collection actually started in (evidence_at within
 // the frozen UTC window), so the report records when evidence was really
 // taken, never when the report happened to be built.
-func (s *Service) buildDailyReportContent(ctx context.Context, tx execution.Executor, content dailyReportContent, contributions []dailyContribution, windowStartUTC, windowEndUTC string) (dailyReportContent, error) {
+func (s *Service) buildDailyReportContent(ctx context.Context, tx execution.Executor, content dailyReportContent, contributions []dailyContribution, windowStartUTC, windowEndUTC, cutoffAt string) (dailyReportContent, error) {
 	content.Sources = []dailySourceReport{}
 	for _, contribution := range contributions {
-		source, err := s.dailySourceReportOn(ctx, tx, contribution, windowStartUTC, windowEndUTC)
+		source, err := s.dailySourceReportOn(ctx, tx, contribution, windowStartUTC, windowEndUTC, cutoffAt)
 		if err != nil {
 			return content, err
 		}
@@ -810,10 +811,12 @@ func (s *Service) buildDailyReportContent(ctx context.Context, tx execution.Exec
 // frozen evidence_at window with second precision (both sides are canonical
 // UTC RFC3339 timestamps, so the fixed-width prefix comparison is exact at
 // the minute-precision window boundaries).
-func (s *Service) dailySourceReportOn(ctx context.Context, tx execution.Executor, contribution dailyContribution, windowStartUTC, windowEndUTC string) (dailySourceReport, error) {
+func (s *Service) dailySourceReportOn(ctx context.Context, tx execution.Executor, contribution dailyContribution, windowStartUTC, windowEndUTC, cutoffAt string) (dailySourceReport, error) {
 	source := dailySourceReport{DailyContribution: contribution, Status: "ok", Checks: []dailyCheckItem{}}
 	addReason := func(reason string) {
-		source.GapReasons = append(source.GapReasons, reason)
+		if !slices.Contains(source.GapReasons, reason) {
+			source.GapReasons = append(source.GapReasons, reason)
+		}
 	}
 	if contribution.Missing {
 		addReason(dailyGapPlanMissing)
@@ -855,7 +858,6 @@ func (s *Service) dailySourceReportOn(ctx context.Context, tx execution.Executor
 		case "Queued", "Running":
 			// 采证截止时仍未收敛：显式超时 gap，绝不等待无界完成。
 			addReason(dailyGapCutoffExceeded)
-			continue
 		case "Failed":
 			addReason(dailyGapRunFailed)
 		case "Cancelled":
@@ -863,11 +865,17 @@ func (s *Service) dailySourceReportOn(ctx context.Context, tx execution.Executor
 		case "Interrupted":
 			addReason(dailyGapRunInterrupted)
 		}
-		checks, err := s.dailyCheckItemsOn(ctx, tx, run.id)
+		markUnsettled := run.state != "Failed" && run.state != "Cancelled" && run.state != "Interrupted"
+		checks, err := s.dailyCheckItemsOn(ctx, tx, run.id, cutoffAt, markUnsettled)
 		if err != nil {
 			return source, err
 		}
 		source.Checks = append(source.Checks, checks...)
+		for _, check := range checks {
+			if check.GapReason != nil && *check.GapReason == dailyGapCutoffExceeded {
+				addReason(dailyGapCutoffExceeded)
+			}
+		}
 	}
 	if len(runs) == 0 {
 		addReason(dailyGapNoCollection)
@@ -889,15 +897,18 @@ func (s *Service) dailySourceReportOn(ctx context.Context, tx execution.Executor
 	return source, nil
 }
 
-// dailyCheckItemsOn lists one run's settled check facts. The frozen
-// meta_json carries the observation time (gap rows included); historical rows
-// fall back to the evidence's observed_at. Malformed frozen JSON is a data
-// integrity failure and surfaces instead of being swallowed.
-func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, runID int64) ([]dailyCheckItem, error) {
+// dailyCheckItemsOn lists only facts committed by the frozen cutoff, even if
+// the sealing tick runs late. A later result remains in its Run/Evidence but
+// never upgrades a daily version that had a gap at cutoff.
+func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, runID int64, cutoffAt string, markUnsettled bool) ([]dailyCheckItem, error) {
+	cutoff, err := time.Parse(time.RFC3339Nano, cutoffAt)
+	if err != nil {
+		return nil, fmt.Errorf("daily report cutoff %q is invalid: %w", cutoffAt, err)
+	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT x.check_key, x.status, x.gap_reason,
 		       COALESCE(json_extract(x.meta_json,'$.observedAt'), e.observed_at),
-		       x.evidence_id, e.result_json
+		       x.evidence_id, e.result_json, x.created_at
 		FROM inspection_check_results x
 		LEFT JOIN evidence e ON e.id=x.evidence_id
 		WHERE x.run_id=? ORDER BY x.check_key`, runID)
@@ -906,15 +917,25 @@ func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, 
 	}
 	defer rows.Close()
 	items := []dailyCheckItem{}
+	settled := map[string]bool{}
 	for rows.Next() {
 		var item dailyCheckItem
 		item.RunID = runID
 		var gapReason, observedAt sql.NullString
 		var evidenceID sql.NullInt64
 		var resultJSON sql.NullString
-		if err := rows.Scan(&item.CheckKey, &item.Status, &gapReason, &observedAt, &evidenceID, &resultJSON); err != nil {
+		var committedAt string
+		if err := rows.Scan(&item.CheckKey, &item.Status, &gapReason, &observedAt, &evidenceID, &resultJSON, &committedAt); err != nil {
 			return nil, err
 		}
+		committed, err := time.Parse(time.RFC3339Nano, committedAt)
+		if err != nil {
+			return nil, fmt.Errorf("run %d check %s has invalid commit time: %w", runID, item.CheckKey, err)
+		}
+		if committed.After(cutoff) {
+			continue
+		}
+		settled[item.CheckKey] = true
 		if gapReason.Valid {
 			item.GapReason = &gapReason.String
 		}
@@ -937,7 +958,35 @@ func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, 
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if !markUnsettled {
+		return items, nil // run_failed/cancelled/interrupted already names the gap
+	}
+	// The run's frozen check directory is authoritative, not its current
+	// terminal state. Any check still missing at cutoff is an explicit gap.
+	checkRows, err := tx.QueryContext(ctx, `SELECT check_key FROM inspection_run_checks WHERE run_id=? ORDER BY check_key`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer checkRows.Close()
+	for checkRows.Next() {
+		var key string
+		if err := checkRows.Scan(&key); err != nil {
+			return nil, err
+		}
+		if !settled[key] {
+			reason := dailyGapCutoffExceeded
+			items = append(items, dailyCheckItem{RunID: runID, CheckKey: key, Status: "gap", GapReason: &reason})
+		}
+	}
+	if err := checkRows.Err(); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(items, func(left, right dailyCheckItem) int { return strings.Compare(left.CheckKey, right.CheckKey) })
+	return items, nil
 }
 
 // dailyMeasurementFromEvidence derives the bounded measurement summary of one
@@ -1119,9 +1168,9 @@ func (s *Service) createManualDailyReportOn(ctx context.Context, tx execution.Ex
 }
 
 // RerunDailyReport re-derives a sealed report as a new immutable version from
-// the same frozen window and contributions (人工重分析): late results that
-// have since settled enter the new version; the sealed versions stay readable
-// and comparable, and nothing about the frozen window changes.
+// the same frozen window, cutoff and contributions (人工重分析). Late results
+// remain readable in their Run/Evidence but never enter any daily version;
+// older versions stay readable and comparable.
 func (s *Service) RerunDailyReport(ctx context.Context, principalID int64, clientCommandID, configKey, localDate string) (DailyReportSummary, error) {
 	digest := auth.DigestCommand(CommandRerunDailyReport, map[string]any{"configKey": configKey, "localDate": localDate})
 	outcome, err := execution.Run(ctx, s.runner, s.rerunDailyReport, execution.Command{
@@ -1147,11 +1196,11 @@ func (s *Service) RerunDailyReport(ctx context.Context, principalID int64, clien
 
 func (s *Service) rerunDailyReportOn(ctx context.Context, tx execution.Executor, configKey, localDate string) (DailyReportSummary, *execution.Rejection, error) {
 	var reportID int64
-	var state, timezone, windowStartUTC, windowEndUTC, contributionsJSON string
+	var state, timezone, windowStartUTC, windowEndUTC, cutoffAt, contributionsJSON string
 	err := tx.QueryRowContext(ctx, `
-		SELECT id,state,timezone,window_start_utc,window_end_utc,contributions_json
+		SELECT id,state,timezone,window_start_utc,window_end_utc,cutoff_at,contributions_json
 		FROM inspection_daily_reports WHERE config_key=? AND local_date=?`, configKey, localDate).
-		Scan(&reportID, &state, &timezone, &windowStartUTC, &windowEndUTC, &contributionsJSON)
+		Scan(&reportID, &state, &timezone, &windowStartUTC, &windowEndUTC, &cutoffAt, &contributionsJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DailyReportSummary{}, &execution.Rejection{Code: "not_found", Detail: "该本地日期的日报不存在"}, nil
 	}
@@ -1169,7 +1218,7 @@ func (s *Service) rerunDailyReportOn(ctx context.Context, tx execution.Executor,
 		SchemaKind: dailyReportContentKind, ConfigKey: configKey, LocalDate: localDate, Timezone: timezone,
 		WindowStartUTC: windowStartUTC, WindowEndUTC: windowEndUTC,
 	}
-	content, err := s.buildDailyReportContent(ctx, tx, seed, contributions, windowStartUTC, windowEndUTC)
+	content, err := s.buildDailyReportContent(ctx, tx, seed, contributions, windowStartUTC, windowEndUTC, cutoffAt)
 	if err != nil {
 		return DailyReportSummary{}, nil, err
 	}

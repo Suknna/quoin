@@ -367,6 +367,9 @@ func TestDailySealAggregatesWindowFactsWithoutFabricatingHealth(t *testing.T) {
 	if pendingSource.Status != "gap" || len(pendingSource.GapReasons) != 1 || pendingSource.GapReasons[0] != dailyGapCutoffExceeded {
 		t.Fatalf("pending source = %+v, want cutoff_exceeded gap", pendingSource)
 	}
+	if len(pendingSource.Checks) != 1 || pendingSource.Checks[0].GapReason == nil || *pendingSource.Checks[0].GapReason != dailyGapCutoffExceeded {
+		t.Fatalf("pending frozen check must remain an explicit cutoff gap: %+v", pendingSource.Checks)
+	}
 	cancelledSource := sources["plan-cancelled"]
 	if cancelledSource.Status != "gap" || len(cancelledSource.GapReasons) != 1 || cancelledSource.GapReasons[0] != dailyGapRunCancelled {
 		t.Fatalf("cancelled-run source = %+v, want run_cancelled gap", cancelledSource)
@@ -378,8 +381,8 @@ func TestDailySealAggregatesWindowFactsWithoutFabricatingHealth(t *testing.T) {
 	if !strings.Contains(strings.Join(disabledSource.GapReasons, ","), dailyGapPlanDisabled) || !strings.Contains(strings.Join(disabledSource.GapReasons, ","), dailyGapNoCollection) {
 		t.Fatalf("disabled source reasons = %v", disabledSource.GapReasons)
 	}
-	if content.Totals.ChecksOK != 1 || content.Totals.ChecksGap != 1 || content.Totals.SourcesGap != 4 {
-		t.Fatalf("totals = %+v, want one ok check, one gap check, four gap sources", content.Totals)
+	if content.Totals.ChecksOK != 1 || content.Totals.ChecksGap != 2 || content.Totals.SourcesGap != 4 {
+		t.Fatalf("totals = %+v, want one ok check, two gap checks (failed + cutoff), four gap sources", content.Totals)
 	} // 冻结身份不可改写：SQL 触发器拒绝任何窗口/贡献改写。
 	var reportID int64
 	if err := h.db.QueryRow(`SELECT id FROM inspection_daily_reports WHERE config_key='core-daily'`).Scan(&reportID); err != nil {
@@ -442,6 +445,44 @@ func TestDailySealWaitsForCutoffAndNeverSealsEarly(t *testing.T) {
 	}
 	if len(detail.Latest.Sources) != 1 || detail.Latest.Sources[0].Status != "gap" {
 		t.Fatalf("sealed sources = %+v", detail.Latest.Sources)
+	}
+}
+
+func TestDelayedDailySealCannotAbsorbChecksCommittedAfterCutoff(t *testing.T) {
+	h := newTestHarness(t)
+	h.seedPlan(t, "plan-late-seal")
+	h.seedDailyConfig(t, dailyTestConfigInput("late-seal", "plan-late-seal"))
+	day := time.Date(2026, time.September, 27, 10, 0, 0, 0, time.UTC)
+	runs := h.seedWindowFacts(t, day, "plan-late-seal")
+	boundary := time.Date(2026, time.September, 28, 6, 0, 0, 0, time.UTC)
+	if err := h.service.CreateScheduledDailyReport(context.Background(), DailyReportConfig{ConfigKey: "late-seal", Timezone: "UTC"}, boundary); err != nil {
+		t.Fatal(err)
+	}
+	// The scheduler stalls. The Run succeeds after the frozen deadline but
+	// before sealing actually executes; a wall-clock check at seal time would
+	// incorrectly turn the historic daily gap green.
+	h.pinDailyNow(t, boundary.Add(2*time.Hour+time.Nanosecond))
+	attemptID := h.promqlAttemptID(t, runs["plan-late-seal"])
+	h.dispatchPromQL(t, attemptID)
+	if err := h.service.CommitPluginProposal(context.Background(), attemptID, "plinth-boot", 1, pluginSuccessProposal(t, h, attemptID, runs["plan-late-seal"], "success")); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.service.SealDueDailyReports(context.Background(), boundary.Add(3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := h.service.GetDailyReport(context.Background(), "late-seal", "2026-09-27")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Latest == nil || detail.Latest.Totals.ChecksOK != 0 || detail.Latest.Totals.ChecksGap != 1 || detail.Latest.Sources[0].Status != "gap" || detail.Latest.Sources[0].Checks[0].EvidenceID != nil {
+		t.Fatalf("late-committed Evidence leaked into the frozen daily window: %+v", detail.Latest)
+	}
+	if reason := detail.Latest.Sources[0].Checks[0].GapReason; reason == nil || *reason != dailyGapCutoffExceeded {
+		t.Fatalf("late result must be a cutoff gap, got %+v", detail.Latest.Sources[0].Checks)
+	}
+	var actualResult int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM inspection_check_results WHERE run_id=? AND status='ok'`, runs["plan-late-seal"]).Scan(&actualResult); err != nil || actualResult != 1 {
+		t.Fatalf("late Run/Evidence must remain readable: count=%d err=%v", actualResult, err)
 	}
 }
 
@@ -519,8 +560,9 @@ func TestDailyReportRerunAppendsVersionAndKeepsOldReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 迟到的采集在封存后收敛；人工重分析从同一冻结窗口生成 v2，迟到事实
-	// 进入新版本，旧版本原样可读。
+	// 截止后的采集只留在原 Run/Evidence；管理员生成 v2 仍沿用首次冻结的
+	// 截止边界，不能在旧日期补造一份“无缺口”日报。
+	h.pinDailyNow(t, boundary.Add(2*time.Hour+time.Second))
 	lateAttempt := h.promqlAttemptID(t, runs["plan-late"])
 	h.dispatchPromQL(t, lateAttempt)
 	if err := h.service.CommitPluginProposal(context.Background(), lateAttempt, "plinth-boot", 1, pluginSuccessProposal(t, h, lateAttempt, runs["plan-late"], "success")); err != nil {
@@ -541,8 +583,8 @@ func TestDailyReportRerunAppendsVersionAndKeepsOldReadable(t *testing.T) {
 	if len(second.Versions) != 2 || second.Versions[0].Version != 2 {
 		t.Fatalf("versions = %+v, want [2 1]", second.Versions)
 	}
-	if second.Latest.Sources[0].Status != "ok" || second.Latest.Totals.ChecksOK != 1 {
-		t.Fatalf("v2 content = %+v, want the late ok fact", second.Latest)
+	if second.Latest.Sources[0].Status != "gap" || second.Latest.Totals.ChecksOK != 0 || second.Latest.Totals.ChecksGap != 1 {
+		t.Fatalf("v2 content = %+v, late check must remain a cutoff gap", second.Latest)
 	}
 	v1After, err := h.service.GetDailyReportVersion(context.Background(), "core-daily", "2026-09-27", 1)
 	if err != nil {
