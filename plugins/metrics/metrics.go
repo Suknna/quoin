@@ -96,8 +96,15 @@ type queryResult = contract.PromQLQueryResult
 var queryTool = plugins.Tool[queryArgs, queryResult]{
 	Name: "thanos_query", Version: "4", FailureMode: plugins.FailureReturnToModel, ResultKind: "thanos_query_result_v1",
 	ProducesEvidence: true, RequiresConnectionGrant: true, Timeout: queryTimeout, RateLimitPerMinute: 60,
-	Description: "执行只读 PromQL 即时查询。必须提供 query；sourceRef 可选，仅在来源有歧义时显式命名来源连接，Quoin 按冻结授权解析连接、范围与必需 labels，结果作为不可变 Evidence 封存。",
-	Handler:     runQueryTool,
+	Grant: &plugins.GrantPlan{
+		Purpose:                  "thanos_query",
+		SourceItemRole:           "metrics_source",
+		SourceRefArgument:        "sourceRef",
+		FreezeExecutionArguments: true,
+	},
+	EvidenceProjector: queryEvidenceProjector,
+	Description:       "执行只读 PromQL 即时查询。必须提供 query；sourceRef 可选，仅在来源有歧义时显式命名来源连接，Quoin 按冻结授权解析连接、范围与必需 labels，结果作为不可变 Evidence 封存。",
+	Handler:           runQueryTool,
 }
 
 func runQueryTool(t *plugins.ToolContext, args queryArgs) (queryResult, error) {
@@ -155,6 +162,80 @@ func runQueryTool(t *plugins.ToolContext, args queryArgs) (queryResult, error) {
 		Truncated: spilled, TotalBytes: totalBytes, TotalLines: totalLines, Output: output,
 		Artifact: artifact,
 	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// frozen result contract + deterministic Evidence projection
+// ---------------------------------------------------------------------------
+
+// parseQueryResult validates the sealed payload against the frozen result
+// schema (RUNTIME-AGENT-008: Quoin validates the fixed result schema in
+// the CompleteToolCall transaction). The frozen shape lives with the tool
+// contract, not with any host authority.
+func parseQueryResult(canonical []byte) (queryResult, error) {
+	var result queryResult
+	if err := json.Unmarshal(canonical, &result); err != nil {
+		return queryResult{}, fmt.Errorf("thanos_query result unparseable: %w", err)
+	}
+	if result.Success {
+		if result.Status == "" || result.ResultType == "" {
+			return queryResult{}, errors.New("thanos_query success result requires status and resultType")
+		}
+		if result.StartedAt == "" || result.FinishedAt == "" {
+			return queryResult{}, errors.New("thanos_query success result requires startedAt and finishedAt")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, result.FinishedAt); err != nil {
+			return queryResult{}, fmt.Errorf("thanos_query finishedAt is not RFC3339: %w", err)
+		}
+		if result.Output == "" {
+			return queryResult{}, errors.New("thanos_query success result requires output")
+		}
+		if result.Truncated != (result.Artifact != nil) {
+			return queryResult{}, errors.New("thanos_query truncated flag must pair with the artifact locator")
+		}
+		if result.Artifact != nil && (result.Artifact.ID == "" || result.Artifact.SHA256 == "" || result.Artifact.SizeBytes < 0) {
+			return queryResult{}, errors.New("thanos_query artifact locator is incomplete")
+		}
+		return result, nil
+	}
+	if result.ErrorCode == "" || result.ErrorDetail == "" {
+		return queryResult{}, errors.New("thanos_query failure result requires errorCode and errorDetail")
+	}
+	if result.StartedAt == "" {
+		result.StartedAt = result.FinishedAt
+	}
+	return result, nil
+}
+
+// queryEvidenceProjector derives the deterministic evidence projection of
+// one succeeded thanos_query result. The frozen arguments are the canonical
+// params; the observation time is the supervisor-observed finish time
+// carried by the validated payload.
+func queryEvidenceProjector(argumentsJSON, payloadJSON []byte, artifactID int64) (plugins.EvidenceProjection, error) {
+	result, err := parseQueryResult(payloadJSON)
+	if err != nil {
+		return plugins.EvidenceProjection{}, err
+	}
+	projection := plugins.EvidenceProjection{
+		ParamsJSON: argumentsJSON,
+		ObservedAt: result.FinishedAt,
+		Integrity:  "complete",
+	}
+	if result.Truncated {
+		if artifactID <= 0 {
+			return plugins.EvidenceProjection{}, errors.New("spilled thanos_query result lacks the committed artifact")
+		}
+		// The payload's artifact locator must close onto the Artifact the
+		// Tool Call completion commits (ARCH-TOOL-003): a locator for any
+		// other artifact is a protocol conflict, never a second authority.
+		if result.Artifact == nil || result.Artifact.ID != strconv.FormatInt(artifactID, 10) {
+			return plugins.EvidenceProjection{}, errors.New("thanos_query artifact locator does not match the committed artifact")
+		}
+		projection.ArtifactID = artifactID
+	} else {
+		projection.ResultJSON = payloadJSON
+	}
+	return projection, nil
 }
 
 // gatewayFailureCode maps gateway-level failures onto the frozen tool error
@@ -400,7 +481,7 @@ type discoverArgs struct {
 // metricsDiscoverObjects is the shared bounded-discovery declaration.
 func metricsDiscoverObjects() []plugins.DiscoverObject {
 	return []plugins.DiscoverObject{
-		{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
+		{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500, GrantPurpose: "config_thanos_query"},
 	}
 }
 
@@ -788,8 +869,8 @@ func (p metricsToolProvider) Tools() []plugins.ToolEntry {
 // inspection plans bind.
 func promQLInspectionTemplates() []plugins.InspectionTemplate {
 	return []plugins.InspectionTemplate{
-		{ID: "promql_instant", Version: "1", Title: "PromQL 即时查询", Description: "以 evidence_at 为观测点执行一次即时向量查询"},
-		{ID: "promql_range", Version: "1", Title: "PromQL 范围查询", Description: "以 evidence_at 为终点执行一次范围查询并保存实际窗口"},
+		{ID: "promql_instant", Version: "1", Title: "PromQL 即时查询", Description: "以 evidence_at 为观测点执行一次即时向量查询", GrantPurpose: "config_thanos_query"},
+		{ID: "promql_range", Version: "1", Title: "PromQL 范围查询", Description: "以 evidence_at 为终点执行一次范围查询并保存实际窗口", GrantPurpose: "config_thanos_query"},
 	}
 }
 

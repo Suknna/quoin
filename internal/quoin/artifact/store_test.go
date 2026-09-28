@@ -93,7 +93,7 @@ func seedToolOwner(t *testing.T, db *sql.DB) (attemptID, toolCallID int64) {
 		t.Fatal(err)
 	}
 	attemptID, _ = attempt.LastInsertId()
-	snapshot, err := db.Exec(`INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,created_at) VALUES(?,'connection_probe_v1','connection-probe-v1',?,?)`, attemptID, strings.Repeat("c", 64), now)
+	snapshot, err := db.Exec(`INSERT INTO attempt_input_snapshots(attempt_id,schema_kind,renderer_version,content_digest,tool_catalog_json,created_at) VALUES(?,'connection_probe_v1','connection-probe-v1',?, ?,?)`, attemptID, strings.Repeat("c", 64), `{"tools":[{"name":"bash","version":"1"}]}`, now)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -572,9 +572,10 @@ func (service *Service) completeModelCallOn(ctx context.Context, tx *execution.T
 				// A recoverable preflight (e.g. ambiguous source) carries NO
 				// normalized execution inputs by design: reading them here
 				// would fail the whole response instead of returning the
-				// preflight question to the model. Only a real grant
-				// resolution freezes execution arguments.
-				if item.definition.Name == "thanos_query" && authorization.PreflightCode == "" {
+				// preflight question to the model. Only a tool whose declared
+				// authorization plan freezes execution arguments (and only a
+				// real grant resolution) reads them back.
+				if item.definition.Grant != nil && item.definition.Grant.FreezeExecutionArguments && authorization.PreflightCode == "" {
 					var executionJSON, executionDigest string
 					if err := tx.QueryRowContext(ctx, `SELECT arguments_json,arguments_digest FROM tool_call_execution_inputs WHERE tool_call_id=?`, toolCallID).Scan(&executionJSON, &executionDigest); err != nil {
 						return nil, fmt.Errorf("%w: normalized execution arguments missing: %v", ErrLedgerDenied, err)

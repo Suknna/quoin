@@ -22,13 +22,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/artifact"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/evidence"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
 // SchemaKind is the frozen input schema identifier for investigation
@@ -165,6 +165,10 @@ type Service struct {
 	// a read fallback — all reads go through runner.Reader().
 	wiredReader     audit.Reader
 	attachmentLimit int64
+	// scopes is the derived source-scope plan (attempt.SourceScopes): the
+	// registry-declared roles and connection kinds rendered into the frozen
+	// input and resolved by grant authorizations (see analysis.Service).
+	scopes attempt.SourceScopeTable
 	// stagedMu guards the bounded in-process idempotency ledger of staging
 	// commands ((principal, client_command_id) → attachment id). Staging
 	// stays in-memory until the transient staged-body handle/seal flow is
@@ -175,11 +179,15 @@ type Service struct {
 }
 
 // NewService builds the investigation service and wires the deterministic
-// input rebuilder plus the tool observation hooks (grant
-// resolution/validation for thanos_query, deterministic Evidence) into the
-// shared attempt machine. The runner owns the writable database; reads go
-// through the narrow reader seam until the composition layer injects a real
-// read-only reader via SetReader (the pool is the compatible default).
+// input rebuilder plus the generic tool observation seams
+// (declaration-driven grant resolution/validation, evidence projections
+// registered from the compiled tool entries) into the shared attempt
+// machine. No per-tool switch lives here: a new trusted plugin tool
+// authorizes and seals Evidence by its own declaration alone. The runner
+// owns the writable database; reads go through the narrow reader seam
+// until the composition layer injects a real read-only reader via
+// SetReader (the pool is the compatible default).
+// nolint:dupl // parallel seam wiring of the analysis/investigation families
 func NewService(db *sql.DB) *Service {
 	now := func() time.Time { return time.Now().UTC() }
 	service := &Service{
@@ -189,31 +197,35 @@ func NewService(db *sql.DB) *Service {
 		streams:         map[int64]*feed{},
 		staged:          map[string]stagedReplay{},
 		attachmentLimit: DefaultAttachmentLimitBytes,
+		scopes:          attempt.NewSourceScopeTable(defaultSourceScopes()),
 	}
 	service.attempts.SnapshotRebuilder = service.RebuildInput
 	service.evidence = evidence.NewService(db)
-	service.evidence.RegisterProjector(thanos.QueryToolName, thanos.EvidenceFor)
-	service.attempts.ToolGrantResolver = func(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, tool attempt.ToolDef) (attempt.ToolResolution, error) {
-		switch tool.Name {
-		case thanos.QueryToolName:
-			// ResolveQueryGrant returns the full resolution (grants + preflight).
-			return thanos.ResolveQueryGrant(ctx, conn, attemptID, toolCallID)
-		default:
-			return attempt.ToolResolution{}, errors.New("tool " + tool.Name + " has no grant resolver")
-		}
-	}
-	service.attempts.ToolGrantValidator = func(ctx context.Context, conn execution.Executor, attemptID, toolCallID int64, tool attempt.ToolDef) error {
-		switch tool.Name {
-		case thanos.QueryToolName:
-			return thanos.ValidateGrantForExecution(ctx, conn, attemptID, toolCallID)
-		default:
-			return errors.New("tool " + tool.Name + " has no grant validator")
-		}
-	}
+	service.evidence.RegisterEntryProjectors(service.attempts.Catalogs.HandlersTable())
 	service.attempts.EvidenceWriter = service.evidence.WriteForToolCall
 	service.runner = execution.NewRunnerWithClock(db, execution.NewRegistry(), audit.NewWriterWithClock(now), now)
 	service.registerOperations()
 	return service
+}
+
+// defaultSourceScopes derives the silent-default source scope plan (the
+// process registry under DefaultEnabled); the application wiring replaces
+// it with the deployment-resolved plan via UseSourceScopes.
+func defaultSourceScopes() []attempt.SourceScope {
+	registry := plugins.Default()
+	enabled, err := registry.ResolveEnabled(nil)
+	if err != nil {
+		panic("default plugin enablement must always resolve: " + err.Error())
+	}
+	return attempt.SourceScopes(registry, enabled)
+}
+
+// UseSourceScopes installs the composition layer's deployment-resolved
+// source scope plan. Enablement is deployment-frozen; there is no runtime
+// switch, and each new attempt freezes the resolved plan it was created
+// with.
+func (service *Service) UseSourceScopes(scopes []attempt.SourceScope) {
+	service.scopes = attempt.NewSourceScopeTable(scopes)
 }
 
 // registerOperations declares every active investigation mutation. There is

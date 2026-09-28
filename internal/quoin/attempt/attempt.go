@@ -108,10 +108,16 @@ type Service struct {
 // freeze (DATA-ATTEMPT-001).
 func ReleaseVersion() string { return releaseVersion }
 
-// NewService builds the attempt service on the product database.
+// NewService builds the attempt service on the product database. The
+// grant resolver/validator default to the generic, declaration-driven
+// authorization (toolgrant.go): every ToolDef carries its own GrantPlan, so
+// a new trusted plugin tool authorizes without any host-side switch. Tests
+// may still stub both seams.
 func NewService(db *sql.DB) *Service {
 	now := func() time.Time { return time.Now().UTC() }
 	service := &Service{db: db, now: now, Catalogs: DefaultCatalogs()}
+	service.ToolGrantResolver = ResolveConnectionGrant
+	service.ToolGrantValidator = ValidateConnectionGrantForExecution
 	service.runner = execution.NewRunnerWithClock(db, execution.NewRegistry(), audit.NewWriterWithClock(now), now)
 	service.registerOperations()
 	return service

@@ -252,7 +252,7 @@ func newSourceObservationRecoveryFixture(t *testing.T) (*sql.DB, *RuntimeService
 		ConnectionAuthModes: []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
 		DefaultEnabled:      true,
 		DiscoverObjects: []plugins.DiscoverObject{
-			{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500},
+			{ObjectType: "target", IdentityLabels: []string{"job", "instance"}, Query: "up", Limit: 500, GrantPurpose: "config_thanos_query"},
 		},
 	}); err != nil {
 		t.Fatal(err)

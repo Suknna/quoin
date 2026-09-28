@@ -15,8 +15,8 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/auth"
 
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
-	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 	"github.com/danielgtaylor/huma/v2"
 )
 
@@ -85,8 +85,9 @@ func mapDomainError(err error) *problemError {
 	if errors.Is(err, inspection.ErrCommandReused) {
 		return problem(http.StatusConflict, "command_reused", "命令标识已用于其它请求，请更换后重试")
 	}
-	if errors.Is(err, thanos.ErrThanosUnavailable) || errors.Is(err, thanos.ErrGrantNotCurrent) {
-		return problem(http.StatusServiceUnavailable, "thanos_unavailable", "尚无可用的 Thanos 指标连接，请先创建并启用连接后重试。")
+	if errors.Is(err, attempt.ErrSourceUnavailable) || errors.Is(err, attempt.ErrGrantNotCurrent) {
+		// 稳定问题码沿用历史值（存量客户端与拒绝记录依赖）；文案泛化为来源连接。
+		return problem(http.StatusServiceUnavailable, "thanos_unavailable", "尚无可用的来源连接，请先创建并启用连接后重试。")
 	}
 	return problem(http.StatusInternalServerError, "internal", "请求无法完成，请稍后重试")
 }

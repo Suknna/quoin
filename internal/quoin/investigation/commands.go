@@ -257,7 +257,7 @@ func (service *Service) freezeInputSnapshot(ctx context.Context, tx writer, inve
 	// ADR-0004: the enabled integrations are ALWAYS the attempt's source-
 	// level authority — frozen as grant-eligible input items and rendered so
 	// the model can name sourceRef.
-	integrations, err := enabledIntegrations(ctx, tx)
+	integrations, err := enabledIntegrations(ctx, tx, service.scopes)
 	if err != nil {
 		return err
 	}
@@ -302,7 +302,7 @@ func (service *Service) freezeInputSnapshot(ctx context.Context, tx writer, inve
 			return err
 		}
 	}
-	written, err := insertSourceLineageItems(ctx, tx, snapshotID, int64(itemCount)+1)
+	written, err := insertSourceLineageItems(ctx, tx, snapshotID, int64(itemCount)+1, service.scopes)
 	if err != nil {
 		return err
 	}

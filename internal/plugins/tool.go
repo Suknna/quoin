@@ -75,10 +75,21 @@ type ToolDef struct {
 	// commits deterministic Evidence together with the Tool Call terminal
 	// state (ARCH-TOOL-005, DATA-EVIDENCE-001).
 	ProducesEvidence bool
+	// EvidenceProjector is the tool's deterministic evidence projection
+	// declared beside the tool contract (single authority). A projector
+	// implies ProducesEvidence; a ProducesEvidence tool without one fails
+	// closed at the evidence write.
+	EvidenceProjector EvidenceProjector
 	// RequiresConnectionGrant marks a tool whose authorization freezes
 	// connection grants inside the Tool Call persistence transaction
 	// (ARCH-INPUT-003); the model never selects the connection.
 	RequiresConnectionGrant bool
+	// Grant is the declarative per-tool-call authorization plan the attempt
+	// core executes generically (ADR-0014): the frozen source scope, the
+	// grant purpose and the disambiguation argument. A plan is mandatory
+	// for RequiresConnectionGrant tools and implies the flag; hosts never
+	// add per-tool resolver or validator switches.
+	Grant *GrantPlan
 	// Parameters, when non-nil, is the complete frozen provider-facing JSON
 	// Schema.
 	Parameters map[string]any
@@ -89,6 +100,52 @@ type ToolDef struct {
 	// sealed result payload (dispatched by ResultSchemaKind).
 	ValidateResult func([]byte) error
 }
+
+// GrantPlan is the declarative per-tool-call authorization strategy of one
+// connection-grant tool. It carries only closed-vocabulary strings and
+// flags; the attempt core implements the strategy generically from the
+// frozen per-attempt catalog items (ADR-0004 source-level authority), so a
+// new grant tool never adds a host-side resolver switch.
+type GrantPlan struct {
+	// Purpose is the attempt_connection_grants.purpose value frozen for
+	// this tool's executions (audit/authorization label).
+	Purpose string
+	// SourceItemRole is the attempt input item role whose frozen
+	// connection_revision_id items are the only grant-eligible sources.
+	// Historical declarations never widen a frozen attempt scope.
+	SourceItemRole string
+	// SourceRefArgument, when non-empty, names the optional
+	// disambiguation argument. Zero or several frozen candidates without
+	// it resolve to recoverable preflight codes — ambiguity is never
+	// resolved by picking the first source.
+	SourceRefArgument string
+	// FreezeExecutionArguments freezes the canonical execution arguments
+	// (arguments with the resolved source stamped into the declared
+	// disambiguation argument) inside the Tool Call persistence
+	// transaction; the dispatched execution must carry exactly these
+	// bytes.
+	FreezeExecutionArguments bool
+}
+
+// EvidenceProjection is the plugin-side evidence fact set of one succeeded
+// observation. Exactly one body position must be set: the inline result
+// JSON or the committed artifact. Host adapters map it onto the evidence
+// authority's row fences unchanged.
+type EvidenceProjection struct {
+	ParamsJSON   []byte
+	ObservedAt   string
+	Integrity    string
+	ResultJSON   []byte // exclusive with ArtifactID
+	ArtifactID   int64
+	WarningsJSON []byte
+	ErrorsJSON   []byte
+}
+
+// EvidenceProjector derives the deterministic evidence projection of one
+// succeeded observation from the frozen tool arguments, the sealed result
+// payload and the committed result artifact. It performs no I/O and never
+// sees credentials.
+type EvidenceProjector func(argumentsJSON, payloadJSON []byte, artifactID int64) (EvidenceProjection, error)
 
 // ProviderParameters renders the complete provider-facing parameter schema of
 // one compiled definition (the shared derivation of every catalog rendering).
@@ -192,6 +249,10 @@ type Tool[A any, R any] struct {
 	// ProducesEvidence / RequiresConnectionGrant mirror the ToolDef flags.
 	ProducesEvidence        bool
 	RequiresConnectionGrant bool
+	// Grant is the declarative authorization plan (see ToolDef.Grant).
+	Grant *GrantPlan
+	// EvidenceProjector is the declared deterministic evidence projection.
+	EvidenceProjector EvidenceProjector
 	// Internal marks tools Quoin's schedulers call directly (probe, discover,
 	// collect): they never render into model catalogs.
 	Internal bool
@@ -253,8 +314,10 @@ func (t Tool[A, R]) Entry(owner string) ToolEntry {
 		ResultSchemaKind:        t.ResultKind,
 		Description:             t.Description,
 		Arguments:               argumentKinds(parameters),
-		ProducesEvidence:        t.ProducesEvidence,
-		RequiresConnectionGrant: t.RequiresConnectionGrant,
+		ProducesEvidence:        t.ProducesEvidence || t.EvidenceProjector != nil,
+		RequiresConnectionGrant: t.RequiresConnectionGrant || t.Grant != nil,
+		Grant:                   t.Grant,
+		EvidenceProjector:       t.EvidenceProjector,
 		Parameters:              parameters,
 		ValidateArguments: func(raw []byte) error {
 			var args A

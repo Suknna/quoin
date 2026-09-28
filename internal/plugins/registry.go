@@ -45,6 +45,10 @@ var (
 	pluginIDPattern   = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 	sourceKindPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 	toolNamePattern   = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	// collectionGrantPurposePattern pins the declared collection grant
+	// vocabulary to the schema closure trigger's generic config_ prefix
+	// convention (trg_attempt_connection_grants_collection_closure).
+	collectionGrantPurposePattern = regexp.MustCompile(`^config_[a-z0-9_-]*$`)
 )
 
 // Registry is one process's frozen plugin assembly.
@@ -303,6 +307,63 @@ func (r *Registry) AlertIdentity(kind string) (string, bool) {
 	return mode, ok && mode != ""
 }
 
+// InspectionTemplate resolves one declared collection template by its
+// frozen (plugin, id, version) identity. Unknown identities fail closed at
+// the caller.
+func (r *Registry) InspectionTemplate(pluginID, templateID, version string) (InspectionTemplate, bool) {
+	plugin, ok := r.Plugin(pluginID)
+	if !ok {
+		return InspectionTemplate{}, false
+	}
+	for _, template := range plugin.InspectionTemplates {
+		if template.ID == templateID && template.Version == version {
+			return template, true
+		}
+	}
+	return InspectionTemplate{}, false
+}
+
+// DiscoverObject resolves one declared discovery object type of one plugin.
+func (r *Registry) DiscoverObject(pluginID, objectType string) (DiscoverObject, bool) {
+	plugin, ok := r.Plugin(pluginID)
+	if !ok {
+		return DiscoverObject{}, false
+	}
+	for _, object := range plugin.DiscoverObjects {
+		if object.ObjectType == objectType {
+			return object, true
+		}
+	}
+	return DiscoverObject{}, false
+}
+
+// IsCollectionGrantPurpose reports whether the grant purpose is declared by
+// any registered plugin's collection contract (inspection templates and
+// discovery objects). Enablement-independent by design: the declared
+// vocabulary is a compile-time fact, so legacy attempts of a since-disabled
+// plugin keep their credential-fulfillment defense.
+func (r *Registry) IsCollectionGrantPurpose(purpose string) bool {
+	for _, plugin := range r.Plugins() {
+		for _, template := range plugin.InspectionTemplates {
+			if template.GrantPurpose == purpose {
+				return true
+			}
+		}
+		for _, object := range plugin.DiscoverObjects {
+			if object.GrantPurpose == purpose {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsCollectionGrantPurpose reports whether the purpose is a declared
+// collection grant purpose of the process default registry.
+func IsCollectionGrantPurpose(purpose string) bool {
+	return defaultRegistry.IsCollectionGrantPurpose(purpose)
+}
+
 // defaultEnabledIDs returns the DefaultEnabled plugin IDs of the frozen
 // assembly (the silent-deployment default of ResolveEnabled).
 func (r *Registry) defaultEnabledIDs() []string {
@@ -345,6 +406,26 @@ func validatePlugin(plugin Plugin) error {
 		}
 		seenEvents[eventType] = true
 	}
+	seenTemplates := map[string]bool{}
+	for _, template := range plugin.InspectionTemplates {
+		if template.ID == "" || seenTemplates[template.ID+"\x00"+template.Version] {
+			return fmt.Errorf("%w: %s has an empty or duplicate inspection template identity %q/%q", ErrInvalidPlugin, plugin.ID, template.ID, template.Version)
+		}
+		seenTemplates[template.ID+"\x00"+template.Version] = true
+		if !collectionGrantPurposePattern.MatchString(template.GrantPurpose) {
+			return fmt.Errorf("%w: %s inspection template %s/%s grant purpose %q must be config_[a-z0-9_-]* (the schema closure trigger's declared vocabulary)", ErrInvalidPlugin, plugin.ID, template.ID, template.Version, template.GrantPurpose)
+		}
+	}
+	seenObjects := map[string]bool{}
+	for _, object := range plugin.DiscoverObjects {
+		if object.ObjectType == "" || seenObjects[object.ObjectType] {
+			return fmt.Errorf("%w: %s has an empty or duplicate discovery object type %q", ErrInvalidPlugin, plugin.ID, object.ObjectType)
+		}
+		seenObjects[object.ObjectType] = true
+		if !collectionGrantPurposePattern.MatchString(object.GrantPurpose) {
+			return fmt.Errorf("%w: %s discovery object %q grant purpose %q must be config_[a-z0-9_-]* (the schema closure trigger's declared vocabulary)", ErrInvalidPlugin, plugin.ID, object.ObjectType, object.GrantPurpose)
+		}
+	}
 	if plugin.AlertNormalizer != nil && plugin.EventSource == nil {
 		return fmt.Errorf("%w: %s provides an alert normalizer without its event source", ErrInvalidPlugin, plugin.ID)
 	}
@@ -381,20 +462,47 @@ func validateToolEntry(entry ToolEntry, pluginID string) error {
 	if entry.Invoke == nil {
 		return fmt.Errorf("%w: plugin %s tool %s carries no invocation", ErrInvalidPlugin, pluginID, def.Name)
 	}
+	// The authorization plan is mandatory for connection-grant tools and
+	// implies the flag; a dangling flag without a plan cannot be executed
+	// generically and fails registration (fail closed at boot).
+	if def.RequiresConnectionGrant && def.Grant == nil {
+		return fmt.Errorf("%w: plugin %s tool %s requires a connection grant but declares no grant plan", ErrInvalidPlugin, pluginID, def.Name)
+	}
+	if def.Grant != nil {
+		if !def.RequiresConnectionGrant {
+			return fmt.Errorf("%w: plugin %s tool %s declares a grant plan without requiring a connection grant", ErrInvalidPlugin, pluginID, def.Name)
+		}
+		if def.Grant.Purpose == "" || def.Grant.SourceItemRole == "" {
+			return fmt.Errorf("%w: plugin %s tool %s grant plan needs a purpose and a source item role", ErrInvalidPlugin, pluginID, def.Name)
+		}
+		// The declared purpose must stay inside the tool-call structural
+		// class of the grant schema: never the core vocabulary, never a
+		// probe purpose (<kind>_probe is derived by the core) and never a
+		// collection purpose (config_ prefix belongs to templates).
+		if !toolNamePattern.MatchString(def.Grant.Purpose) || strings.HasSuffix(def.Grant.Purpose, "_probe") || strings.HasPrefix(def.Grant.Purpose, "config_") {
+			return fmt.Errorf("%w: plugin %s tool %s grant purpose %q must be [a-z][a-z0-9_]* and outside the _probe/config_ classes", ErrInvalidPlugin, pluginID, def.Name, def.Grant.Purpose)
+		}
+	}
+	if def.EvidenceProjector != nil && !def.ProducesEvidence {
+		return fmt.Errorf("%w: plugin %s tool %s declares an evidence projector without producing evidence", ErrInvalidPlugin, pluginID, def.Name)
+	}
 	return nil
 }
 
-// toolDefinitionsEqual compares two manifests by canonical JSON bytes.
+// toolDefinitionsEqual compares two manifests by canonical JSON bytes. The
+// authorization plan is part of the manifest: two contributions under one
+// tool name must authorize identically, not merely render identically.
 func toolDefinitionsEqual(left, right ToolDef) bool {
 	type manifest struct {
 		Name, Version, ExecutionMode, FailureMode, ResultSchemaKind, Description string
 		Parameters                                                               map[string]any
+		Grant                                                                    *GrantPlan
 	}
-	leftBytes, err := json.Marshal(manifest{left.Name, left.Version, left.ExecutionMode, left.FailureMode, left.ResultSchemaKind, left.Description, left.Parameters})
+	leftBytes, err := json.Marshal(manifest{left.Name, left.Version, left.ExecutionMode, left.FailureMode, left.ResultSchemaKind, left.Description, left.Parameters, left.Grant})
 	if err != nil {
 		return false
 	}
-	rightBytes, err := json.Marshal(manifest{right.Name, right.Version, right.ExecutionMode, right.FailureMode, right.ResultSchemaKind, right.Description, right.Parameters})
+	rightBytes, err := json.Marshal(manifest{right.Name, right.Version, right.ExecutionMode, right.FailureMode, right.ResultSchemaKind, right.Description, right.Parameters, right.Grant})
 	if err != nil {
 		return false
 	}

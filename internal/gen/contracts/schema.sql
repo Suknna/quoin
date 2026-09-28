@@ -1302,11 +1302,12 @@ CREATE TABLE attempt_input_items (
 CREATE TABLE attempt_connection_grants (
   id                        INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   attempt_id                INTEGER NOT NULL REFERENCES execution_attempts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  purpose                   TEXT NOT NULL CHECK (purpose IN ('chat_model','embedding','thanos_query','config_thanos_query','model_probe_chat','model_probe_embedding','prometheus_probe','thanos_probe')
-                                               OR (purpose GLOB '*_probe' AND purpose NOT IN ('model_probe_chat','model_probe_embedding'))
-                                               -- 注册制 HTTP 连接种类（ADR-0014）按 <kind>_probe 生成探测 purpose；
-                                               -- 词表在 CHECK 放开，授权闭包仍由 grant/probe/enable 触发器按连接自身 type 精确复核。
-                                              ),
+  -- 声明用途（ADR-0014）：工具调用用途由插件 GrantPlan 声明（小写下划线词，
+  -- 注册期校验），采集用途固定 config_ 前缀，探测用途按 <kind>_probe 派生；
+  -- chat_model/embedding/model_probe_* 是核心自有词。结构类别闭合由下方
+  -- CHECK 按 (created_by_tool_call_id, qualified_probe_result_id) 精确执行，
+  -- 闭包由 grant/enable 触发器按连接自身状态精确复核——词表不再枚举品牌。
+  purpose                   TEXT NOT NULL,
   connection_id             INTEGER NOT NULL REFERENCES connections(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   connection_revision_id    INTEGER NOT NULL REFERENCES connection_revisions(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   credential_generation_id  INTEGER NOT NULL REFERENCES credential_generations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -1314,20 +1315,21 @@ CREATE TABLE attempt_connection_grants (
   created_by_tool_call_id    INTEGER REFERENCES tool_calls(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   created_at                TEXT NOT NULL,
   CHECK (
-      (purpose = 'thanos_query' AND created_by_tool_call_id IS NOT NULL AND qualified_probe_result_id IS NULL)
-      OR (purpose = 'config_thanos_query' AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL)
-      OR (purpose IN ('chat_model','embedding') AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NOT NULL)
-      OR (purpose IN ('model_probe_chat','model_probe_embedding','prometheus_probe','thanos_probe') AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL)
-      OR (purpose GLOB '*_probe' AND purpose NOT IN ('model_probe_chat','model_probe_embedding') AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL))
+      (purpose IN ('chat_model','embedding') AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NOT NULL)
+   OR (purpose IN ('model_probe_chat','model_probe_embedding') AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL)
+   OR (purpose GLOB '*_probe' AND purpose NOT IN ('model_probe_chat','model_probe_embedding') AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL)
+   OR (purpose GLOB 'config_*' AND purpose NOT GLOB '*_probe' AND created_by_tool_call_id IS NULL AND qualified_probe_result_id IS NULL)
+   OR (purpose NOT IN ('chat_model','embedding','model_probe_chat','model_probe_embedding')
+       AND purpose NOT GLOB '*_probe' AND purpose NOT GLOB 'config_*'
+       AND created_by_tool_call_id IS NOT NULL AND qualified_probe_result_id IS NULL))
 ) STRICT;
 CREATE UNIQUE INDEX ux_attempt_connection_grant_binding ON attempt_connection_grants
   (attempt_id, purpose, connection_id, connection_revision_id, credential_generation_id);
--- PromQL collection has one deterministic selected metrics locator. A credential
--- rotation must not leave a Queued Attempt with competing historical grants; it
--- must re-freeze a fresh Attempt. The legacy purpose name is wire-stable and
--- covers both Prometheus and Thanos connections.
-CREATE UNIQUE INDEX ux_attempt_connection_grant_config_thanos_attempt ON attempt_connection_grants (attempt_id)
-  WHERE purpose = 'config_thanos_query';
+-- 插件采集（巡检/发现）每个 Attempt 恰好一个确定性采集授权。凭据轮换不得给
+-- 排队 Attempt 留下竞争的历史 grant；必须重冻结新 Attempt。config_ 前缀是插件
+-- 声明采集用途的封闭类别（schema 闭包触发器同一词表）。
+CREATE UNIQUE INDEX ux_attempt_connection_grant_collection_attempt ON attempt_connection_grants (attempt_id)
+  WHERE purpose GLOB 'config_*';
 
 CREATE TABLE model_calls (
   id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
@@ -2026,23 +2028,25 @@ CREATE TRIGGER trg_alert_observations_no_update BEFORE UPDATE ON alert_observati
 BEGIN SELECT RAISE(ABORT, 'alert_observations is append-only'); END;
 CREATE TRIGGER trg_alert_observations_no_delete BEFORE DELETE ON alert_observations
 BEGIN SELECT RAISE(ABORT, 'alert_observations is append-only'); END;
--- thanos_query grant 只有在 Attempt 快照冻结了对应 metrics_source 来源项、且被授
--- revision 恰为该来源当前启用修订时才可创建（ADR-0004 来源级授权；business_system
--- 授权模型已随 ADR-0012 整域退役，不按"全来源放行"处理）。
-CREATE TRIGGER trg_attempt_connection_grants_thanos_query_source BEFORE INSERT ON attempt_connection_grants
-WHEN NEW.purpose = 'thanos_query' AND NOT EXISTS (
+-- 工具调用 grant（created_by_tool_call_id 非空，任意插件工具声明用途）只有在
+-- Attempt 快照冻结了对应来源谱系项、且被授 revision 恰为该来源当前启用修订时
+-- 才可创建（ADR-0004 来源级授权；business_system 授权模型已随 ADR-0012 整域
+-- 退役，不按"全来源放行"处理；声明的 scope 角色校验由授权解析器执行，本
+-- 触发器是结构层面的修订闭合防线，不认识任何品牌用途）。
+CREATE TRIGGER trg_attempt_connection_grants_tool_call_source BEFORE INSERT ON attempt_connection_grants
+WHEN NEW.created_by_tool_call_id IS NOT NULL AND NOT EXISTS (
   SELECT 1 FROM attempt_input_snapshots snapshot
   JOIN attempt_input_items source_item ON source_item.snapshot_id=snapshot.id
-    AND source_item.item_role='metrics_source'
+    AND source_item.connection_revision_id IS NOT NULL
     AND source_item.connection_revision_id=NEW.connection_revision_id
   JOIN connection_revisions r ON r.id=NEW.connection_revision_id
   JOIN connections c ON c.id=r.connection_id AND c.id=NEW.connection_id
     AND c.enabled=1 AND c.current_revision_id=r.id
   WHERE snapshot.attempt_id=NEW.attempt_id
 )
-BEGIN SELECT RAISE(ABORT, 'standalone metrics query grant requires its exact frozen metrics_source revision, currently enabled'); END;
-CREATE TRIGGER trg_attempt_connection_grants_config_thanos_closure BEFORE INSERT ON attempt_connection_grants
-WHEN NEW.purpose = 'config_thanos_query' AND NOT EXISTS (
+BEGIN SELECT RAISE(ABORT, 'tool call grant requires its exact frozen source revision, currently enabled'); END;
+CREATE TRIGGER trg_attempt_connection_grants_collection_closure BEFORE INSERT ON attempt_connection_grants
+WHEN NEW.created_by_tool_call_id IS NULL AND NEW.purpose LIKE 'config\_%' ESCAPE '\' AND NOT EXISTS (
   SELECT 1 FROM execution_attempts a
   WHERE a.id = NEW.attempt_id
     AND a.attempt_type = 'inspection_collection'
@@ -2056,7 +2060,7 @@ WHEN NEW.purpose = 'config_thanos_query' AND NOT EXISTS (
       ))
     )
 )
-BEGIN SELECT RAISE(ABORT, 'config metrics query grant requires one Queued Observation or Running Inspection Run collection Attempt'); END;
+BEGIN SELECT RAISE(ABORT, 'declared collection grant requires one Queued Observation or Running Inspection Run collection Attempt'); END;
 CREATE TRIGGER trg_evidence_no_update BEFORE UPDATE ON evidence
 BEGIN SELECT RAISE(ABORT, 'evidence is append-only'); END;
 CREATE TRIGGER trg_evidence_no_delete BEFORE DELETE ON evidence
@@ -3241,12 +3245,13 @@ WHEN NOT EXISTS (
         JOIN inspection_runs ir ON ir.id = a.scope_id AND ir.plan_id IS NOT NULL AND ir.connection_id = r.connection_id
         WHERE r.id = NEW.connection_revision_id))
       -- Agent 冻结的来源绑定：Attempt 创建时读取当前启用的来源修订精确冻结，
-      -- item_role 决定平台类型；不依赖任何已存在的 grant（tool grant 发生在
+      -- item_role 是插件声明的作用域角色（宿主不维护角色→类型表），修订必须
+      -- 是该连接当前启用的修订；不依赖任何已存在的 grant（tool grant 发生在
       -- 之后的 ModelToolCall，二者无顺序循环）。后续 grant 必须匹配该冻结项。
-      OR (NEW.item_role = 'metrics_source' AND EXISTS (
+      OR (EXISTS (
         SELECT 1 FROM connection_revisions r
         JOIN connections c ON c.id = r.connection_id
-          AND c.type IN ('prometheus','thanos') AND c.enabled = 1 AND c.current_revision_id = r.id
+          AND c.enabled = 1 AND c.current_revision_id = r.id
         WHERE r.id = NEW.connection_revision_id))
     )))
 BEGIN SELECT RAISE(ABORT, 'attempt input items may only be frozen for the same Queued Attempt and valid fixed-mode source'); END;
@@ -3443,9 +3448,7 @@ WHEN NOT EXISTS (
       (a.attempt_type = 'connection_probe' AND a.scope_type = 'connection' AND a.scope_id = c.id
         AND NEW.qualified_probe_result_id IS NULL
         AND ((c.type = 'model_provider' AND NEW.purpose IN ('model_probe_chat','model_probe_embedding'))
-          OR (c.type = 'prometheus' AND NEW.purpose = 'prometheus_probe')
-          OR (c.type = 'thanos' AND NEW.purpose = 'thanos_probe')
-          OR (c.type NOT IN ('model_provider','prometheus','thanos') AND NEW.purpose = c.type || '_probe')))
+          OR (c.type <> 'model_provider' AND NEW.purpose = c.type || '_probe')))
       OR (c.enabled = 1 AND c.revalidation_required = 0 AND (
         (NEW.purpose IN ('chat_model','embedding') AND c.type = 'model_provider'
           AND EXISTS (
@@ -3459,15 +3462,22 @@ WHEN NOT EXISTS (
               AND m.cancellation_observed = 1 AND m.usage_observed = 1
               AND (NEW.purpose <> 'embedding' OR m.embedding_supported = 1))
         )
-        OR (NEW.purpose = 'thanos_query' AND c.type IN ('prometheus','thanos') AND NEW.qualified_probe_result_id IS NULL)
-        OR (NEW.purpose = 'config_thanos_query' AND c.type IN ('prometheus','thanos') AND NEW.qualified_probe_result_id IS NULL
-            AND a.attempt_type = 'inspection_collection' AND (
-              a.scope_type = 'observation_run'
-              OR (a.scope_type = 'run_check' AND EXISTS (
-                SELECT 1 FROM inspection_runs r
-                JOIN inspection_run_checks check_definition ON check_definition.run_id = r.id AND check_definition.check_key = a.check_key
-                WHERE r.id = a.scope_id AND r.state = 'Running' AND r.plan_id IS NOT NULL
-              ))
+        -- 声明用途（ADR-0014）：工具调用 purpose 由插件 GrantPlan 声明，采集
+        -- purpose 固定 config_ 前缀；两者共用同一结构围栏——连接启用、且冻结
+        -- 的 (revision, generation) 对仍是当前指针，不认识任何品牌或类型表。
+        OR (NEW.purpose NOT IN ('chat_model','embedding','model_probe_chat','model_probe_embedding')
+            AND NEW.purpose NOT GLOB '*_probe'
+            AND NEW.qualified_probe_result_id IS NULL
+            AND (
+              (NEW.purpose NOT GLOB 'config_*' AND NEW.created_by_tool_call_id IS NOT NULL)
+              OR (NEW.purpose GLOB 'config_*' AND NEW.created_by_tool_call_id IS NULL
+                  AND a.attempt_type = 'inspection_collection' AND (
+                    a.scope_type = 'observation_run'
+                    OR (a.scope_type = 'run_check' AND EXISTS (
+                      SELECT 1 FROM inspection_runs r
+                      JOIN inspection_run_checks check_definition ON check_definition.run_id = r.id AND check_definition.check_key = a.check_key
+                      WHERE r.id = a.scope_id AND r.state = 'Running' AND r.plan_id IS NOT NULL
+                    ))))
             ))
       ))
     )
@@ -3532,10 +3542,17 @@ BEGIN SELECT RAISE(ABORT, 'model call context item must belong to the same Attem
 
 -- Tool Call 在执行前以 pending 行落库；model_call、Attempt、provider ID、ordinal 与 grant 均不可混淆。
 -- The durable ledger is also a contract boundary: a direct SQL writer cannot
--- resurrect retired tool names. Per-agent catalog membership is enforced by
--- Quoin before this insert; this trigger seals the global name set.
+-- resurrect a name (and version) outside THIS attempt's frozen catalog — the
+-- per-agent seal is structural, so a new plugin tool joins by declaration
+-- alone while retired vocabularies can never route again.
 CREATE TRIGGER trg_tool_call_fixed_name BEFORE INSERT ON tool_calls
-WHEN NEW.tool_name NOT IN ('bash','read','write','grep','artifact_read','artifact_grep','alerts_recent','thanos_query','knowledge_search','knowledge_get','daily_report_get')
+WHEN NOT EXISTS (
+  SELECT 1
+  FROM attempt_input_snapshots s, json_each(COALESCE(s.tool_catalog_json,'{}'), '$.tools') tool
+  WHERE s.attempt_id = NEW.attempt_id
+    AND json_extract(tool.value, '$.name') = NEW.tool_name
+    AND json_extract(tool.value, '$.version') = NEW.tool_version
+)
 BEGIN SELECT RAISE(ABORT, 'tool call name is not in the frozen catalog'); END;
 CREATE TRIGGER trg_tool_call_closure BEFORE INSERT ON tool_calls
 WHEN NEW.status <> 'pending' OR NOT EXISTS (
@@ -3562,7 +3579,13 @@ CREATE TRIGGER trg_tool_call_connection_grant_closure BEFORE INSERT ON tool_call
 WHEN NOT EXISTS (
   SELECT 1 FROM tool_calls t JOIN attempt_connection_grants g ON g.id = NEW.connection_grant_id
   WHERE t.id = NEW.tool_call_id AND g.attempt_id = t.attempt_id
-    AND t.tool_name = 'thanos_query' AND g.purpose = 'thanos_query'
+    -- The association closes structurally: the grant belongs to the call's
+    -- attempt and carries a declared (non-core, non-probe, non-collection)
+    -- tool purpose. Any plugin's grant-scoped tool binds the same way, and
+    -- a reused per-attempt grant (whose originating call differs) binds the
+    -- same declared purpose.
+    AND g.purpose NOT IN ('chat_model','embedding','model_probe_chat','model_probe_embedding')
+    AND g.purpose NOT GLOB '*_probe' AND g.purpose NOT GLOB 'config_*'
 )
 BEGIN SELECT RAISE(ABORT, 'tool call connection grant must match the same Attempt and typed external tool'); END;
 CREATE TRIGGER trg_execution_attempts_success_requires_closed_calls BEFORE UPDATE OF state ON execution_attempts

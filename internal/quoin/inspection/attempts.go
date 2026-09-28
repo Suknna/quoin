@@ -43,7 +43,7 @@ func (s *Service) Attempts() *attempt.Service {
 
 // QueuedPromQLAttempts returns supervisor-only run_check collection work:
 // the plan-run children frozen in inspection_run_checks (supervisor-executed,
-// config_thanos_query granted).
+// template-declared connection grants).
 func (s *Service) QueuedPromQLAttempts(ctx context.Context) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT a.id FROM execution_attempts a
@@ -134,7 +134,7 @@ func (s *Service) rebuildPluginInput(ctx context.Context, attemptID int64) ([]by
 	err := s.db.QueryRowContext(ctx, `
 		SELECT a.scope_id, a.check_key, c.plugin_id, c.template_id, c.template_version, c.params_json, c.target_json,
 		       r.evidence_at, r.frozen_scope_json,
-		       (SELECT id FROM attempt_connection_grants WHERE attempt_id=a.id AND purpose='config_thanos_query')
+		       (SELECT id FROM attempt_connection_grants WHERE attempt_id=a.id)
 		FROM execution_attempts a
 		JOIN inspection_runs r ON r.id=a.scope_id AND r.plan_id IS NOT NULL
 		JOIN inspection_run_checks c ON c.run_id=r.id AND c.check_key=a.check_key
@@ -144,7 +144,7 @@ func (s *Service) rebuildPluginInput(ctx context.Context, attemptID int64) ([]by
 		return nil, err
 	}
 	if !grant.Valid {
-		return nil, fmt.Errorf("attempt %d has no frozen config_thanos_query grant", attemptID)
+		return nil, fmt.Errorf("attempt %d has no frozen connection grant", attemptID)
 	}
 	var params map[string]any
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {

@@ -31,6 +31,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/Suknna/quoin/internal/contract"
 	"github.com/Suknna/quoin/internal/plugins"
@@ -264,6 +265,25 @@ func (catalogs *Catalogs) CatalogFor(agentVersion string) (*FrozenCatalog, error
 // this assembly.
 func (catalogs *Catalogs) Implementation(name string) (ToolDef, bool) {
 	return catalogs.Implementations.Lookup(name)
+}
+
+// HandlersTable returns the plugin tool dispatch table as a deterministic
+// entry list (sorted by tool name) for generic registration consumers
+// (evidence projectors, assembly checks).
+func (catalogs *Catalogs) HandlersTable() []plugins.ToolEntry {
+	if catalogs == nil || catalogs.Handlers == nil {
+		return nil
+	}
+	names := make([]string, 0, len(catalogs.Handlers))
+	for name := range catalogs.Handlers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	entries := make([]plugins.ToolEntry, 0, len(names))
+	for _, name := range names {
+		entries = append(entries, catalogs.Handlers[name])
+	}
+	return entries
 }
 
 // InstalledDefinition verifies a frozen catalog entry against this

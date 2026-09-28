@@ -20,7 +20,6 @@ import (
 
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/execution"
-	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
 
 // seedSourceOccurrence inserts one firing occurrence（ADR-0012 归一语义列随
@@ -57,7 +56,7 @@ func pendingSourceThanosCall(t *testing.T, db *sql.DB, attemptID, modelCallID, c
 	response, err := json.Marshal(map[string]any{
 		"assistantText": "", "finishReason": "tool_calls",
 		"tool_calls": []any{map[string]any{
-			"id": "raw-source-thanos-" + strconv.FormatInt(callSeq, 10), "name": thanos.QueryToolName,
+			"id": "raw-source-thanos-" + strconv.FormatInt(callSeq, 10), "name": "thanos_query",
 			"arguments": json.RawMessage(arguments),
 		}},
 	})
@@ -72,7 +71,7 @@ func pendingSourceThanosCall(t *testing.T, db *sql.DB, attemptID, modelCallID, c
 	}
 	insert, err := db.Exec(`INSERT INTO tool_calls(attempt_id,model_call_id,call_seq,tool_index,provider_tool_call_id,tool_name,tool_version,arguments_json,arguments_digest,execution_mode,failure_mode,status,created_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?)`,
-		attemptID, modelCallID, callSeq, 0, "raw-source-thanos-"+strconv.FormatInt(callSeq, 10), thanos.QueryToolName, thanos.QueryToolVersion, arguments, sha256Hex(arguments), "quoin_routed", "return_to_model", time.Now().UTC().Format(time.RFC3339Nano))
+		attemptID, modelCallID, callSeq, 0, "raw-source-thanos-"+strconv.FormatInt(callSeq, 10), "thanos_query", "4", arguments, sha256Hex(arguments), "quoin_routed", "return_to_model", time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +84,7 @@ func pendingSourceThanosCall(t *testing.T, db *sql.DB, attemptID, modelCallID, c
 // a dedicated registered test operation, never on a raw pool connection.
 func resolveThanosCall(t *testing.T, db *sql.DB, service *Service, attemptID, toolCallID int64) (attempt.ToolResolution, error) {
 	t.Helper()
-	tool, ok := attempt.DefaultCatalogs().Implementation(thanos.QueryToolName)
+	tool, ok := attempt.DefaultCatalogs().Implementation("thanos_query")
 	if !ok {
 		t.Fatal("thanos_query missing from the assembled implementation table")
 	}
@@ -391,7 +390,7 @@ func TestThanosFrozenListStaysNarrowAfterNewEnablement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolution.PreflightCode != thanos.PreflightTargetNotFound || !strings.Contains(resolution.PreflightDetail, frozenName) {
+	if resolution.PreflightCode != attempt.PreflightTargetNotFound || !strings.Contains(resolution.PreflightDetail, frozenName) {
 		t.Fatalf("resolution=%+v, want target_not_found listing frozen candidate %q", resolution, frozenName)
 	}
 

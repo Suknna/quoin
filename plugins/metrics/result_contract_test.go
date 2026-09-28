@@ -1,4 +1,4 @@
-package thanos
+package metrics
 
 import (
 	"encoding/json"
@@ -20,7 +20,7 @@ func TestSharedQueryResultPreservesFrozenJSON(t *testing.T) {
 	if string(encoded) != want {
 		t.Fatalf("frozen result changed: %s", encoded)
 	}
-	if _, err := ParseResult(encoded); err != nil {
+	if _, err := parseQueryResult(encoded); err != nil {
 		t.Fatalf("Quoin cannot consume produced result: %v", err)
 	}
 }
