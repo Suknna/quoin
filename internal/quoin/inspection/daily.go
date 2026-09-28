@@ -186,6 +186,10 @@ type DailyReportDetail struct {
 	Contributions    []dailyContribution         `json:"contributions"`
 	Versions         []DailyReportVersionSummary `json:"versions"`
 	Latest           *dailyReportContent         `json:"latest,omitempty"`
+	// Pending means facts are sealed but the Agent attempt has not been
+	// created yet (e.g. no model). Otherwise this is the actual Attempt state
+	// for the latest sealed fact version, never a guess from older analyses.
+	AnalysisAttemptState string `json:"analysisAttemptState,omitempty"`
 }
 
 // CreateDailyReportConfig idempotently creates a daily report config through
@@ -1435,6 +1439,17 @@ func (s *Service) GetDailyReport(ctx context.Context, configKey, localDate strin
 			return DailyReportDetail{}, err
 		}
 		detail.Latest = &content
+		err = reader.QueryRowContext(ctx, `
+			SELECT a.state FROM execution_attempts a
+			JOIN attempt_input_snapshots s ON s.attempt_id=a.id
+			WHERE a.scope_type='daily_report' AND a.attempt_type='inspection_daily_analysis'
+			  AND a.scope_id=? AND s.inspection_report_version=?
+			ORDER BY a.id DESC LIMIT 1`, reportID, versions[0].Version).Scan(&detail.AnalysisAttemptState)
+		if errors.Is(err, sql.ErrNoRows) {
+			detail.AnalysisAttemptState = "Pending"
+		} else if err != nil {
+			return DailyReportDetail{}, err
+		}
 	}
 	return detail, nil
 }

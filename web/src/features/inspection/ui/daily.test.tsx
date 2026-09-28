@@ -69,6 +69,7 @@ const sealedSummary = {
 const sealedDetail = {
 	...sealedSummary,
 	configRowVersion: 1, cutoffAt: "2026-09-28T02:00:00Z",
+	analysisAttemptState: "Pending" as const,
 	contributions: [
 		{ planKey: "prom-up", displayName: "Prom 连通巡检", connectionName: "lab-prometheus", enabled: true, sourceEnabled: true },
 		{ planKey: "legacy", enabled: false, sourceEnabled: false, missing: true },
@@ -163,10 +164,18 @@ describe("DailyReportDetailView", () => {
 		expect(screen.getAllByText("有缺口").length).toBeGreaterThan(0);
 		expect(screen.getAllByText("计划不存在").length).toBeGreaterThan(0);
 		expect(screen.getByText(/暂无 AI 总结/)).toBeInTheDocument();
+		expect(screen.getByText(/分析任务待创建/)).toBeInTheDocument();
 		expect(screen.getAllByText("采证完整").length).toBeGreaterThan(0);
 		expect(screen.getByText(/末值 1/)).toBeInTheDocument();
 		fireEvent.click(screen.getByRole("button", { name: "证据 #33" }));
 		expect(openEvidence).toHaveBeenCalledWith("33");
+	});
+
+	it("shows a failed Agent attempt without changing the sealed facts", async () => {
+		dailyApi.getDailyReport.mockResolvedValue({ ...sealedDetail, analysisAttemptState: "Failed" });
+		render(<DailyReportDetailView configKey="ops-daily" localDate="2026-09-27" suspended={false} navigate={vi.fn()} />);
+		expect(await screen.findByText(/分析失败；可重新生成版本/)).toBeInTheDocument();
+		expect(screen.getByText("本报告存在缺口")).toBeInTheDocument();
 	});
 
 	it("shows the Agent's versioned summary separately from the immutable facts", async () => {

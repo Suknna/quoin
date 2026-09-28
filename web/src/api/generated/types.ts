@@ -2396,6 +2396,11 @@ export interface components {
         DailyReportDetail: components["schemas"]["DailyReportSummary"] & {
             configRowVersion: number;
             cutoffAt: components["schemas"]["Timestamp"];
+            /**
+             * @description 最新封存事实版本的 Agent Attempt 状态；Pending 表示尚未创建 Attempt（如模型未就绪），与事实封存状态独立。
+             * @enum {string}
+             */
+            analysisAttemptState?: "Pending" | "Queued" | "Assigned" | "Running" | "Cancelling" | "Succeeded" | "Failed" | "Cancelled" | "Interrupted";
             contributions: components["schemas"]["DailyReportContribution"][];
             versions: {
                 version: number;

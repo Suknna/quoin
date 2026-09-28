@@ -93,6 +93,10 @@ func TestDailyAnalysisQueuesAfterSealAndRetriesWithoutModel(t *testing.T) {
 	if attempts != 0 {
 		t.Fatalf("missing model must not create an analysis attempt, got %d", attempts)
 	}
+	pendingReport, err := h.service.GetDailyReport(context.Background(), "core-daily", "2026-09-27")
+	if err != nil || pendingReport.AnalysisAttemptState != "Pending" {
+		t.Fatalf("model-absent report status=%q err=%v", pendingReport.AnalysisAttemptState, err)
+	}
 
 	// 模型恢复后同一重试路径创建 Queued 分析，冻结输入/目录/授权齐全。
 	h.seedModelProvider(t)
@@ -106,6 +110,10 @@ func TestDailyAnalysisQueuesAfterSealAndRetriesWithoutModel(t *testing.T) {
 	}
 	if state != "Queued" || agentVersion != "inspection-daily-analysis-v2" {
 		t.Fatalf("analysis attempt = %s/%s", state, agentVersion)
+	}
+	queuedReport, err := h.service.GetDailyReport(context.Background(), "core-daily", "2026-09-27")
+	if err != nil || queuedReport.AnalysisAttemptState != "Queued" {
+		t.Fatalf("queued report status=%q err=%v", queuedReport.AnalysisAttemptState, err)
 	}
 	var schemaKind string
 	var reportVersion int64

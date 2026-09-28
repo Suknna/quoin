@@ -168,6 +168,19 @@ function SealedContent({ content, navigate, openEvidence }: { content: DailyRepo
 	);
 }
 
+function pendingAnalysisText(state?: DailyReportDetail["analysisAttemptState"]): string {
+	switch (state) {
+		case "Pending": return "分析任务待创建；模型未就绪时会自动重试。";
+		case "Queued":
+		case "Assigned":
+		case "Running":
+		case "Cancelling": return "分析任务正在执行，请稍后刷新。";
+		case "Failed": return "分析失败；可重新生成版本。";
+		case "Interrupted": return "分析中断；可重新生成版本。";
+		default: return "请稍后刷新。";
+	}
+}
+
 /**
  * 日报详情页：冻结身份、参与计划、版本列表与最新封存内容。
  * 采集中（尚未封存）时明确呈现“等待采证结束”，绝不预填结论。
@@ -414,7 +427,7 @@ export function DailyReportDetailView({
 							<p className="text-xs text-muted-foreground">AI 总结是分析意见，不代表巡检事实已验证健康。</p>
 						</div>
 					) : (
-						<p className="text-sm text-muted-foreground">暂无 AI 总结。模型不可用或分析失败时，以上封存事实与缺口仍可阅读；请稍后刷新。</p>
+						<p className="text-sm text-muted-foreground">暂无 AI 总结。{pendingAnalysisText(detail.analysisAttemptState)}以上封存事实与缺口仍可阅读。</p>
 					)}
 					{analysisVersions.length > 0 && (
 						<div className="space-y-2">
