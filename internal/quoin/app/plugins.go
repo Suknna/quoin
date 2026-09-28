@@ -93,37 +93,34 @@ func (application *apiServer) integrationsPlugins(ctx context.Context, input *in
 	output := &integrationsPluginsOutput{CacheControl: "no-store", Pragma: "no-cache"}
 	output.Body.Items = []pluginCatalogItem{}
 	for _, plugin := range application.pluginRegistry.Plugins() {
-		// ADR-0011 capability vocabulary: event_source (inbound gateway
-		// capability), tools (outbound model tools), discover/inspection_
-		// templates (declarative catalogs the schedulers consume).
-		var capabilities []string
-		var sourceKind string
-		if plugin.EventSource != nil {
-			capabilities = append(capabilities, "event_source")
-			sourceKind = plugin.EventSource.Kind()
-		}
-		if plugin.AlertNormalizer != nil {
-			capabilities = append(capabilities, "alert_normalizer")
-		}
-		if plugin.Tools != nil {
-			capabilities = append(capabilities, "tools")
-		}
-		if len(plugin.DiscoverObjects) > 0 {
-			capabilities = append(capabilities, "discover")
-		}
-		if len(plugin.InspectionTemplates) > 0 {
-			capabilities = append(capabilities, "inspection_templates")
-		}
-		sort.Strings(capabilities)
-		output.Body.Items = append(output.Body.Items, pluginCatalogItem{
-			ID:           plugin.ID,
-			SourceKind:   sourceKind,
-			DisplayName:  plugin.DisplayName,
-			Description:  plugin.Description,
-			Enabled:      plugins.IsEnabled(enabled, plugin.ID),
-			Version:      plugin.Version,
-			Capabilities: capabilities,
-		})
+		output.Body.Items = append(output.Body.Items, pluginCatalogEntry(plugin, plugins.IsEnabled(enabled, plugin.ID)))
 	}
 	return output, nil
+}
+
+func pluginCatalogEntry(plugin plugins.Plugin, enabled bool) pluginCatalogItem {
+	// A plugin ID is not necessarily its inbound protocol kind. These two
+	// identities must remain separate at the management API boundary.
+	item := pluginCatalogItem{
+		ID: plugin.ID, DisplayName: plugin.DisplayName, Description: plugin.Description,
+		Enabled: enabled, Version: plugin.Version, Capabilities: []string{},
+	}
+	if plugin.EventSource != nil {
+		item.SourceKind = plugin.EventSource.Kind()
+		item.Capabilities = append(item.Capabilities, "event_source")
+	}
+	if plugin.AlertNormalizer != nil {
+		item.Capabilities = append(item.Capabilities, "alert_normalizer")
+	}
+	if plugin.Tools != nil {
+		item.Capabilities = append(item.Capabilities, "tools")
+	}
+	if len(plugin.DiscoverObjects) > 0 {
+		item.Capabilities = append(item.Capabilities, "discover")
+	}
+	if len(plugin.InspectionTemplates) > 0 {
+		item.Capabilities = append(item.Capabilities, "inspection_templates")
+	}
+	sort.Strings(item.Capabilities)
+	return item
 }
