@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceModuleProps } from "@/app/module-contract";
-import { alertmanagerReceiverYaml } from "./api";
+import { alertmanagerReceiverYaml, receiverUrlForKind } from "./api";
 import { useIntegrationsModule } from "./ui";
 
 async function pickBearerAuth() {
@@ -595,6 +595,231 @@ describe("integration workbench", () => {
 				String(url).endsWith("/api/v1/connections"),
 			),
 		).toHaveLength(0);
+	});
+
+	describe("generic event-source plugins", () => {
+		// #110: 任何带 event_source 能力的已启用目录插件（非品牌专用表单）都走
+		// 通用来源表单；这里用一枚合成插件 ID 验证目录驱动的路由与生命周期。
+		const SYNTHETIC_ID = "synthetic-hook";
+		const syntheticPlugin = {
+			id: SYNTHETIC_ID,
+			displayName: "合成事件源",
+			description: "用于验收的通用事件接入插件",
+			enabled: true,
+			version: "1",
+			capabilities: ["event_source"],
+		};
+
+		function mockCatalog(items: unknown[]) {
+			return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				const url = String(input);
+				if (url.endsWith("/api/v1/integrations/plugins"))
+					return Response.json({ items });
+				return Response.json({ message: "unexpected request" }, { status: 500 });
+			});
+		}
+
+		it("derives the per-kind public receiver URL from the configured endpoint", () => {
+			expect(
+				receiverUrlForKind(
+					"https://quoin.example.test/stele/webhook/alertmanager",
+					SYNTHETIC_ID,
+				),
+			).toBe(`https://quoin.example.test/stele/webhook/${SYNTHETIC_ID}`);
+			expect(
+				receiverUrlForKind("https://quoin.example.test/stele", SYNTHETIC_ID),
+			).toBe(`https://quoin.example.test/stele/webhook/${SYNTHETIC_ID}`);
+		});
+
+		it("routes a catalog event-source plugin to the generic creation form with its display name", async () => {
+			mockCatalog([
+				syntheticPlugin,
+				{
+					id: "prometheus",
+					displayName: "Prometheus",
+					description: "指标",
+					enabled: true,
+					version: "1",
+					capabilities: ["discover", "tools"],
+				},
+			]);
+			render(
+				<IntegrationView route={`/settings/platform/integrations/${SYNTHETIC_ID}`} />,
+			);
+			expect(
+				await screen.findByRole("heading", { name: "配置 合成事件源" }),
+			).toBeInTheDocument();
+			expect(screen.getByLabelText("来源键")).toBeEnabled();
+		});
+
+		it("creates a generic source with the plugin kind as protocol and reveals the kind receiver URL without YAML", async () => {
+			const fetchMock = vi
+				.spyOn(globalThis, "fetch")
+				.mockImplementation(async (input, init) => {
+					const url = String(input);
+					if (url.endsWith("/api/v1/integrations/plugins"))
+						return Response.json({ items: [syntheticPlugin] });
+					if (url.endsWith("/api/v1/alert-sources/receiver-config"))
+						return Response.json({
+							publicReceiverUrl:
+								"https://quoin.example.test/stele/webhook/alertmanager",
+						});
+					if (
+						url === "/api/v1/alert-sources" &&
+						init?.method === "POST"
+					)
+						return Response.json(
+							{ revealHandle: "one-time-handle", revealAvailable: true },
+							{ status: 201 },
+						);
+					if (url.endsWith("/api/v1/alert-sources/credentials/reveal"))
+						return Response.json({
+							credentialId: "9",
+							bearerToken: "secret-token",
+						});
+					return Response.json(
+						{ message: "unexpected request" },
+						{ status: 500 },
+					);
+				});
+			render(
+				<IntegrationView route={`/settings/platform/integrations/${SYNTHETIC_ID}`} />,
+			);
+			await screen.findByRole("heading", { name: "配置 合成事件源" });
+			fireEvent.change(screen.getByLabelText("来源键"), {
+				target: { value: "edge-site" },
+			});
+			fireEvent.click(
+				screen.getByRole("button", { name: "创建并显示一次凭据" }),
+			);
+			await waitFor(() =>
+				expect(screen.getByRole("dialog")).toBeInTheDocument(),
+			);
+			expect(screen.getByDisplayValue("secret-token")).toBeInTheDocument();
+			expect(
+				screen.getByDisplayValue(
+					`https://quoin.example.test/stele/webhook/${SYNTHETIC_ID}`,
+				),
+			).toBeInTheDocument();
+			// receiver YAML 是 Alertmanager 专用产物；通用来源不出现。
+			expect(
+				screen.queryByText("Alertmanager receiver YAML"),
+			).not.toBeInTheDocument();
+			const payload = JSON.parse(
+				String(
+					fetchMock.mock.calls.find(
+						([url, init]) =>
+							String(url) === "/api/v1/alert-sources" &&
+							(init as RequestInit | undefined)?.method === "POST",
+					)?.[1]?.body,
+				),
+			);
+			expect(payload).toMatchObject({
+				key: "edge-site",
+				protocol: SYNTHETIC_ID,
+			});
+			fetchMock.mockRestore();
+		});
+
+		it("renders the shared not-found view for unregistered, disabled or non-event-source kinds", async () => {
+			mockCatalog([
+				syntheticPlugin,
+				{
+					id: "disabled-hook",
+					displayName: "停用事件源",
+					description: "未启用",
+					enabled: false,
+					version: "1",
+					capabilities: ["event_source"],
+				},
+				{
+					id: "tool-only",
+					displayName: "仅工具插件",
+					description: "无入站能力",
+					enabled: true,
+					version: "1",
+					capabilities: ["tools"],
+				},
+			]);
+			for (const kind of ["no-such-kind", "disabled-hook", "tool-only"]) {
+				render(
+					<IntegrationView route={`/settings/platform/integrations/${kind}`} />,
+				);
+				expect(
+					await screen.findByText("找不到此页面"),
+				).toBeInTheDocument();
+				cleanup();
+			}
+		});
+
+		it("lists generic source instances by kind and opens the shared drawer", async () => {
+			vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				const url = String(input);
+				if (url.startsWith("/api/v1/alert-sources"))
+					return Response.json({
+						items: [
+							{
+								key: "edge-site",
+								protocol: SYNTHETIC_ID,
+								enabled: true,
+								rowVersion: 3,
+								createdAt: "2026-09-28T00:00:00Z",
+							},
+						],
+					});
+				if (url.startsWith("/api/v1/connections"))
+					return Response.json({ items: [] });
+				return Response.json({ message: "unexpected request" }, { status: 500 });
+			});
+			render(
+				<IntegrationView route="/settings/platform/integrations/instances" />,
+			);
+			expect(await screen.findByText("edge-site")).toBeInTheDocument();
+			expect(screen.getByText(/synthetic-hook/)).toBeInTheDocument();
+			fireEvent.click(screen.getByRole("button", { name: /edge-site/ }));
+			await waitFor(() =>
+				expect(props.navigate).toHaveBeenCalledWith(
+					`/settings/platform/integrations?platform=${SYNTHETIC_ID}&instance=edge-site`,
+				),
+			);
+		});
+
+		it("manages a generic source instance status and credential generations in the drawer", async () => {
+			vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				const url = String(input);
+				if (
+					url ===
+					`/api/v1/alert-sources/edge-site/credentials?limit=100`
+				)
+					return Response.json({
+						items: [
+							{
+								id: "7",
+								rowVersion: 2,
+								state: "PendingRetirement",
+								createdAt: "2026-09-28T00:00:00Z",
+							},
+						],
+					});
+				if (url === "/api/v1/alert-sources/edge-site")
+					return Response.json({
+						key: "edge-site",
+						protocol: SYNTHETIC_ID,
+						enabled: true,
+						rowVersion: 3,
+						createdAt: "2026-09-28T00:00:00Z",
+					});
+				return Response.json({ message: `unexpected request ${url}` }, { status: 500 });
+			});
+			render(
+				<IntegrationView route="/settings/platform/integrations?platform=synthetic-hook&instance=edge-site" />,
+			);
+			expect(await screen.findByText("已启用")).toBeInTheDocument();
+			expect(screen.getByText("7")).toBeInTheDocument();
+			expect(screen.getByText("待退休")).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "轮换凭据" })).toBeEnabled();
+			expect(screen.getByRole("button", { name: "退休" })).toBeEnabled();
+		});
 	});
 
 	it("opens metrics instance management by stable name, not the numeric DB id", async () => {

@@ -83,31 +83,37 @@ import {
 	type IntakeIssue,
 } from "@/features/alerts/api";
 import {
-	type AlertmanagerCredential,
-	type AlertmanagerInstance,
+	type EventSourceCredential,
+	type EventSourceInstance,
 	alertmanagerReceiverYaml,
-	createAlertmanagerInstance,
+	createEventSourceInstance,
 	createMetricsInstance,
-	disableAlertmanagerInstance,
+	disableEventSourceInstance,
 	disableMetricsInstance,
 	enableMetricsInstance,
-	fetchAlertmanagerInstance,
+	fetchEventSourceInstance,
 	fetchMetricsInstance,
 	fetchPublicReceiverEndpoint,
-	listAlertmanagerCredentials,
-	listAlertmanagerInstances,
+	listEventSourceCredentials,
+	listEventSourceInstances,
 	listIntegrationPlugins,
 	listMetricsInstances,
 	type MetricsConnectionInput,
 	type MetricsInstance,
 	probeDiagnostic,
 	probeMetricsInstance,
-	retireAlertmanagerCredential,
-	revealAlertmanagerCredential,
-	rotateAlertmanagerCredential,
+	receiverUrlForKind,
+	retireEventSourceCredential,
+	revealEventSourceCredential,
+	rotateEventSourceCredential,
 	rotateMetricsInstance,
 } from "./api";
-import type { IntegrationCatalogItem, IntegrationPlatform } from "./types";
+import {
+	EVENT_SOURCE_CAPABILITY,
+	type IntegrationCatalogItem,
+	type IntegrationPlatform,
+	isSpecializedPlatform,
+} from "./types";
 
 const formatEventTime = (value?: string | null) =>
 	formatDateTime(value, "等待首条有效事件");
@@ -131,7 +137,7 @@ function integrationRoute(
 }
 /** 已接入实例列表与实例详情都是接入管理页上的右侧抽屉（与告警一致），
  * 由 URL query 标志驱动、可深链，不再是独立页面路由。 */
-function instanceSheetRoute(platform: IntegrationPlatform, name: string) {
+function instanceSheetRoute(platform: string, name: string) {
 	return `${INTEGRATIONS_BASE}?platform=${encodeURIComponent(platform)}&instance=${encodeURIComponent(name)}`;
 }
 
@@ -269,18 +275,18 @@ function Instances({
 	suspended,
 }: Pick<WorkspaceModuleProps, "navigate" | "suspended">) {
 	const [query, setQuery] = useState("");
-	// 指标连接不分页、告警源分页：第一页 = 全部指标连接 + 告警源第一页，
-	// 后续页只有告警源（指标连接已在第一页完整展示）。
-	const list = useCursorPages<AlertmanagerInstance | MetricsInstance>(
+	// 指标连接不分页、告警事件源分页：第一页 = 全部指标连接 + 事件源第一页，
+	// 后续页只有事件源（指标连接已在第一页完整展示）。
+	const list = useCursorPages<EventSourceInstance | MetricsInstance>(
 		async (cursor) => {
-			if (cursor) return listAlertmanagerInstances(cursor);
-			const [alerts, metrics] = await Promise.all([
-				listAlertmanagerInstances(),
+			if (cursor) return listEventSourceInstances(cursor);
+			const [events, metrics] = await Promise.all([
+				listEventSourceInstances(),
 				listMetricsInstances(),
 			]);
 			return {
-				items: [...(alerts.items ?? []), ...metrics],
-				nextCursor: alerts.nextCursor,
+				items: [...(events.items ?? []), ...metrics],
+				nextCursor: events.nextCursor,
 			};
 		},
 		{ suspended, fallbackError: "暂时无法完成操作，请重试。" },
@@ -291,13 +297,19 @@ function Instances({
 			.toLocaleLowerCase()
 			.includes(query.trim().toLocaleLowerCase()),
 	);
-	const platformName = (platform: IntegrationPlatform) =>
+	const platformName = (platform: string) =>
 		platform === "alertmanager"
 			? "Alertmanager"
 			: platform === "prometheus"
 				? "Prometheus"
-				: "Thanos";
-	const statusLabel = (item: AlertmanagerInstance | MetricsInstance) =>
+				: platform === "thanos"
+					? "Thanos"
+					: platform;
+	const isMetrics = (
+		item: EventSourceInstance | MetricsInstance,
+	): item is MetricsInstance =>
+		item.platform === "prometheus" || item.platform === "thanos";
+	const statusLabel = (item: EventSourceInstance | MetricsInstance) =>
 		item.status === "active"
 			? "已启用"
 			: item.status === "revalidation_required"
@@ -332,11 +344,9 @@ function Instances({
 				items={filtered.map((item) => ({
 					id: `${item.platform}-${item.id}`,
 					title: item.displayName,
-					subtitle: `${platformName(item.platform)} · ${
-						item.platform === "alertmanager"
-							? formatEventTime(item.latestValidEventAt)
-							: ((item as MetricsInstance).endpoint ?? "—")
-					}`,
+					subtitle: isMetrics(item)
+						? `${platformName(item.platform)} · ${item.endpoint ?? "—"}`
+						: `${platformName(item.platform)} · ${formatEventTime(item.latestValidEventAt)}`,
 					badge: {
 						text: statusLabel(item),
 						variant:
@@ -374,21 +384,27 @@ function Instances({
 	);
 }
 
-/** Full-workbench one-time reveal, cleared by the owning form/detail on close or suspension. */
+/** Full-workbench one-time reveal, cleared by the owning form/detail on close or suspension.
+ * The receiver YAML is an Alertmanager-specific deployment artifact; generic
+ * source kinds reveal only the public receiver URL and the bearer. */
 function SecretReveal({
 	open,
 	secret,
 	receiverUrl,
+	showYaml = false,
 	onClose,
 }: {
 	open: boolean;
 	secret: string;
 	receiverUrl: string;
+	showYaml?: boolean;
 	onClose: () => void;
 }) {
 	const [copied, setCopied] = useState("");
 	const yaml =
-		secret && receiverUrl ? alertmanagerReceiverYaml(receiverUrl, secret) : "";
+		showYaml && secret && receiverUrl
+			? alertmanagerReceiverYaml(receiverUrl, secret)
+			: "";
 	async function copy(value: string, label: string) {
 		try {
 			await navigator.clipboard.writeText(value);
@@ -442,21 +458,23 @@ function SecretReveal({
 							</Button>
 						</div>
 					</Field>
-					<Field>
-						<FieldLabel>Alertmanager receiver YAML</FieldLabel>
-						<pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs leading-5 whitespace-pre-wrap">
-							{yaml}
-						</pre>
-						<Button
-							type="button"
-							size="sm"
-							variant="outline"
-							onClick={() => void copy(yaml, "已复制 YAML")}
-						>
-							<Copy data-icon="inline-start" />
-							复制 YAML
-						</Button>
-					</Field>
+					{showYaml && (
+						<Field>
+							<FieldLabel>Alertmanager receiver YAML</FieldLabel>
+							<pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs leading-5 whitespace-pre-wrap">
+								{yaml}
+							</pre>
+							<Button
+								type="button"
+								size="sm"
+								variant="outline"
+								onClick={() => void copy(yaml, "已复制 YAML")}
+							>
+								<Copy data-icon="inline-start" />
+								复制 YAML
+							</Button>
+						</Field>
+					)}
 					{copied && (
 						<p role="status" className="text-sm text-muted-foreground">
 							{copied}
@@ -1210,13 +1228,13 @@ function AlertmanagerForm({
 		try {
 			const endpoint = await fetchPublicReceiverEndpoint();
 			const sourceKey = key.trim();
-			const result = await createAlertmanagerInstance(sourceKey);
+			const result = await createEventSourceInstance(sourceKey, "alertmanager");
 			setCreatedKey(sourceKey);
 			if (!result.revealHandle)
 				throw new Error(
 					"来源已创建，但服务端未返回一次性凭据句柄。请从实例详情轮换凭据。",
 				);
-			const token = await revealAlertmanagerCredential(result.revealHandle);
+			const token = await revealEventSourceCredential(result.revealHandle);
 			if (!suspended && epoch === revealEpoch.current) {
 				setSecret(token);
 				setReceiverUrl(endpoint.publicReceiverUrl);
@@ -1308,11 +1326,12 @@ function AlertmanagerForm({
 				open={!suspended && Boolean(secret)}
 				secret={secret}
 				receiverUrl={receiverUrl}
-					onClose={() => {
-						setSecret("");
-						setReceiverUrl("");
-						navigate(`${INTEGRATIONS_BASE}?instances`);
-					}}
+				showYaml
+				onClose={() => {
+					setSecret("");
+					setReceiverUrl("");
+					navigate(`${INTEGRATIONS_BASE}?instances`);
+				}}
 			/>
 		</section>
 	);
@@ -1432,15 +1451,20 @@ const credentialStateLabels: Record<string, string> = {
 	Retired: "已退休",
 };
 
-function AlertmanagerDetail({
+/** Shared lifecycle detail for every alert event source: status, one-time
+ * credential reveal on rotate, and credential-generation management. The
+ * receiver YAML in the reveal dialog stays exclusive to alertmanager. */
+function EventSourceDetail({
+	kind,
 	id,
 	suspended,
 }: {
+	kind: string;
 	id: string;
 	suspended: boolean;
 }) {
-	const [source, setSource] = useState<AlertmanagerInstance>();
-	const [credentials, setCredentials] = useState<AlertmanagerCredential[]>([]);
+	const [source, setSource] = useState<EventSourceInstance>();
+	const [credentials, setCredentials] = useState<EventSourceCredential[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [busy, setBusy] = useState("");
 	const [error, setError] = useState("");
@@ -1452,8 +1476,8 @@ function AlertmanagerDetail({
 		setError("");
 		try {
 			const [sourceItem, credentialItems] = await Promise.all([
-				fetchAlertmanagerInstance(id),
-				listAlertmanagerCredentials(id),
+				fetchEventSourceInstance(id),
+				listEventSourceCredentials(id),
 			]);
 			setSource(sourceItem);
 			setCredentials(credentialItems);
@@ -1477,12 +1501,12 @@ function AlertmanagerDetail({
 		setError("");
 		try {
 			const endpoint = await fetchPublicReceiverEndpoint();
-			const result = await rotateAlertmanagerCredential(id);
+			const result = await rotateEventSourceCredential(id);
 			if (!result.revealHandle)
 				throw new Error(
 					"凭据已轮换，但服务端未返回一次性凭据句柄。请再次轮换取得新值。",
 				);
-			const token = await revealAlertmanagerCredential(result.revealHandle);
+			const token = await revealEventSourceCredential(result.revealHandle);
 			if (!suspended && epoch === revealEpoch.current) {
 				setSecret(token);
 				setReceiverUrl(endpoint.publicReceiverUrl);
@@ -1498,7 +1522,7 @@ function AlertmanagerDetail({
 		if (!source) return;
 		setBusy("disable");
 		try {
-			await disableAlertmanagerInstance(source);
+			await disableEventSourceInstance(source);
 			notify.success("已停用");
 			await load();
 		} catch (reason) {
@@ -1507,10 +1531,10 @@ function AlertmanagerDetail({
 			setBusy("");
 		}
 	}
-	async function retire(credential: AlertmanagerCredential) {
+	async function retire(credential: EventSourceCredential) {
 		setBusy(credential.id);
 		try {
-			await retireAlertmanagerCredential(id, credential);
+			await retireEventSourceCredential(id, credential);
 			notify.success("已退休");
 			await load();
 		} catch (reason) {
@@ -1522,7 +1546,7 @@ function AlertmanagerDetail({
 	if (loading)
 		return (
 			<DetailSkeleton
-				label="正在加载 Alertmanager 实例"
+				label="正在加载接入实例"
 				rows={["title", "line", "card", "card", "card"]}
 			/>
 		);
@@ -1618,8 +1642,7 @@ function AlertmanagerDetail({
 				<aside className="flex flex-col gap-4">
 					<h2 className="text-base font-semibold">轮换说明</h2>
 					<p className="text-sm text-muted-foreground">
-						更新 Alertmanager
-						配置，确认新凭据已出现首次有效事件，再显式退休旧凭据。系统不会猜测切换已完成。
+						更新上游配置，确认新凭据已出现首次有效事件，再显式退休旧凭据。系统不会猜测切换已完成。
 					</p>
 					<Separator />
 					<p className="text-sm text-muted-foreground">
@@ -1664,7 +1687,7 @@ function AlertmanagerDetail({
 							row.credential.state === "PendingRetirement" ? (
 								<ConfirmAction
 									title="退休此凭据？"
-									description="确认新凭据已经在上游 Alertmanager 中使用。退休后旧凭据无法恢复。"
+									description="确认新凭据已经在上游使用。退休后旧凭据无法恢复。"
 									disabled={suspended || Boolean(busy)}
 									destructive
 									onConfirm={() => void retire(row.credential)}
@@ -1682,6 +1705,7 @@ function AlertmanagerDetail({
 				open={!suspended && Boolean(secret)}
 				secret={secret}
 				receiverUrl={receiverUrl}
+				showYaml={kind === "alertmanager"}
 				onClose={() => {
 					setSecret("");
 					setReceiverUrl("");
@@ -1691,7 +1715,239 @@ function AlertmanagerDetail({
 	);
 }
 
-/** The integration workbench has a deliberately small routing surface, rather than a generic plugin framework. */
+/** Shared unknown-route view for invalid integration paths. Unregistered or
+ * disabled source kinds are ordinary unknown routes, not empty forms. */
+function IntegrationNotFound() {
+	return (
+		<Empty>
+			<EmptyHeader>
+				<EmptyTitle>找不到此页面</EmptyTitle>
+				<EmptyDescription>该链接无效或页面已被移动。</EmptyDescription>
+			</EmptyHeader>
+		</Empty>
+	);
+}
+
+/** Generic admin route for any catalog plugin with the event-source
+ * capability that has no specialized brand workbench. The kind is validated
+ * against the server catalog before the form renders; the catalog also
+ * supplies the display name, so no per-brand route entries exist. */
+function GenericEventSourceRoute({
+	kind,
+	navigate,
+	suspended,
+}: {
+	kind: string;
+	navigate: (to: string) => void;
+	suspended: boolean;
+}) {
+	const [catalog, setCatalog] = useState<IntegrationCatalogItem[]>();
+	const [error, setError] = useState("");
+	const [revision, setRevision] = useState(0);
+	useEffect(() => {
+		let active = true;
+		listIntegrationPlugins()
+			.then((items) => {
+				if (active) setCatalog(items);
+			})
+			.catch((reason) => {
+				if (active) setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+			});
+		return () => {
+			active = false;
+		};
+	}, [revision]);
+	const item = catalog?.find((candidate) => candidate.id === kind);
+	if (!catalog) {
+		return error ? (
+			<section className="flex flex-col gap-4">
+				<Alert variant="destructive">
+					<AlertTitle>无法加载插件目录</AlertTitle>
+					<AlertDescription>{error}</AlertDescription>
+					<Button
+						variant="outline"
+						onClick={() => {
+							setError("");
+							setRevision((value) => value + 1);
+						}}
+					>
+						重试
+					</Button>
+				</Alert>
+			</section>
+		) : (
+			<DetailSkeleton
+				label="正在加载插件目录"
+				rows={["title", "line", "card"]}
+			/>
+		);
+	}
+	if (
+		!item ||
+		!item.enabled ||
+		!item.capabilities.includes(EVENT_SOURCE_CAPABILITY)
+	) {
+		return <IntegrationNotFound />;
+	}
+	return (
+		<EventSourceForm item={item} navigate={navigate} suspended={suspended} />
+	);
+}
+
+/** Generic creation form for one registered source kind: a stable source key,
+ * a one-time bearer reveal and the kind's public receiver URL
+ * (/stele/webhook/{kind}). The server rejects unregistered or disabled
+ * protocols; the catalog check above only avoids offering dead forms. */
+function EventSourceForm({
+	item,
+	navigate,
+	suspended,
+}: {
+	item: IntegrationCatalogItem;
+	navigate: (to: string) => void;
+	suspended: boolean;
+}) {
+	const kind = item.id;
+	const [key, setKey] = useState("");
+	const [createdKey, setCreatedKey] = useState("");
+	const [saving, setSaving] = useState(false);
+	// 与 Alertmanager 表单一致：创建失败必须以常驻内联错误留在表单上，
+	// 一次性凭据只有这一条取得途径，只靠 toast 会让失败像“什么都没发生”。
+	const [error, setError] = useState("");
+	const [secret, setSecret] = useState("");
+	const [receiverUrl, setReceiverUrl] = useState("");
+	const revealEpoch = useRef(0);
+	useEffect(() => {
+		if (suspended) {
+			revealEpoch.current += 1;
+			setSecret("");
+			setReceiverUrl("");
+		}
+	}, [suspended]);
+	async function submit(event: FormEvent) {
+		event.preventDefault();
+		if (suspended) return;
+		const epoch = revealEpoch.current;
+		setSaving(true);
+		setError("");
+		try {
+			const endpoint = await fetchPublicReceiverEndpoint();
+			const sourceKey = key.trim();
+			const result = await createEventSourceInstance(sourceKey, kind);
+			setCreatedKey(sourceKey);
+			if (!result.revealHandle)
+				throw new Error(
+					"来源已创建，但服务端未返回一次性凭据句柄。请从实例详情轮换凭据。",
+				);
+			const token = await revealEventSourceCredential(result.revealHandle);
+			if (!suspended && epoch === revealEpoch.current) {
+				setSecret(token);
+				setReceiverUrl(receiverUrlForKind(endpoint.publicReceiverUrl, kind));
+				setKey("");
+			}
+		} catch (reason) {
+			setError(messageOf(reason, "暂时无法完成操作，请重试。"));
+		} finally {
+			setSaving(false);
+		}
+	}
+	return (
+		<section className="flex flex-col gap-6">
+			<div>
+				<h1 className="text-2xl font-semibold tracking-tight">
+					配置 {item.displayName}
+				</h1>
+				<p className="mt-1 text-sm text-muted-foreground">
+					创建逻辑事件源，生成面向部署公共入口的接收地址与一次性凭据。
+				</p>
+			</div>
+			<div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,.75fr)]">
+				<form onSubmit={submit}>
+					<Card>
+						<CardHeader>
+							<CardTitle>来源信息</CardTitle>
+							<CardDescription>
+								来源键用于稳定识别一个同类事件来源。
+							</CardDescription>
+						</CardHeader>
+						<CardContent>
+							<FieldGroup>
+								{error && (
+									<Alert variant="destructive">
+										<AlertTitle>无法创建事件源</AlertTitle>
+										<AlertDescription>{error}</AlertDescription>
+									</Alert>
+								)}
+								<Field>
+									<FieldLabel htmlFor="event-source-key">
+										来源键
+									</FieldLabel>
+									<Input
+										id="event-source-key"
+										value={key}
+										onChange={(event) => setKey(event.target.value)}
+										required
+										maxLength={200}
+										disabled={saving || suspended || Boolean(createdKey)}
+										autoFocus
+									/>
+									<FieldDescription>
+										例如 production-{kind}。不要输入凭据或内部地址。
+									</FieldDescription>
+								</Field>
+								<Button
+									type="submit"
+									disabled={
+										!key.trim() || saving || suspended || Boolean(createdKey)
+									}
+								>
+									{saving && (
+										<LoaderCircle
+											className="animate-spin"
+											data-icon="inline-start"
+										/>
+									)}
+									{saving ? "创建中…" : "创建并显示一次凭据"}
+								</Button>
+							</FieldGroup>
+						</CardContent>
+					</Card>
+				</form>
+				<aside className="flex flex-col gap-4">
+					<h2 className="text-base font-semibold">部署说明</h2>
+					<ol className="flex flex-col gap-3 text-sm text-muted-foreground">
+						<li>1. 创建后立即复制一次性 Bearer 凭据和接收地址。</li>
+						<li>
+							2. 在上游平台配置 webhook：POST 到接收地址，并携带
+							Authorization: Bearer 凭据。
+						</li>
+						<li>
+							3. 发送测试事件，实例列表会显示最近有效事件。等待首条事件不是故障。
+						</li>
+					</ol>
+					<Separator />
+					<p className="text-sm text-muted-foreground">
+						Quoin 仅在成功持久化后确认投递；认证失败或暂时错误应由上游重试。
+					</p>
+				</aside>
+			</div>
+			<SecretReveal
+				open={!suspended && Boolean(secret)}
+				secret={secret}
+				receiverUrl={receiverUrl}
+				onClose={() => {
+					setSecret("");
+					setReceiverUrl("");
+					navigate(`${INTEGRATIONS_BASE}?instances`);
+				}}
+			/>
+		</section>
+	);
+}
+
+/** The integration workbench has a deliberately small routing surface: two
+ * specialized brand workbenches plus one catalog-driven generic route, rather
+ * than a per-brand route table. */
 export function useIntegrationsModule(
 	props: WorkspaceModuleProps,
 ): WorkspaceModuleView {
@@ -1712,15 +1968,21 @@ export function useIntegrationsModule(
 	const routeQuery = parseRoute(props.route).searchParams;
 	// 实例列表与实例详情是接入管理页上同一个右侧抽屉内的两个视图（与告警一致），
 	// 由 query 标志驱动、可深链；旧 /instances 路径照常渲染目录页并打开抽屉。
-	const sheetPlatform = routeQuery.get(
-		"platform",
-	) as IntegrationPlatform | null;
+	const sheetPlatform = routeQuery.get("platform");
 	const sheetInstance = routeQuery.get("instance");
 	const detailRef =
 		sheetPlatform && sheetInstance
 			? { platform: sheetPlatform, name: sheetInstance }
 			: null;
 	const isCatalogRoute = !platform || platform === "instances";
+	const instancePlatformName = (platform: string) =>
+		platform === "alertmanager"
+			? "Alertmanager"
+			: platform === "prometheus"
+				? "Prometheus"
+				: platform === "thanos"
+					? "Thanos"
+					: platform;
 	const instancesDrawer =
 		isCatalogRoute &&
 		(detailRef || platform === "instances" || routeQuery.has("instances")) ? (
@@ -1732,8 +1994,11 @@ export function useIntegrationsModule(
 					detailRef
 						? detailRef.platform === "alertmanager"
 							? "Alertmanager 告警来源。"
-							: `${detailRef.platform === "prometheus" ? "Prometheus" : "Thanos"} 指标接入。`
-						: "Alertmanager、Prometheus 与 Thanos 接入实例。"
+							: detailRef.platform === "prometheus" ||
+								 detailRef.platform === "thanos"
+							? `${instancePlatformName(detailRef.platform)} 指标接入。`
+							: "事件接入来源实例。"
+						: "所有已接入实例。"
 				}
 			>
 				{detailRef ? (
@@ -1750,15 +2015,17 @@ export function useIntegrationsModule(
 								<ChevronLeft data-icon="inline-start" aria-hidden="true" />
 								返回实例列表
 							</Button>
-							{detailRef.platform === "alertmanager" ? (
-								<AlertmanagerDetail
-									id={decodeURIComponent(detailRef.name)}
-									suspended={props.suspended}
-								/>
-							) : (
+							{detailRef.platform === "prometheus" ||
+							detailRef.platform === "thanos" ? (
 								<MetricsDetail
 									id={decodeURIComponent(detailRef.name)}
 									navigate={props.navigate}
+									suspended={props.suspended}
+								/>
+							) : (
+								<EventSourceDetail
+									kind={detailRef.platform}
+									id={decodeURIComponent(detailRef.name)}
 									suspended={props.suspended}
 								/>
 							)}
@@ -1792,16 +2059,18 @@ export function useIntegrationsModule(
 					suspended={props.suspended}
 				/>
 			)
+		) : platform && platform !== "instances" && !isSpecializedPlatform(platform) && !id ? (
+			// Any other first segment is a generic source kind resolved against
+			// the server catalog; unregistered or disabled kinds render the
+			// shared not-found view. Only the bare /integrations root (and the
+			// legacy /instances path) show the catalog.
+			<GenericEventSourceRoute
+				kind={platform}
+				navigate={props.navigate}
+				suspended={props.suspended}
+			/>
 		) : platform && platform !== "instances" ? (
-			// Unknown platform segments are ordinary unknown routes and render the
-			// shared not-found view; only the bare /integrations
-			// root shows the catalog.
-			<Empty>
-				<EmptyHeader>
-					<EmptyTitle>找不到此页面</EmptyTitle>
-					<EmptyDescription>该链接无效或页面已被移动。</EmptyDescription>
-				</EmptyHeader>
-			</Empty>
+			<IntegrationNotFound />
 		) : (
 			<>
 				<IntegrationCatalog navigate={props.navigate} />
@@ -1855,6 +2124,10 @@ function integrationCrumbs(route: string) {
 			];
 		return [catalog, { label: `配置 ${name}` }];
 	}
+	// Generic source kinds: the display name lives in the async catalog, so
+	// the trail stays on the stable kind id (the form's heading carries the
+	// display name).
+	if (!id) return [catalog, { label: `配置 ${platform}` }];
 	return undefined;
 }
 
