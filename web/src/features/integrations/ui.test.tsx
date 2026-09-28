@@ -1576,6 +1576,104 @@ describe("generic HTTP connection plugins (#110)", () => {
 		});
 		expect(screen.getByLabelText("Bearer Token")).toHaveValue("");
 	});
+	// HTTP-PAGE-002：服务端对全部连接整体分页且无 kind 过滤，第一页可能完全
+	// 不含目标插件实例；列表必须可跨页导航，过滤后为空的页不得误报“尚未创建”。
+	it("pages past a full page of foreign-kind connections to reach later plugin instances", async () => {
+		const filler = (index: number) =>
+			connectionProjection({
+				id: String(index + 1),
+				name: `filler-${String(index).padStart(3, "0")}`,
+				type: "unrelated-http",
+				config: {
+					type: "unrelated-http",
+					baseUrl: "https://filler.example",
+					authType: "none",
+				},
+			});
+		mockFetch((url) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [httpPlugin] });
+			if (url === "/api/v1/connections?limit=100")
+				return Response.json({
+					items: Array.from({ length: 100 }, (_, index) => filler(index)),
+					nextCursor: "filler-099",
+				});
+			if (url === "/api/v1/connections?limit=100&cursor=filler-099")
+				return Response.json({
+					items: [
+						...Array.from({ length: 99 }, (_, index) => filler(index)),
+						connectionProjection(),
+					],
+					nextCursor: "cursor-3",
+				});
+			if (url === "/api/v1/connections?limit=100&cursor=cursor-3")
+				return Response.json({
+					items: [connectionProjection({ id: "10", name: "edge-http-2" })],
+				});
+			return undefined;
+		});
+		render(
+			<IntegrationView route="/settings/platform/integrations/synthetic-plugin" />,
+		);
+		await screen.findByRole("heading", { name: "配置 合成 HTTP 平台" });
+		// 第一页过滤后为空但仍有下一页：诚实提示翻页，不渲染“尚未创建”空态。
+		expect(
+			await screen.findByText("本页没有该类型的连接实例"),
+		).toBeInTheDocument();
+		expect(screen.queryByText("尚未创建连接实例")).not.toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+		expect(await screen.findByText("edge-http")).toBeInTheDocument();
+		// 游标边界：本页已有匹配但仍带 nextCursor，翻页必须保持可用。
+		expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled();
+		expect(screen.getByRole("button", { name: "第 2 页" })).toHaveAttribute(
+			"aria-current",
+			"page",
+		);
+		fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+		expect(await screen.findByText("edge-http-2")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+		fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+		expect(await screen.findByText("edge-http")).toBeInTheDocument();
+	});
+
+	it("keeps the page position and reruns the failed cursor on retry after an error", async () => {
+		let secondPageFails = true;
+		mockFetch((url) => {
+			if (url.endsWith("/api/v1/integrations/plugins"))
+				return Response.json({ items: [httpPlugin] });
+			if (url === "/api/v1/connections?limit=100")
+				return Response.json({
+					items: [connectionProjection()],
+					nextCursor: "cursor-2",
+				});
+			if (url === "/api/v1/connections?limit=100&cursor=cursor-2")
+				return secondPageFails
+					? Response.json({ detail: "列表服务暂时不可用" }, { status: 500 })
+					: Response.json({
+							items: [
+								connectionProjection({ id: "10", name: "edge-http-2" }),
+							],
+						});
+			return undefined;
+		});
+		render(
+			<IntegrationView route="/settings/platform/integrations/synthetic-plugin" />,
+		);
+		expect(await screen.findByText("edge-http")).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"列表服务暂时不可用",
+		);
+		secondPageFails = false;
+		fireEvent.click(screen.getByRole("button", { name: "重试" }));
+		expect(await screen.findByText("edge-http-2")).toBeInTheDocument();
+		// 重试按原游标重跑第 2 页：不回第一页、不重取第 1 页、不丢页码。
+		expect(screen.queryByText("edge-http")).not.toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "第 2 页" })).toHaveAttribute(
+			"aria-current",
+			"page",
+		);
+	});
 });
 
 describe("event source instance settings (#110 story 2)", () => {
