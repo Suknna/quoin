@@ -41,6 +41,9 @@ type Service struct {
 	ops     alertOperations
 	now     func() time.Time
 	sources *plugins.Registry
+	// The deployment allowlist is installed before serving. nil means this
+	// service has not received deployment configuration (isolated tests).
+	enabledPlugins map[string]bool
 }
 
 // NewService is the pre-composition constructor: the service owns a private
@@ -100,6 +103,24 @@ func (service *Service) UseSourceRegistry(registry *plugins.Registry) error {
 // SourceRegistry is the frozen plugin assembly used by both source management
 // and relay admission; these two entry points must never disagree on a kind.
 func (service *Service) SourceRegistry() *plugins.Registry { return service.sources }
+
+// UseEnabledPlugins freezes deployment admission for alert source kinds. The
+// caller passes the same resolved IDs that form the Agent's tool catalogs.
+// An empty slice disables every source; nil is not an implicit allow-all.
+func (service *Service) UseEnabledPlugins(ids []string) {
+	service.enabledPlugins = make(map[string]bool, len(ids))
+	for _, id := range ids {
+		service.enabledPlugins[id] = true
+	}
+}
+
+func (service *Service) SourceEnabled(kind string) bool {
+	_, pluginID, ok := service.sources.EventSource(kind)
+	if !ok {
+		return false
+	}
+	return service.enabledPlugins == nil || service.enabledPlugins[pluginID]
+}
 
 // authorizeSourceAdmin re-verifies inside the runner transaction that the
 // context carries a live administrator session proof (auth.
@@ -275,7 +296,7 @@ func (service *Service) CredentialSnapshot(ctx context.Context) (version uint64,
 		}
 		entry := bySource[sourceID]
 		if entry == nil {
-			entry = &SnapshotSource{SourceID: sourceID, SourceKey: sourceKey, Protocol: protocol, Enabled: enabled == 1}
+			entry = &SnapshotSource{SourceID: sourceID, SourceKey: sourceKey, Protocol: protocol, Enabled: enabled == 1 && service.SourceEnabled(protocol)}
 			bySource[sourceID] = entry
 			order = append(order, sourceID)
 		}

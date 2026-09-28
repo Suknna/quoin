@@ -99,6 +99,9 @@ func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, c
 // before projecting the normalized alert batch. The legacy Deliver entry is
 // retained for direct callers until the relay is the sole intake entry.
 func (service *Service) DeliverEvent(ctx context.Context, sourceKind, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) (DeliveryResult, error) {
+	if !service.SourceEnabled(sourceKind) {
+		return DeliveryResult{Rejected: true, Status: "rejected", Detail: "alert source plugin is not enabled"}, nil
+	}
 	webhook, parseErr := ParseWebhook(body)
 	if parseErr != nil {
 		return service.recordRejected(ctx, sourceKind, relayID, sourceID, credentialID, snapshotVersion, body, receivedAt)

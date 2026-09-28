@@ -221,6 +221,9 @@ func (service *Service) validateSourceInput(sourceKey, protocol string) error {
 	if normalizer, owner, ok := service.sources.AlertNormalizer(protocol); !ok || normalizer == nil || owner != pluginID {
 		return &execution.Rejection{Code: CodeValidationFailed, Detail: "protocol 缺少告警归一化能力"}
 	}
+	if !service.SourceEnabled(protocol) {
+		return &execution.Rejection{Code: CodeValidationFailed, Detail: "protocol 对应插件未启用"}
+	}
 	return nil
 }
 

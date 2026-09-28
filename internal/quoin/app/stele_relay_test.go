@@ -208,6 +208,17 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	if err != nil || item.Source != "synthetic" {
 		t.Fatalf("normalized source in alert detail: %+v err=%v", item, err)
 	}
+	harness.alerts.UseEnabledPlugins([]string{"alertmanager"})
+	if got := send("synthetic-disabled", "synthetic", "alerts.batch", body); got != rejected {
+		t.Fatalf("disabled source result: %s", got)
+	}
+	_, sources, err := harness.alerts.CredentialSnapshot(ctx)
+	if err != nil || len(sources) != 1 || sources[0].Enabled {
+		t.Fatalf("disabled source credential projection: %+v err=%v", sources, err)
+	}
+	if _, _, err := harness.alerts.CreateSource(admin, "register-disabled-source", "synthetic-disabled", "synthetic", digest[:]); err == nil {
+		t.Fatal("disabled source kind accepted by admin create")
+	}
 }
 
 func newRelayHarness(t *testing.T) *relayTestHarness {

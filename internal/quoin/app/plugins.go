@@ -43,6 +43,7 @@ func (application *apiServer) configurePlugins(configured []string) ([]string, e
 	application.investigations.Attempts().Catalogs = catalogs
 	application.inspections.Attempts().Catalogs = catalogs
 	application.knowledgeService.Attempts().Catalogs = catalogs
+	application.alerts.UseEnabledPlugins(enabled)
 	application.enabledPlugins = enabled
 	return enabled, nil
 }

@@ -55,6 +55,9 @@ func (application *apiServer) createAlertSource(ctx context.Context, input *crea
 	if normalizer, normalizerOwner, ok := application.alerts.SourceRegistry().AlertNormalizer(input.Body.Protocol); !ok || normalizer == nil || owner != normalizerOwner {
 		return nil, huma.Error400BadRequest("不支持的告警来源", fmt.Errorf("protocol %q has no alert normalizer", input.Body.Protocol))
 	}
+	if !application.alerts.SourceEnabled(input.Body.Protocol) {
+		return nil, huma.Error400BadRequest("告警来源插件未启用", nil)
+	}
 	key := strings.TrimSpace(input.Body.Key)
 	if key == "" {
 		return nil, huma.Error400BadRequest("告警源 key 不能为空", nil)

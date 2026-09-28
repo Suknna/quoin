@@ -131,6 +131,9 @@ func (server *steleRelayServer) deliverOneEvent(ctx context.Context, event *runt
 	if !server.alerts.SourceRegistry().SourceEvent(event.GetSourceKind(), event.GetEventType()) {
 		return runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED
 	}
+	if !server.alerts.SourceEnabled(event.GetSourceKind()) {
+		return runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED
+	}
 	receivedAt := time.Now().UTC()
 	if event.GetReceivedAt() != nil && event.GetReceivedAt().IsValid() {
 		receivedAt = event.GetReceivedAt().AsTime().UTC()
