@@ -219,14 +219,14 @@ func (service *Service) ListSources(ctx context.Context) ([]SourceSummary, error
 }
 
 type SourceSummary struct {
-	ID                 string          `json:"id"`
-	Key                string          `json:"key"`
-	Protocol           string          `json:"protocol"`
-	Enabled            bool            `json:"enabled"`
-	RowVersion         int64           `json:"rowVersion"`
-	CreatedAt          string          `json:"createdAt"`
-	DisabledAt         *string         `json:"disabledAt"`
-	LatestValidEventAt *string         `json:"latestValidEventAt,omitempty"`
+	ID                 string  `json:"id"`
+	Key                string  `json:"key"`
+	Protocol           string  `json:"protocol"`
+	Enabled            bool    `json:"enabled"`
+	RowVersion         int64   `json:"rowVersion"`
+	CreatedAt          string  `json:"createdAt"`
+	DisabledAt         *string `json:"disabledAt"`
+	LatestValidEventAt *string `json:"latestValidEventAt,omitempty"`
 	// Settings is the authoritative non-secret instance settings document
 	// (ADR-0014 story 2); always at least the empty object. Credential
 	// material can never appear: the owner plugin's closed schema bans it.
@@ -296,23 +296,21 @@ func (service *Service) LookupDigestForBearer(ctx context.Context, bearerDigest 
 // Stele caches (RUNTIME-STELE-002): active + pending-retirement generations
 // only, retired generations absent. Each source carries its authoritative
 // non-secret settings document (ADR-0014 story 2) for the webhook's
-// InboundRequest, and the snapshot version spans both change domains —
-// credential identity AND settings revision (settings_version) — so a
-// settings update strictly advances the version and Stele's next refresh
-// swaps in exactly one attributed revision.
+// InboundRequest. The shared alert_snapshot_epoch is advanced in the same
+// SQLite transaction on source/credential mutations; separate credential ID
+// and settings counters cannot safely be combined with MAX (they can collide).
 func (service *Service) CredentialSnapshot(ctx context.Context) (version uint64, sources []SnapshotSource, err error) {
-	var maxCredentialID, maxSettingsVersion int64
-	if err := service.runner.Reader().QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM alert_source_credentials`).Scan(&maxCredentialID); err != nil {
+	snapshot, err := service.runner.Reader().BeginSnapshot(ctx)
+	if err != nil {
 		return 0, nil, err
 	}
-	if err := service.runner.Reader().QueryRowContext(ctx, `SELECT COALESCE(MAX(settings_version),0) FROM alert_sources`).Scan(&maxSettingsVersion); err != nil {
+	defer snapshot.Rollback()
+	var epoch int64
+	if err := snapshot.QueryRowContext(ctx, `SELECT version FROM alert_snapshot_epoch WHERE singleton=1`).Scan(&epoch); err != nil {
 		return 0, nil, err
 	}
-	version = uint64(maxCredentialID)
-	if maxSettingsVersion > 0 && uint64(maxSettingsVersion) > version {
-		version = uint64(maxSettingsVersion)
-	}
-	rows, err := service.runner.Reader().QueryContext(ctx, `SELECT s.id, s.source_key, s.protocol, s.enabled, s.settings_json, c.id, c.digest FROM alert_sources s JOIN alert_source_credentials c ON c.source_id = s.id WHERE c.state IN ('Active','PendingRetirement') ORDER BY s.id, c.id`)
+	version = uint64(epoch)
+	rows, err := snapshot.QueryContext(ctx, `SELECT s.id, s.source_key, s.protocol, s.enabled, s.settings_json, c.id, c.digest FROM alert_sources s JOIN alert_source_credentials c ON c.source_id = s.id WHERE c.state IN ('Active','PendingRetirement') ORDER BY s.id, c.id`)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -335,9 +333,18 @@ func (service *Service) CredentialSnapshot(ctx context.Context) (version uint64,
 		}
 		entry.Credentials = append(entry.Credentials, CredentialDigest{ID: credentialID, Digest: digest})
 	}
+	if err := rows.Err(); err != nil {
+		return 0, nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, nil, err
+	}
 	sources = make([]SnapshotSource, 0, len(order))
 	for _, sourceID := range order {
 		sources = append(sources, *bySource[sourceID])
+	}
+	if err := snapshot.Commit(); err != nil {
+		return 0, nil, err
 	}
 	return version, sources, nil
 }

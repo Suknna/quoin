@@ -310,6 +310,23 @@ CREATE TABLE alert_source_credentials (
 ) STRICT;
 CREATE INDEX idx_alert_source_credentials_source ON alert_source_credentials (source_id);
 
+-- One shared revision for the complete Stele auth/settings snapshot. Credential
+-- IDs and settings revisions are separate sequences: MAX(id,settings_version)
+-- can repeat when the other sequence catches up, concealing a real change.
+CREATE TABLE alert_snapshot_epoch (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  version   INTEGER NOT NULL CHECK (version >= 0)
+) STRICT;
+INSERT INTO alert_snapshot_epoch(singleton, version) VALUES (1, 0);
+CREATE TRIGGER trg_alert_snapshot_source_insert AFTER INSERT ON alert_sources
+BEGIN UPDATE alert_snapshot_epoch SET version = version + 1 WHERE singleton = 1; END;
+CREATE TRIGGER trg_alert_snapshot_source_update AFTER UPDATE OF enabled,settings_json ON alert_sources
+BEGIN UPDATE alert_snapshot_epoch SET version = version + 1 WHERE singleton = 1; END;
+CREATE TRIGGER trg_alert_snapshot_credential_insert AFTER INSERT ON alert_source_credentials
+BEGIN UPDATE alert_snapshot_epoch SET version = version + 1 WHERE singleton = 1; END;
+CREATE TRIGGER trg_alert_snapshot_credential_state AFTER UPDATE OF state ON alert_source_credentials
+BEGIN UPDATE alert_snapshot_epoch SET version = version + 1 WHERE singleton = 1; END;
+
 CREATE TABLE alert_deliveries (
   id                         INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   event_id                   TEXT NOT NULL UNIQUE,   -- Stele 事件 id（网关生成），重试幂等键

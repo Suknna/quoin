@@ -60,8 +60,26 @@ func TestSourceSettingsSnapshotAdvancesBeyondAllCredentialGenerations(t *testing
 	if err := database.SQL.QueryRow(`SELECT settings_version FROM alert_sources WHERE id=?`, created.SourceID).Scan(&storedVersion); err != nil {
 		t.Fatal(err)
 	}
-	if storedVersion != int64(after) || string(updated.Settings) != `{"site":"ap-east"}` || len(snapshot) != 9 || string(snapshot[0].Settings) != `{"site":"ap-east"}` {
+	if storedVersion != 2 || string(updated.Settings) != `{"site":"ap-east"}` || len(snapshot) != 9 || string(snapshot[0].Settings) != `{"site":"ap-east"}` {
 		t.Fatalf("settings update/snapshot drifted: updated=%+v snapshot=%+v version=%d", updated, snapshot, after)
+	}
+	// A credential ID may catch up with (or equal) a settings revision. The
+	// shared snapshot epoch must still advance for both sorts of mutation.
+	rotatedDigest := make([]byte, 32)
+	rotatedDigest[0] = 99
+	if _, _, err := service.RotateCredential(ctx, "settings-rotate-after-update", "settings-churn", rotatedDigest); err != nil {
+		t.Fatal(err)
+	}
+	afterRotate, _, err := service.CredentialSnapshot(ctx)
+	if err != nil || afterRotate <= after {
+		t.Fatalf("credential rotation did not advance snapshot after settings update: %d -> %d, err=%v", after, afterRotate, err)
+	}
+	if _, _, err := service.SetSourceSettings(ctx, "settings-update-after-rotate", "settings-churn", []byte(`{"site":"eu-central"}`), updated.RowVersion); err != nil {
+		t.Fatal(err)
+	}
+	afterSettings, _, err := service.CredentialSnapshot(ctx)
+	if err != nil || afterSettings <= afterRotate {
+		t.Fatalf("settings update did not advance snapshot after credential rotation: %d -> %d, err=%v", afterRotate, afterSettings, err)
 	}
 }
 

@@ -349,15 +349,11 @@ func (service *Service) SetSourceSettings(ctx context.Context, clientCommandID, 
 	return outcome.Result, outcome.Replayed, nil
 }
 
-// nextSourceSettingsVersion uses the same global sequence space as credential
-// IDs. SnapshotVersion is MAX(credential ID, settings version), so merely
-// incrementing settings_version can silently leave Stele on the old cache
-// after many credential rotations or other sources' credentials are issued.
+// The settings revision is a global history of settings documents. The Stele
+// snapshot's separate transactional alert_snapshot_epoch advances for settings
+// and credentials alike; these independent sequences must not be MAXed.
 func nextSourceSettingsVersion(ctx context.Context, tx execution.Executor, version *int64) error {
-	return tx.QueryRowContext(ctx, `SELECT MAX(
-		COALESCE((SELECT MAX(settings_version) FROM alert_sources),0),
-		COALESCE((SELECT MAX(id) FROM alert_source_credentials),0)
-	)+1`).Scan(version)
+	return tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(settings_version),0)+1 FROM alert_sources`).Scan(version)
 }
 
 // RotateCredential creates a new Active generation superseding the current
