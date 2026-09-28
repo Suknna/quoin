@@ -80,7 +80,7 @@ func newSSEStack(t *testing.T) *sseStack {
 	}
 	digest := make([]byte, 32)
 	rand.Read(digest)
-	result, _, err := stack.alerts.CreateSource(seedCtx, "sse-seed-0001", "sse", "alertmanager", digest)
+	result, _, err := stack.alerts.CreateSource(seedCtx, "sse-seed-0001", "sse", "alertmanager", nil, digest)
 	if err != nil {
 		t.Fatalf("create source: %v", err)
 	}

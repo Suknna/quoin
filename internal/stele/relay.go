@@ -144,18 +144,20 @@ func (relay *Relay) Ready() bool {
 // protocol == EventSource.Kind() is part of the match: a credential minted for
 // one protocol never authorizes another source's path (SEC-REVEAL-001: the
 // bearer is base64url text of 32 raw bytes, the digest is SHA-256 of the RAW
-// bytes, so decode before hashing).
-func (relay *Relay) Credential(bearer, sourceKind string) (sourceID, credentialID int64, snapshotVersion uint64, ok bool) {
+// bytes, so decode before hashing). The pinned instance's non-secret settings
+// document rides along (ADR-0014 story 2); it is snapshot state the plugin
+// may consume in VerifyAndParse, never credential material.
+func (relay *Relay) Credential(bearer, sourceKind string) (CredentialMatch, bool) {
 	raw, err := base64.RawURLEncoding.DecodeString(bearer)
 	if err != nil || len(raw) != 32 {
-		return 0, 0, 0, false
+		return CredentialMatch{}, false
 	}
 	digest := sha256.Sum256(raw)
 	relay.mu.RLock()
 	snapshot := relay.snapshot
 	relay.mu.RUnlock()
 	if snapshot == nil {
-		return 0, 0, 0, false
+		return CredentialMatch{}, false
 	}
 	for _, source := range snapshot.GetSources() {
 		if !source.GetEnabled() || source.GetProtocol() != sourceKind {
@@ -163,11 +165,16 @@ func (relay *Relay) Credential(bearer, sourceKind string) (sourceID, credentialI
 		}
 		for _, credential := range source.GetCredentials() {
 			if subtleCompare(credential.GetDigest(), digest[:]) {
-				return source.GetSourceId(), credential.GetCredentialId(), snapshot.GetSnapshotVersion(), true
+				return CredentialMatch{
+					SourceID:        source.GetSourceId(),
+					CredentialID:    credential.GetCredentialId(),
+					SnapshotVersion: snapshot.GetSnapshotVersion(),
+					Settings:        source.GetSettingsJson(),
+				}, true
 			}
 		}
 	}
-	return 0, 0, 0, false
+	return CredentialMatch{}, false
 }
 
 func subtleCompare(a, b []byte) bool {

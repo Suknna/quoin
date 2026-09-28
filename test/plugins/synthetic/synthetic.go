@@ -46,11 +46,35 @@ const (
 	CollectResultSchemaKind = "synthetic_collect_result_v1"
 )
 
+// SourceSettingsSchema is the closed instance-settings contract of the
+// synthetic event source (ADR-0014 story 2): one optional ignoredAlertnames
+// array. VerifyAndParse drops matching alerts before enqueueing, so two
+// instances of the same kind with distinct settings normalize the same
+// webhook differently — the per-instance independence proof.
+var SourceSettingsSchema = map[string]any{
+	"type":                 "object",
+	"additionalProperties": false,
+	"properties": map[string]any{
+		"ignoredAlertnames": map[string]any{
+			"type":        "array",
+			"items":       map[string]any{"type": "string", "maxLength": 200},
+			"maxItems":    50,
+			"description": "按 alertname 丢弃的告警名单（非秘密过滤配置）",
+		},
+	},
+}
+
+// sourceSettings is the typed view of SourceSettingsSchema instances.
+type sourceSettings struct {
+	IgnoredAlertnames []string `json:"ignoredAlertnames"`
+}
+
 func Plugin() plugins.Plugin {
 	return plugins.Plugin{
 		ID: "synthetic-plugin", Version: "1", DisplayName: "Synthetic webhook",
 		EventSource: source{}, EventTypes: []string{"alerts.batch"},
-		AlertNormalizer: normalizer{}, AlertIdentity: plugins.AlertIdentityExternal,
+		EventSourceConfigSchema: SourceSettingsSchema,
+		AlertNormalizer:         normalizer{}, AlertIdentity: plugins.AlertIdentityExternal,
 		// Trusted HTTP connection kind (ADR-0014): bounded probe contract,
 		// closed auth-mode subset; credential material never appears here.
 		ConnectionKind:      ConnectionKindValue,
@@ -82,8 +106,31 @@ func (source) VerifyAndParse(_ context.Context, req plugins.InboundRequest) ([]p
 	if err != nil {
 		return nil, err
 	}
+	// Per-instance settings (ADR-0014 story 2): the gateway pins exactly the
+	// matched source's document after bearer authentication; absent or empty
+	// settings mean no filtering. Invalid settings cannot occur — Quoin
+	// validated the document against SourceSettingsSchema before it ever
+	// reached the snapshot.
+	var settings sourceSettings
+	if len(req.Settings) > 0 {
+		if err := json.Unmarshal(req.Settings, &settings); err != nil {
+			return nil, fmt.Errorf("synthetic source settings are not valid JSON: %w", err)
+		}
+	}
+	ignored := make(map[string]bool, len(settings.IgnoredAlertnames))
+	for _, name := range settings.IgnoredAlertnames {
+		ignored[name] = true
+	}
+	kept := batch.Alerts[:0]
+	for _, alert := range batch.Alerts {
+		if ignored[alert.Labels["alertname"]] {
+			continue
+		}
+		kept = append(kept, alert)
+	}
+	batch.Alerts = kept
 	if len(batch.Alerts) == 0 {
-		return nil, errors.New("synthetic alert batch is empty")
+		return nil, errors.New("synthetic alert batch is empty after instance settings filtering")
 	}
 	// Malformed individual items are Quoin intake issues, not a reason to
 	// discard other valid members of this accepted delivery at the gateway.

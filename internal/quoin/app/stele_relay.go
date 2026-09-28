@@ -101,6 +101,10 @@ func (server *steleRelayServer) GetCredentialSnapshot(ctx context.Context, reque
 		snapshot := &runtimev1.AlertSourceSnapshot{
 			SourceId: source.SourceID, SourceKey: source.SourceKey,
 			Protocol: source.Protocol, Enabled: source.Enabled,
+			// ADR-0014 story 2: per-instance non-secret settings travel with
+			// the authenticated snapshot; Stele pins them per matched source
+			// at webhook time and the snapshot version attributes them.
+			SettingsJson: source.Settings,
 		}
 		for _, credential := range source.Credentials {
 			snapshot.Credentials = append(snapshot.Credentials, &runtimev1.CredentialDigestEntry{

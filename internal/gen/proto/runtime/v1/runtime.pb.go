@@ -6232,12 +6232,19 @@ func (x *GetCredentialSnapshotResponse) GetContractFingerprint() string {
 
 // 单个逻辑告警源的非秘密投影（对应 alert_sources 的 enabled 与 active 凭据 digest）。
 type AlertSourceSnapshot struct {
-	state         protoimpl.MessageState   `protogen:"open.v1"`
-	SourceId      int64                    `protobuf:"varint,1,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"` // alert_sources.id
-	SourceKey     string                   `protobuf:"bytes,2,opt,name=source_key,json=sourceKey,proto3" json:"source_key,omitempty"`
-	Protocol      string                   `protobuf:"bytes,3,opt,name=protocol,proto3" json:"protocol,omitempty"` // v1: alertmanager（= EventSource.Kind()）
-	Enabled       bool                     `protobuf:"varint,4,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	Credentials   []*CredentialDigestEntry `protobuf:"bytes,5,rep,name=credentials,proto3" json:"credentials,omitempty"` // 仅 active 凭据（<=2）
+	state       protoimpl.MessageState   `protogen:"open.v1"`
+	SourceId    int64                    `protobuf:"varint,1,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"` // alert_sources.id
+	SourceKey   string                   `protobuf:"bytes,2,opt,name=source_key,json=sourceKey,proto3" json:"source_key,omitempty"`
+	Protocol    string                   `protobuf:"bytes,3,opt,name=protocol,proto3" json:"protocol,omitempty"` // v1: alertmanager（= EventSource.Kind()）
+	Enabled     bool                     `protobuf:"varint,4,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	Credentials []*CredentialDigestEntry `protobuf:"bytes,5,rep,name=credentials,proto3" json:"credentials,omitempty"` // 仅 active 凭据（<=2）
+	// 来源实例的非秘密设置文档（alert_sources.settings_json 原文字节；ADR-0014
+	// story 2）。由拥有该来源协议的插件声明的封闭 EventSourceConfigSchema 校验，
+	// 语义由 Quoin 权威裁决；Stele 只在 Bearer/digest 命中同一来源后把它作为
+	// InboundRequest.Settings 交给插件 VerifyAndParse。快照版本涵盖设置版本
+	// （settings_version），设置变更后 Stele 刷新即换新文档与版本；已入队事件
+	// 携带接受时刻的快照版本，投递溯源按版本归因，绝不携带秘密材料。
+	SettingsJson  []byte `protobuf:"bytes,6,opt,name=settings_json,json=settingsJson,proto3" json:"settings_json,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6303,6 +6310,13 @@ func (x *AlertSourceSnapshot) GetEnabled() bool {
 func (x *AlertSourceSnapshot) GetCredentials() []*CredentialDigestEntry {
 	if x != nil {
 		return x.Credentials
+	}
+	return nil
+}
+
+func (x *AlertSourceSnapshot) GetSettingsJson() []byte {
+	if x != nil {
+		return x.SettingsJson
 	}
 	return nil
 }
@@ -7007,14 +7021,15 @@ const file_runtime_proto_rawDesc = "" +
 	"\x1dGetCredentialSnapshotResponse\x12)\n" +
 	"\x10snapshot_version\x18\x01 \x01(\x04R\x0fsnapshotVersion\x12?\n" +
 	"\asources\x18\x02 \x03(\v2%.quoin.runtime.v1.AlertSourceSnapshotR\asources\x121\n" +
-	"\x14contract_fingerprint\x18\x03 \x01(\tR\x13contractFingerprint\"\xd2\x01\n" +
+	"\x14contract_fingerprint\x18\x03 \x01(\tR\x13contractFingerprint\"\xf7\x01\n" +
 	"\x13AlertSourceSnapshot\x12\x1b\n" +
 	"\tsource_id\x18\x01 \x01(\x03R\bsourceId\x12\x1d\n" +
 	"\n" +
 	"source_key\x18\x02 \x01(\tR\tsourceKey\x12\x1a\n" +
 	"\bprotocol\x18\x03 \x01(\tR\bprotocol\x12\x18\n" +
 	"\aenabled\x18\x04 \x01(\bR\aenabled\x12I\n" +
-	"\vcredentials\x18\x05 \x03(\v2'.quoin.runtime.v1.CredentialDigestEntryR\vcredentials\"T\n" +
+	"\vcredentials\x18\x05 \x03(\v2'.quoin.runtime.v1.CredentialDigestEntryR\vcredentials\x12#\n" +
+	"\rsettings_json\x18\x06 \x01(\fR\fsettingsJson\"T\n" +
 	"\x15CredentialDigestEntry\x12#\n" +
 	"\rcredential_id\x18\x01 \x01(\x03R\fcredentialId\x12\x16\n" +
 	"\x06digest\x18\x02 \x01(\fR\x06digest\"\x7f\n" +

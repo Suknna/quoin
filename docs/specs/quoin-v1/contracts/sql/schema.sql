@@ -279,6 +279,14 @@ CREATE TABLE alert_sources (
   protocol    TEXT NOT NULL,
   enabled     INTEGER NOT NULL CHECK (enabled IN (0,1)),
   row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- enable/disable 命令并发前提（DATA-ALERT-010）
+  -- 来源实例的非秘密设置权威文档（ADR-0014 story 2）：由拥有 protocol 的插件
+  -- 声明的封闭 EventSourceConfigSchema 校验；有界 64KiB，禁秘密材料（注册期
+  -- schema 检查）。交付身份（source_key/protocol/凭据）不受设置影响；快照
+  -- 版本经 settings_version 单调失效，投递按事件携带的快照版本归因。
+  settings_json    TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(settings_json) AND length(settings_json) <= 65536),
+  -- 全局单调设置版本：设置写入命令赋值 (SELECT MAX(settings_version))+1；
+  -- 凭据快照版本 = MAX(凭据 id, settings_version)，设置变更必然推进快照版本。
+  settings_version INTEGER NOT NULL DEFAULT 0 CHECK (settings_version >= 0),
   created_at  TEXT NOT NULL,
   disabled_at TEXT,
   CHECK ((enabled = 1 AND disabled_at IS NULL) OR (enabled = 0 AND disabled_at IS NOT NULL))

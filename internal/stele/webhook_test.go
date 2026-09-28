@@ -27,9 +27,10 @@ import (
 // base64url 文本，digest 是原始字节的 SHA-256；且 sourceKind 必须等于
 // 凭据所属来源的 protocol。
 type stubLookup struct {
-	mu     sync.RWMutex
-	ready  bool
-	digest []byte
+	mu       sync.RWMutex
+	ready    bool
+	digest   []byte
+	settings []byte // 命中后随 CredentialMatch 交给 InboundRequest 的来源设置
 }
 
 func (lookup *stubLookup) Ready() bool {
@@ -38,31 +39,34 @@ func (lookup *stubLookup) Ready() bool {
 	return lookup.ready
 }
 
-func (lookup *stubLookup) Credential(bearer, sourceKind string) (int64, int64, uint64, bool) {
+func (lookup *stubLookup) Credential(bearer, sourceKind string) (CredentialMatch, bool) {
 	raw, err := base64.RawURLEncoding.DecodeString(bearer)
 	if err != nil || len(raw) != 32 {
-		return 0, 0, 0, false
+		return CredentialMatch{}, false
 	}
 	digest := sha256.Sum256(raw)
 	if sourceKind != "alertmanager" || !subtleCompare(lookup.digest, digest[:]) {
-		return 0, 0, 0, false
+		return CredentialMatch{}, false
 	}
-	return 7, 9, 3, true
+	return CredentialMatch{SourceID: 7, CredentialID: 9, SnapshotVersion: 3, Settings: lookup.settings}, true
 }
 
 // stubEventSource 是最小 EventSource：成功时把请求体原样归一化为一个
-// alerts.batch 事件；fail 时模拟协议解析失败。
+// alerts.batch 事件；fail 时模拟协议解析失败。settingsSeen 记录最近一次
+// VerifyAndParse 收到的 Settings（ADR-0014 story 2 投递验证用）。
 type stubEventSource struct {
-	fail      bool
-	eventType string
+	fail         bool
+	eventType    string
+	settingsSeen []byte
 }
 
-func (source stubEventSource) Kind() string { return "alertmanager" }
+func (source *stubEventSource) Kind() string { return "alertmanager" }
 
-func (source stubEventSource) VerifyAndParse(_ context.Context, req plugins.InboundRequest) ([]plugins.Event, error) {
+func (source *stubEventSource) VerifyAndParse(_ context.Context, req plugins.InboundRequest) ([]plugins.Event, error) {
 	if source.fail {
 		return nil, errors.New("stub payload rejected")
 	}
+	source.settingsSeen = req.Settings
 	var probe map[string]any
 	if err := json.Unmarshal(req.Body, &probe); err != nil {
 		return nil, err
@@ -98,7 +102,7 @@ func (registry stubSourceRegistry) SourceEvent(kind, eventType string) bool {
 }
 
 func alertmanagerRegistry(fail bool) stubSourceRegistry {
-	source := stubEventSource{fail: fail}
+	source := &stubEventSource{fail: fail}
 	return stubSourceRegistry{sources: map[string]plugins.EventSource{"alertmanager": source}}
 }
 
@@ -206,7 +210,7 @@ func TestWebhookCredentialBoundToSourceProtocol(t *testing.T) {
 	_, digest := testBearer()
 	lookup := &stubLookup{ready: true, digest: digest}
 	mixed := stubSourceRegistry{sources: map[string]plugins.EventSource{
-		"alertmanager": stubEventSource{},
+		"alertmanager": &stubEventSource{},
 		"other":        stubKindSource("other"),
 	}}
 	server, _ := newTestWebhook(t, lookup, mixed)
@@ -242,7 +246,7 @@ func TestWebhookUndeclaredEventIsRejectedBeforeEnqueue(t *testing.T) {
 	_, digest := testBearer()
 	lookup := &stubLookup{ready: true, digest: digest}
 	registry := stubSourceRegistry{sources: map[string]plugins.EventSource{
-		"alertmanager": stubEventSource{eventType: "undeclared.event"},
+		"alertmanager": &stubEventSource{eventType: "undeclared.event"},
 	}}
 	server, queue := newTestWebhook(t, lookup, registry)
 	response, err := http.DefaultClient.Do(bearerRequest(t, http.MethodPost, server.URL+"/webhook/alertmanager", validPayload))
@@ -417,5 +421,55 @@ func TestWebhookIntakeMetricPerRequestVerdict(t *testing.T) {
 	if intake("accepted") != 2 || intake("rejected") != 2 || intake("unavailable") != 0 {
 		t.Fatalf("transport-level rejections must not be counted as intake verdicts: accepted=%v rejected=%v unavailable=%v",
 			intake("accepted"), intake("rejected"), intake("unavailable"))
+	}
+}
+
+// TestWebhookDeliversMatchedSourceSettingsToPlugin（ADR-0014 story 2）：
+// Bearer/digest 命中并把来源实例锁定之后，命中实例的非秘密设置才进入
+// InboundRequest.Settings；认证失败（401）绝不触达插件，设置也绝不随事件
+// 载荷扩散（载荷仍是原始 body）。
+func TestWebhookDeliversMatchedSourceSettingsToPlugin(t *testing.T) {
+	_, digest := testBearer()
+	source := &stubEventSource{}
+	lookup := &stubLookup{ready: true, digest: digest, settings: []byte(`{"ignoredAlertnames":["noise"]}`)}
+	queue := openTestQueue(t)
+	webhook := NewWebhook(queue, lookup, stubSourceRegistry{sources: map[string]plugins.EventSource{"alertmanager": source}}, NewMetrics())
+	server := httptest.NewServer(webhook.Handler())
+	defer server.Close()
+
+	response, err := http.DefaultClient.Do(bearerRequest(t, http.MethodPost, server.URL+"/webhook/alertmanager", validPayload))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", response.StatusCode)
+	}
+	if string(source.settingsSeen) != `{"ignoredAlertnames":["noise"]}` {
+		t.Fatalf("plugin settings = %q, want the matched instance document", source.settingsSeen)
+	}
+
+	// 认证失败路径：错误 bearer 401，插件绝不被调用（settingsSeen 不变）。
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/webhook/alertmanager", strings.NewReader(validPayload))
+	request.Header.Set("Authorization", "Bearer "+strings.Repeat("A", 43))
+	denied, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("wrong bearer post: %v", err)
+	}
+	denied.Body.Close()
+	if denied.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong bearer status = %d, want 401", denied.StatusCode)
+	}
+	if string(source.settingsSeen) != `{"ignoredAlertnames":["noise"]}` {
+		t.Fatalf("failed authentication reached the plugin: %q", source.settingsSeen)
+	}
+
+	// 设置不进入队列载荷：outbox payload 只是原始请求体。
+	batch, err := queue.FetchDueBatch(context.Background(), 10, time.Now())
+	if err != nil || len(batch) != 1 {
+		t.Fatalf("due batch = %v err=%v", batch, err)
+	}
+	if strings.Contains(string(batch[0].Payload), "ignoredAlertnames") {
+		t.Fatalf("settings leaked into the queued payload: %s", batch[0].Payload)
 	}
 }

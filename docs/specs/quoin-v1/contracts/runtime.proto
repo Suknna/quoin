@@ -938,6 +938,13 @@ message AlertSourceSnapshot {
   string protocol = 3;             // v1: alertmanager（= EventSource.Kind()）
   bool enabled = 4;
   repeated CredentialDigestEntry credentials = 5; // 仅 active 凭据（<=2）
+  // 来源实例的非秘密设置文档（alert_sources.settings_json 原文字节；ADR-0014
+  // story 2）。由拥有该来源协议的插件声明的封闭 EventSourceConfigSchema 校验，
+  // 语义由 Quoin 权威裁决；Stele 只在 Bearer/digest 命中同一来源后把它作为
+  // InboundRequest.Settings 交给插件 VerifyAndParse。快照版本涵盖设置版本
+  // （settings_version），设置变更后 Stele 刷新即换新文档与版本；已入队事件
+  // 携带接受时刻的快照版本，投递溯源按版本归因，绝不携带秘密材料。
+  bytes settings_json = 6;
 }
 
 // active 凭据 digest 条目：Stele 提交事件时回传 credential_id 与快照版本。

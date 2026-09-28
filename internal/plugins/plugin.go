@@ -89,6 +89,18 @@ type Plugin struct {
 	// settings document must satisfy. A nil schema is legal only for a plugin
 	// that truly takes no configuration.
 	ConfigSchema map[string]any
+	// EventSourceConfigSchema, when non-nil, is the closed JSON Schema
+	// (draft 2020-12, top-level object with additionalProperties disabled)
+	// every EventSource INSTANCE settings document must satisfy (ADR-0014
+	// story 2). It is deliberately separate from ConfigSchema: a plugin may
+	// carry both an EventSource and an HTTP ConnectionKind whose instance
+	// settings follow different schemas, and overloading ConfigSchema (the
+	// connection revision contract) would blur those authorities. Nil (or
+	// no EventSource capability) means the source takes no configuration —
+	// any non-empty settings document is rejected. The schema must not
+	// allow secret material: registration rejects any property named
+	// password, bearerToken, apiKey, token or secret at any depth.
+	EventSourceConfigSchema map[string]any
 	// EventSource is the optional inbound capability: Stele's webhook layer
 	// dispatches POST /webhook/{source} requests here.
 	EventSource EventSource
@@ -112,6 +124,11 @@ type Plugin struct {
 	// Validator is an optional purely static configuration checker beyond
 	// ConfigSchema (cross-field constraints). It performs no I/O.
 	Validator ConfigValidator
+	// EventSourceValidator is the optional purely static checker for
+	// EventSource instance settings beyond EventSourceConfigSchema
+	// (cross-field constraints). It performs no I/O and is consulted only
+	// when the plugin declares an EventSource.
+	EventSourceValidator ConfigValidator
 	// DiscoverObjects is the versioned bounded-discovery catalog: one entry
 	// per object type the plugin can observe (consumed by the observation
 	// scheduler; execution happens through the plugin's internal tools).

@@ -143,14 +143,19 @@ type relayTestHarness struct {
 
 type syntheticCredentialLookup struct {
 	sourceID, credentialID int64
+	settings               []byte
+	snapshotVersion        uint64
 }
 
 func (syntheticCredentialLookup) Ready() bool { return true }
-func (lookup syntheticCredentialLookup) Credential(bearer, kind string) (int64, int64, uint64, bool) {
+func (lookup syntheticCredentialLookup) Credential(bearer, kind string) (stele.CredentialMatch, bool) {
 	if bearer != "synthetic-source-secret" || kind != synthetic.Kind {
-		return 0, 0, 0, false
+		return stele.CredentialMatch{}, false
 	}
-	return lookup.sourceID, lookup.credentialID, 1, true
+	return stele.CredentialMatch{
+		SourceID: lookup.sourceID, CredentialID: lookup.credentialID,
+		SnapshotVersion: lookup.snapshotVersion, Settings: lookup.settings,
+	}, true
 }
 
 func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
@@ -172,7 +177,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	}
 	admin := harness.seedAdminContext(t, "registered-source")
 	digest := sha256Sum("synthetic-source-secret")
-	source, _, err := harness.alerts.CreateSource(admin, "register-second-source", "synthetic-source", synthetic.Kind, digest[:])
+	source, _, err := harness.alerts.CreateSource(admin, "register-second-source", "synthetic-source", synthetic.Kind, nil, digest[:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +205,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = queue.Close() })
-	webhook := stele.NewWebhook(queue, syntheticCredentialLookup{source.SourceID, source.CredentialID}, registry, stele.NewMetrics())
+	webhook := stele.NewWebhook(queue, syntheticCredentialLookup{sourceID: source.SourceID, credentialID: source.CredentialID, snapshotVersion: 1}, registry, stele.NewMetrics())
 	req := httptest.NewRequest(http.MethodPost, "/webhook/"+synthetic.Kind, strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer synthetic-source-secret")
 	writer := httptest.NewRecorder()
@@ -281,7 +286,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	if err != nil || len(sources) != 1 || sources[0].Enabled {
 		t.Fatalf("disabled source credential projection: %+v err=%v", sources, err)
 	}
-	if _, _, err := harness.alerts.CreateSource(admin, "register-disabled-source", "synthetic-disabled", synthetic.Kind, digest[:]); err == nil {
+	if _, _, err := harness.alerts.CreateSource(admin, "register-disabled-source", "synthetic-disabled", synthetic.Kind, nil, digest[:]); err == nil {
 		t.Fatal("disabled source kind accepted by admin create")
 	}
 }
@@ -372,7 +377,7 @@ func TestSteleRelayMTLSIdentityAndDelivery(t *testing.T) {
 	adminCtx := harness.seedAdminContext(t, "stele-relay-seed")
 	bearer := "known-test-bearer-0123456789abcdef"
 	digest := sha256Sum(bearer)
-	result, _, err := harness.alerts.CreateSource(adminCtx, "relay-seed-0001", "test-source", "alertmanager", digest[:])
+	result, _, err := harness.alerts.CreateSource(adminCtx, "relay-seed-0001", "test-source", "alertmanager", nil, digest[:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +478,7 @@ func TestSteleRelayDeliverEventsPerEventAdjudication(t *testing.T) {
 	adminCtx := harness.seedAdminContext(t, "stele-relay-events")
 	bearer := "event-batch-bearer-0123456789"
 	digest := sha256Sum(bearer)
-	result, _, err := harness.alerts.CreateSource(adminCtx, "relay-events-0001", "events-source", "alertmanager", digest[:])
+	result, _, err := harness.alerts.CreateSource(adminCtx, "relay-events-0001", "events-source", "alertmanager", nil, digest[:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,4 +678,209 @@ func sha256Sum(value string) [32]byte {
 
 func relayFingerprintHex(labels map[string]string) string {
 	return fmt.Sprintf("%x", binary.BigEndian.Uint64(alerts.FingerprintOf(labels)))
+}
+
+// TestSyntheticSourceSettingsEndToEnd (issue #110 story 2): two instances of
+// the same source kind with DISTINCT non-secret settings stay independent;
+// settings updates advance the snapshot version (cache reload) while already
+// queued events keep the accepted provenance; filtered alerts never leak into
+// the authoritative store; deliveries attribute their settings revision.
+func TestSyntheticSourceSettingsEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	harness := newRelayHarness(t)
+	registry := plugins.NewRegistry()
+	builtin, ok := plugins.Default().Plugin("alertmanager")
+	if !ok {
+		t.Fatal("alertmanager plugin missing from test host")
+	}
+	if err := registry.Register(builtin); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(synthetic.Plugin()); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.alerts.UseSourceRegistry(registry); err != nil {
+		t.Fatal(err)
+	}
+	admin := harness.seedAdminContext(t, "settings-e2e")
+	digest := sha256Sum("synthetic-source-secret")
+	sourceA, _, err := harness.alerts.CreateSource(admin, "settings-e2e-a", "src-a", synthetic.Kind, []byte(`{"ignoredAlertnames":["noise"]}`), digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceB, _, err := harness.alerts.CreateSource(admin, "settings-e2e-b", "src-b", synthetic.Kind, []byte(`{"ignoredAlertnames":["noise","keep"]}`), digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceA.SourceID == sourceB.SourceID {
+		t.Fatal("two instances must be independent rows")
+	}
+
+	clientFixture := startRelayServer(t, harness.alerts, harness.connection)
+	client := relayClient(t, clientFixture, &clientFixture.steleClient)
+	snapshot, err := client.GetCredentialSnapshot(ctx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settingsByKey := map[string]string{}
+	for _, source := range snapshot.GetSources() {
+		settingsByKey[source.GetSourceKey()] = string(source.GetSettingsJson())
+		if len(source.GetSettingsJson()) == 0 {
+			t.Fatalf("snapshot source %s carries no settings document", source.GetSourceKey())
+		}
+	}
+	if settingsByKey["src-a"] != `{"ignoredAlertnames":["noise"]}` || settingsByKey["src-b"] != `{"ignoredAlertnames":["noise","keep"]}` {
+		t.Fatalf("snapshot settings = %v", settingsByKey)
+	}
+
+	body := []byte(`{"status":"firing","alerts":[` +
+		`{"status":"firing","externalId":"keep-1","labels":{"alertname":"keep","instance":"h1"},"startsAt":"2026-09-28T00:00:00Z"},` +
+		`{"status":"firing","externalId":"noise-1","labels":{"alertname":"noise","instance":"h1"},"startsAt":"2026-09-28T00:00:00Z"},` +
+		`{"status":"firing","externalId":"core-1","labels":{"alertname":"core","instance":"h1"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
+	queue, err := stele.OpenQueue(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = queue.Close() })
+
+	postWebhook := func(lookup stele.CredentialLookup) int {
+		t.Helper()
+		webhook := stele.NewWebhook(queue, lookup, registry, stele.NewMetrics())
+		request := httptest.NewRequest(http.MethodPost, "/webhook/"+synthetic.Kind, strings.NewReader(string(body)))
+		request.Header.Set("Authorization", "Bearer synthetic-source-secret")
+		recorder := httptest.NewRecorder()
+		webhook.Handler().ServeHTTP(recorder, request)
+		return recorder.Code
+	}
+
+	// Instance A accepts the batch and filters noise at the edge; instance B
+	// (stricter settings) keeps only core from the SAME body — per-instance
+	// behavior through one compiled source kind.
+	if code := postWebhook(syntheticCredentialLookup{sourceID: sourceA.SourceID, credentialID: sourceA.CredentialID, settings: []byte(`{"ignoredAlertnames":["noise"]}`), snapshotVersion: 7}); code != http.StatusAccepted {
+		t.Fatalf("instance A webhook status = %d", code)
+	}
+	if code := postWebhook(syntheticCredentialLookup{sourceID: sourceB.SourceID, credentialID: sourceB.CredentialID, settings: []byte(`{"ignoredAlertnames":["noise","keep"]}`), snapshotVersion: 7}); code != http.StatusAccepted {
+		t.Fatalf("instance B webhook status = %d", code)
+	}
+	queued, err := queue.FetchDueBatch(ctx, 10, time.Now().UTC())
+	if err != nil || len(queued) != 2 {
+		t.Fatalf("queued after phase 1 = %d err=%v", len(queued), err)
+	}
+	bySource := map[int64]stele.QueuedEvent{}
+	for _, event := range queued {
+		if event.CredentialSnapshotVersion != 7 {
+			t.Fatalf("queued provenance version = %d, want 7", event.CredentialSnapshotVersion)
+		}
+		bySource[event.SourceID] = event
+		if strings.Contains(string(event.Payload), "noise-1") {
+			t.Fatal("filtered alert leaked into a queued payload")
+		}
+	}
+	if !strings.Contains(string(bySource[sourceA.SourceID].Payload), "keep-1") {
+		t.Fatalf("instance A payload = %s, want keep-1 present", bySource[sourceA.SourceID].Payload)
+	}
+	if !strings.Contains(string(bySource[sourceB.SourceID].Payload), "core-1") || strings.Contains(string(bySource[sourceB.SourceID].Payload), "keep-1") {
+		t.Fatalf("instance B payload = %s, want core only", bySource[sourceB.SourceID].Payload)
+	}
+
+	// Settings update on instance A: keep is now ignored too. The accepted
+	// event above must NOT be reinterpreted — it carries snapshot 7.
+	detailA, err := harness.alerts.GetSource(admin, "src-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := harness.alerts.SetSourceSettings(admin, "settings-e2e-a2", "src-a", []byte(`{"ignoredAlertnames":["noise","keep"]}`), detailA.RowVersion); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := client.GetCredentialSnapshot(ctx, &runtimev1.GetCredentialSnapshotRequest{ContractFingerprint: contract.ProtoAuthorityFingerprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.GetSnapshotVersion() <= snapshot.GetSnapshotVersion() {
+		t.Fatalf("settings update did not advance the snapshot version: %d -> %d", snapshot.GetSnapshotVersion(), refreshed.GetSnapshotVersion())
+	}
+
+	// A NEW webhook through instance A parses under the new revision and the
+	// queued provenance advances with it.
+	if code := postWebhook(syntheticCredentialLookup{sourceID: sourceA.SourceID, credentialID: sourceA.CredentialID, settings: []byte(`{"ignoredAlertnames":["noise","keep"]}`), snapshotVersion: refreshed.GetSnapshotVersion()}); code != http.StatusAccepted {
+		t.Fatalf("instance A post-update webhook status = %d", code)
+	}
+	queued, err = queue.FetchDueBatch(ctx, 10, time.Now().UTC())
+	if err != nil || len(queued) != 3 {
+		t.Fatalf("queued after phase 2 = %d err=%v", len(queued), err)
+	}
+	provenance := map[uint64]bool{}
+	for _, event := range queued {
+		provenance[event.CredentialSnapshotVersion] = true
+		if strings.Contains(string(event.Payload), "noise-1") {
+			t.Fatal("filtered alert leaked into a queued payload")
+		}
+	}
+	if !provenance[7] || !provenance[refreshed.GetSnapshotVersion()] {
+		t.Fatalf("queued provenance lost one revision: %v", provenance)
+	}
+
+	// Deliver the frozen events: each adjudicates under its own revision.
+	events := make([]*runtimev1.RelayEvent, 0, len(queued))
+	for _, event := range queued {
+		events = append(events, event.RelayEvent())
+	}
+	response, err := client.DeliverEvents(ctx, &runtimev1.DeliverEventsRequest{
+		ContractFingerprint: contract.ProtoAuthorityFingerprint,
+		Events:              events,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range response.GetResults() {
+		if status != runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_ACCEPTED {
+			t.Fatalf("delivery status = %v", status)
+		}
+	}
+
+	// Authoritative store: keep-1 only under instance A's old revision, core
+	// under both, noise NOWHERE — settings never turned into data, and old
+	// deliveries stay attributable to their settings revision.
+	rows, err := harness.database.SQL.Query(`SELECT s.source_key, o.external_identity FROM alert_occurrences o JOIN alert_sources s ON s.id=o.source_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	occurrences := map[string]map[string]bool{}
+	for rows.Next() {
+		var key, external string
+		if err := rows.Scan(&key, &external); err != nil {
+			t.Fatal(err)
+		}
+		if occurrences[key] == nil {
+			occurrences[key] = map[string]bool{}
+		}
+		occurrences[key][external] = true
+	}
+	if occurrences["src-a"]["keep-1"] != true || occurrences["src-a"]["core-1"] != true || len(occurrences["src-a"]) != 2 {
+		t.Fatalf("instance A occurrences = %v (keep must survive via its frozen revision)", occurrences["src-a"])
+	}
+	if occurrences["src-b"]["core-1"] != true || len(occurrences["src-b"]) != 1 {
+		t.Fatalf("instance B occurrences = %v", occurrences["src-b"])
+	}
+	var leaked int
+	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_occurrences WHERE external_identity='noise-1'`).Scan(&leaked); err != nil || leaked != 0 {
+		t.Fatalf("noise leaked into occurrences: %d err=%v", leaked, err)
+	}
+	deliveryRows, err := harness.database.SQL.Query(`SELECT DISTINCT credential_snapshot_version FROM alert_deliveries WHERE source_id=?`, sourceA.SourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deliveryRows.Close()
+	deliveryVersions := map[uint64]bool{}
+	for deliveryRows.Next() {
+		var version int64
+		if err := deliveryRows.Scan(&version); err != nil {
+			t.Fatal(err)
+		}
+		deliveryVersions[uint64(version)] = true
+	}
+	if !deliveryVersions[7] || !deliveryVersions[refreshed.GetSnapshotVersion()] {
+		t.Fatalf("delivery provenance missing a revision: %v", deliveryVersions)
+	}
 }

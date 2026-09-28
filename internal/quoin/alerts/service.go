@@ -3,6 +3,7 @@ package alerts
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -188,7 +189,7 @@ func (service *Service) machineScope(ctx context.Context) (context.Context, erro
 // records the most recent successfully committed Alertmanager delivery. An absent
 // value deliberately means the source is waiting for its first event, never faulty.
 func (service *Service) ListSources(ctx context.Context) ([]SourceSummary, error) {
-	rows, err := service.runner.Reader().QueryContext(ctx, `SELECT s.id, s.source_key, s.protocol, s.enabled, s.row_version, s.created_at, s.disabled_at, (SELECT MAX(o.committed_at) FROM alert_observations o JOIN alert_occurrences occurrence ON occurrence.id=o.occurrence_id WHERE occurrence.source_id=s.id) FROM alert_sources s ORDER BY s.id`)
+	rows, err := service.runner.Reader().QueryContext(ctx, `SELECT s.id, s.source_key, s.protocol, s.enabled, s.row_version, s.created_at, s.disabled_at, s.settings_json, (SELECT MAX(o.committed_at) FROM alert_observations o JOIN alert_occurrences occurrence ON occurrence.id=o.occurrence_id WHERE occurrence.source_id=s.id) FROM alert_sources s ORDER BY s.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -199,11 +200,13 @@ func (service *Service) ListSources(ctx context.Context) ([]SourceSummary, error
 		var id int64
 		var enabled int
 		var disabledAt, latestValidEventAt sql.NullString
-		if err := rows.Scan(&id, &summary.Key, &summary.Protocol, &enabled, &summary.RowVersion, &summary.CreatedAt, &disabledAt, &latestValidEventAt); err != nil {
+		var settings string
+		if err := rows.Scan(&id, &summary.Key, &summary.Protocol, &enabled, &summary.RowVersion, &summary.CreatedAt, &disabledAt, &settings, &latestValidEventAt); err != nil {
 			return nil, err
 		}
 		summary.ID = strconv.FormatInt(id, 10)
 		summary.Enabled = enabled == 1
+		summary.Settings = json.RawMessage(settings)
 		if disabledAt.Valid {
 			summary.DisabledAt = &disabledAt.String
 		}
@@ -216,14 +219,18 @@ func (service *Service) ListSources(ctx context.Context) ([]SourceSummary, error
 }
 
 type SourceSummary struct {
-	ID                 string  `json:"id"`
-	Key                string  `json:"key"`
-	Protocol           string  `json:"protocol"`
-	Enabled            bool    `json:"enabled"`
-	RowVersion         int64   `json:"rowVersion"`
-	CreatedAt          string  `json:"createdAt"`
-	DisabledAt         *string `json:"disabledAt"`
-	LatestValidEventAt *string `json:"latestValidEventAt,omitempty"`
+	ID                 string          `json:"id"`
+	Key                string          `json:"key"`
+	Protocol           string          `json:"protocol"`
+	Enabled            bool            `json:"enabled"`
+	RowVersion         int64           `json:"rowVersion"`
+	CreatedAt          string          `json:"createdAt"`
+	DisabledAt         *string         `json:"disabledAt"`
+	LatestValidEventAt *string         `json:"latestValidEventAt,omitempty"`
+	// Settings is the authoritative non-secret instance settings document
+	// (ADR-0014 story 2); always at least the empty object. Credential
+	// material can never appear: the owner plugin's closed schema bans it.
+	Settings json.RawMessage `json:"settings,omitempty"`
 }
 
 // GetSource returns one alert source with its credential count.
@@ -251,13 +258,15 @@ func sourceDetailOn(ctx context.Context, reader sourceQuerier, sourceKey string)
 	var id int64
 	var enabled int
 	var disabledAt, latestValidEventAt sql.NullString
-	err := reader.QueryRowContext(ctx, `SELECT s.id, s.source_key, s.protocol, s.enabled, s.row_version, s.created_at, s.disabled_at, (SELECT COUNT(*) FROM alert_source_credentials c WHERE c.source_id=s.id), (SELECT MAX(o.committed_at) FROM alert_observations o JOIN alert_occurrences occurrence ON occurrence.id=o.occurrence_id WHERE occurrence.source_id=s.id) FROM alert_sources s WHERE s.source_key=?`, sourceKey).
-		Scan(&id, &detail.Key, &detail.Protocol, &enabled, &detail.RowVersion, &detail.CreatedAt, &disabledAt, &detail.CredentialCount, &latestValidEventAt)
+	var settings string
+	err := reader.QueryRowContext(ctx, `SELECT s.id, s.source_key, s.protocol, s.enabled, s.row_version, s.created_at, s.disabled_at, s.settings_json, (SELECT COUNT(*) FROM alert_source_credentials c WHERE c.source_id=s.id), (SELECT MAX(o.committed_at) FROM alert_observations o JOIN alert_occurrences occurrence ON occurrence.id=o.occurrence_id WHERE occurrence.source_id=s.id) FROM alert_sources s WHERE s.source_key=?`, sourceKey).
+		Scan(&id, &detail.Key, &detail.Protocol, &enabled, &detail.RowVersion, &detail.CreatedAt, &disabledAt, &settings, &detail.CredentialCount, &latestValidEventAt)
 	if err != nil {
 		return SourceDetail{}, err
 	}
 	detail.ID = strconv.FormatInt(id, 10)
 	detail.Enabled = enabled == 1
+	detail.Settings = json.RawMessage(settings)
 	if disabledAt.Valid {
 		detail.DisabledAt = &disabledAt.String
 	}
@@ -285,13 +294,25 @@ func (service *Service) LookupDigestForBearer(ctx context.Context, bearerDigest 
 
 // CredentialSnapshot returns the frozen non-secret credential digest snapshot
 // Stele caches (RUNTIME-STELE-002): active + pending-retirement generations
-// only, retired generations absent.
+// only, retired generations absent. Each source carries its authoritative
+// non-secret settings document (ADR-0014 story 2) for the webhook's
+// InboundRequest, and the snapshot version spans both change domains —
+// credential identity AND settings revision (settings_version) — so a
+// settings update strictly advances the version and Stele's next refresh
+// swaps in exactly one attributed revision.
 func (service *Service) CredentialSnapshot(ctx context.Context) (version uint64, sources []SnapshotSource, err error) {
-	var maxID int64
-	if err := service.runner.Reader().QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM alert_source_credentials`).Scan(&maxID); err != nil {
+	var maxCredentialID, maxSettingsVersion int64
+	if err := service.runner.Reader().QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM alert_source_credentials`).Scan(&maxCredentialID); err != nil {
 		return 0, nil, err
 	}
-	rows, err := service.runner.Reader().QueryContext(ctx, `SELECT s.id, s.source_key, s.protocol, s.enabled, c.id, c.digest FROM alert_sources s JOIN alert_source_credentials c ON c.source_id = s.id WHERE c.state IN ('Active','PendingRetirement') ORDER BY s.id, c.id`)
+	if err := service.runner.Reader().QueryRowContext(ctx, `SELECT COALESCE(MAX(settings_version),0) FROM alert_sources`).Scan(&maxSettingsVersion); err != nil {
+		return 0, nil, err
+	}
+	version = uint64(maxCredentialID)
+	if maxSettingsVersion > 0 && uint64(maxSettingsVersion) > version {
+		version = uint64(maxSettingsVersion)
+	}
+	rows, err := service.runner.Reader().QueryContext(ctx, `SELECT s.id, s.source_key, s.protocol, s.enabled, s.settings_json, c.id, c.digest FROM alert_sources s JOIN alert_source_credentials c ON c.source_id = s.id WHERE c.state IN ('Active','PendingRetirement') ORDER BY s.id, c.id`)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -300,15 +321,15 @@ func (service *Service) CredentialSnapshot(ctx context.Context) (version uint64,
 	order := []int64{}
 	for rows.Next() {
 		var sourceID, credentialID int64
-		var sourceKey, protocol string
+		var sourceKey, protocol, settings string
 		var enabled int
 		var digest []byte
-		if err := rows.Scan(&sourceID, &sourceKey, &protocol, &enabled, &credentialID, &digest); err != nil {
+		if err := rows.Scan(&sourceID, &sourceKey, &protocol, &enabled, &settings, &credentialID, &digest); err != nil {
 			return 0, nil, err
 		}
 		entry := bySource[sourceID]
 		if entry == nil {
-			entry = &SnapshotSource{SourceID: sourceID, SourceKey: sourceKey, Protocol: protocol, Enabled: enabled == 1 && service.SourceEnabled(protocol)}
+			entry = &SnapshotSource{SourceID: sourceID, SourceKey: sourceKey, Protocol: protocol, Enabled: enabled == 1 && service.SourceEnabled(protocol), Settings: json.RawMessage(settings)}
 			bySource[sourceID] = entry
 			order = append(order, sourceID)
 		}
@@ -318,7 +339,7 @@ func (service *Service) CredentialSnapshot(ctx context.Context) (version uint64,
 	for _, sourceID := range order {
 		sources = append(sources, *bySource[sourceID])
 	}
-	return uint64(maxID), sources, nil
+	return version, sources, nil
 }
 
 type SnapshotSource struct {
@@ -327,6 +348,10 @@ type SnapshotSource struct {
 	Protocol    string             `json:"protocol"`
 	Enabled     bool               `json:"enabled"`
 	Credentials []CredentialDigest `json:"credentials"`
+	// Settings is the source instance's validated non-secret settings
+	// document (never nil; at least `{}`). Delivered to Stele inside the
+	// authenticated snapshot; never carries credential material.
+	Settings json.RawMessage `json:"settings,omitempty"`
 }
 
 type CredentialDigest struct {
