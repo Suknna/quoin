@@ -9,11 +9,61 @@ package alerts
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
+
+func TestSourceSettingsSnapshotAdvancesBeyondAllCredentialGenerations(t *testing.T) {
+	service, database, done := newTestService(t)
+	defer done()
+	registry := settingsRegistry(t)
+	if err := registry.Register(plugins.Plugin{
+		ID: "plain-plugin", Version: "1", DefaultEnabled: true,
+		EventSource: plainSettingsSource{}, EventTypes: []string{"alerts.batch"},
+		AlertNormalizer: settingsStubNormalizer{}, AlertIdentity: plugins.AlertIdentityExternal,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.UseSourceRegistry(registry); err != nil {
+		t.Fatal(err)
+	}
+	ctx := adminCommandContext(t, context.Background())
+	created, _, err := service.CreateSource(ctx, "settings-create-churn", "settings-churn", "settings-source", []byte(`{"site":"eu-west"}`), make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Other instances consume the same credential-ID sequence without
+	// advancing this source's settings counter.
+	for generation := byte(1); generation <= 8; generation++ {
+		digest := make([]byte, 32)
+		digest[0] = generation
+		if _, _, err := service.CreateSource(ctx, fmt.Sprintf("plain-create-%d", generation), fmt.Sprintf("plain-%d", generation), "plain-source", nil, digest); err != nil {
+			t.Fatalf("create plain source %d: %v", generation, err)
+		}
+	}
+	before, _, err := service.CredentialSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _, err := service.SetSourceSettings(ctx, "settings-update-churn", "settings-churn", []byte(`{"site":"ap-east"}`), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, snapshot, err := service.CredentialSnapshot(ctx)
+	if err != nil || after <= before {
+		t.Fatalf("snapshot version failed to advance over %d credential generations: before=%d after=%d err=%v", 8, before, after, err)
+	}
+	var storedVersion int64
+	if err := database.SQL.QueryRow(`SELECT settings_version FROM alert_sources WHERE id=?`, created.SourceID).Scan(&storedVersion); err != nil {
+		t.Fatal(err)
+	}
+	if storedVersion != int64(after) || string(updated.Settings) != `{"site":"ap-east"}` || len(snapshot) != 9 || string(snapshot[0].Settings) != `{"site":"ap-east"}` {
+		t.Fatalf("settings update/snapshot drifted: updated=%+v snapshot=%+v version=%d", updated, snapshot, after)
+	}
+}
 
 // settingsPlugin is an inline compiled plugin declaring a closed event-source
 // settings schema, so the service-level tests exercise real schema validation
@@ -45,6 +95,14 @@ func settingsRegistry(t *testing.T) *plugins.Registry {
 }
 
 type settingsStubSource struct{}
+
+type plainSettingsSource struct{}
+
+func (plainSettingsSource) Kind() string { return "plain-source" }
+
+func (plainSettingsSource) VerifyAndParse(_ context.Context, _ plugins.InboundRequest) ([]plugins.Event, error) {
+	return nil, nil
+}
 
 func (settingsStubSource) Kind() string { return "settings-source" }
 

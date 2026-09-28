@@ -201,7 +201,7 @@ func (service *Service) CreateSource(ctx context.Context, clientCommandID, sourc
 			// monotone counter (DATA-ALERT-013).
 			settingsVersion := int64(0)
 			if string(settingsJSON) != "{}" {
-				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(settings_version),0)+1 FROM alert_sources`).Scan(&settingsVersion); err != nil {
+				if err := nextSourceSettingsVersion(ctx, tx, &settingsVersion); err != nil {
 					return CreateSourceResult{}, execution.Changed, err
 				}
 			}
@@ -321,7 +321,7 @@ func (service *Service) SetSourceSettings(ctx context.Context, clientCommandID, 
 				return SourceDetail{}, execution.Unchanged, err
 			}
 			var settingsVersion int64
-			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(settings_version),0)+1 FROM alert_sources`).Scan(&settingsVersion); err != nil {
+			if err := nextSourceSettingsVersion(ctx, tx, &settingsVersion); err != nil {
 				return SourceDetail{}, execution.Changed, err
 			}
 			result, err := tx.ExecContext(ctx, `UPDATE alert_sources SET settings_json=?, settings_version=?, row_version=row_version+1 WHERE source_key=? AND row_version=?`,
@@ -347,6 +347,17 @@ func (service *Service) SetSourceSettings(ctx context.Context, clientCommandID, 
 		return SourceDetail{}, false, err
 	}
 	return outcome.Result, outcome.Replayed, nil
+}
+
+// nextSourceSettingsVersion uses the same global sequence space as credential
+// IDs. SnapshotVersion is MAX(credential ID, settings version), so merely
+// incrementing settings_version can silently leave Stele on the old cache
+// after many credential rotations or other sources' credentials are issued.
+func nextSourceSettingsVersion(ctx context.Context, tx execution.Executor, version *int64) error {
+	return tx.QueryRowContext(ctx, `SELECT MAX(
+		COALESCE((SELECT MAX(settings_version) FROM alert_sources),0),
+		COALESCE((SELECT MAX(id) FROM alert_source_credentials),0)
+	)+1`).Scan(version)
 }
 
 // RotateCredential creates a new Active generation superseding the current

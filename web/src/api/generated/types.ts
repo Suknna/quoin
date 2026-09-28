@@ -2096,6 +2096,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/alert-sources/{sourceKey}/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 替换告警源实例的非秘密设置（Admin，ADR-0014 story 2）
+         * @description 设置文档是来源实例的非秘密参数权威（alert_sources.settings_json）：写入前由拥有该来源
+         *     protocol 的插件声明的封闭 EventSourceConfigSchema 校验（未知字段/缺必填/类型错/超
+         *     64KiB 均为确定性 400），canonical 化落库；命令不改变交付身份（sourceKey/protocol/凭据），
+         *     并推进全局单调 settings_version 使 Stele 凭据快照失效。同 clientCommandId 同请求重放
+         *     返回同一结果；不同请求复用同一 clientCommandId 冲突 409；陈旧 expectedRowVersion 409。
+         */
+        post: operations["setAlertSourceSettings"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/backups": {
         parameters: {
             query?: never;
@@ -3680,12 +3704,20 @@ export interface components {
             /** @description Registered alert event source kind. */
             protocol: string;
             enabled: boolean;
-            /** @description 来源行并发前提（enable/disable 命令使用，HTTP-COMMAND-002）。 */
+            /** @description 来源行并发前提（enable/disable/settings 命令使用，HTTP-COMMAND-002）。 */
             rowVersion: number;
             createdAt: components["schemas"]["Timestamp"];
             disabledAt?: components["schemas"]["Timestamp"];
             /** @description 最近一次正常 Alert Observation 的 Quoin 提交时间。缺失表示等待首条有效事件；静默不表示故障。 */
             latestValidEventAt?: components["schemas"]["Timestamp"];
+            /**
+             * @description 来源实例的非秘密设置权威文档（ADR-0014 story 2，DATA-ALERT-012）：始终至少为
+             *     `{}`；结构由拥有 protocol 的插件声明的封闭 EventSourceConfigSchema 决定。凭据
+             *     材料按构造不可出现（注册期 schema 禁止 password/bearerToken/apiKey/token/secret）。
+             */
+            settings?: {
+                [key: string]: unknown;
+            };
         };
         AlertmanagerReceiverConfig: {
             /**
@@ -3714,6 +3746,13 @@ export interface components {
         CreateAlertSourceRequest: components["schemas"]["CommandBase"] & {
             key: components["schemas"]["StableKey"];
             protocol: string;
+            /** @description 来源实例初始非秘密设置（ADR-0014 story 2）；缺省为 `{}`。写入前由拥有 protocol 的插件封闭 EventSourceConfigSchema 校验，不合规为确定性 400 且不产生任何行。 */
+            settings?: Record<string, never>;
+        };
+        /** @description setAlertSourceSettings 的请求体（ADR-0014 story 2）。 */
+        AlertSourceSettingsCommandRequest: components["schemas"]["VersionedCommandRequest"] & {
+            /** @description 替换后的非秘密设置文档；由拥有 protocol 的插件封闭 EventSourceConfigSchema 校验（≤64KiB，canonical 化落库，DATA-ALERT-012）。 */
+            settings: Record<string, never>;
         };
         AlertSourceCredentialMetadata: {
             sourceKey: components["schemas"]["StableKey"];
@@ -4236,6 +4275,7 @@ export type AlertmanagerReceiverConfig = components['schemas']['AlertmanagerRece
 export type AlertSourceDetail = components['schemas']['AlertSourceDetail'];
 export type CredentialSummary = components['schemas']['CredentialSummary'];
 export type CreateAlertSourceRequest = components['schemas']['CreateAlertSourceRequest'];
+export type AlertSourceSettingsCommandRequest = components['schemas']['AlertSourceSettingsCommandRequest'];
 export type AlertSourceCredentialMetadata = components['schemas']['AlertSourceCredentialMetadata'];
 export type RevealCredentialRequest = components['schemas']['RevealCredentialRequest'];
 export type RevealCredentialResult = components['schemas']['RevealCredentialResult'];
@@ -7372,6 +7412,8 @@ export interface operations {
                             id: string;
                             /** @description EventSource.Kind(); only present when event_source is declared. Not necessarily the plugin ID. */
                             sourceKind?: string;
+                            /** @description 该来源实例非秘密设置的封闭 JSON Schema（ADR-0014 story 2）；仅 event_source 能力存在。缺省表示来源不接受设置（只接受空文档）。 */
+                            eventSourceConfigSchema?: Record<string, never>;
                             /** @description 注册的受控 HTTP 连接类型，独立于插件 ID 与入站 sourceKind。 */
                             connectionKind?: string;
                             connectionAuthModes?: ("none" | "basic" | "bearer")[];
@@ -8113,6 +8155,38 @@ export interface operations {
         };
         responses: {
             /** @description 来源已停用。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertSourceDetail"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+        };
+    };
+    setAlertSourceSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sourceKey: components["parameters"]["SourceKey"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AlertSourceSettingsCommandRequest"];
+            };
+        };
+        responses: {
+            /** @description 设置已替换；响应是刷新后的来源详情（含存储文档）。 */
             200: {
                 headers: {
                     [name: string]: unknown;
