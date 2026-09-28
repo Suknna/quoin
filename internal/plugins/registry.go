@@ -351,6 +351,9 @@ func validatePlugin(plugin Plugin) error {
 	if plugin.AlertNormalizer != nil && plugin.AlertIdentity != AlertIdentityLabels && plugin.AlertIdentity != AlertIdentityExternal || plugin.AlertNormalizer == nil && plugin.AlertIdentity != "" {
 		return fmt.Errorf("%w: %s must declare exactly one alert identity mode alongside its normalizer", ErrInvalidPlugin, plugin.ID)
 	}
+	if err := validatePostCommitDeclarations(plugin); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -1946,6 +1946,47 @@ CREATE TABLE maintenance_items (
 CREATE INDEX idx_maintenance_items_state ON maintenance_items (maintenance_revision, safe_state, kind);
 
 -- ============================================================================
+-- 11b. 插件后提交事实（ADR-0014 小核心事件插件）
+-- ============================================================================
+
+-- 有限事实词表的权威持久层：事件行与触发它的领域事实在同一权威事务提交
+-- （DATA-PLUGIN-001）；每个已启用订阅者一行投递账本，(event_id, subscriber_id)
+-- 唯一，至少一次投递由订阅者按事实 ID 幂等。事件只携带稳定 ID、版本与有界
+-- 不可变引用（refs_json），永不携带凭据或无界正文。
+CREATE TABLE plugin_events (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  event_type      TEXT NOT NULL CHECK (event_type IN ('quoin.alert.observation.committed','quoin.inspection.daily_window_due','quoin.inspection.check_evidence.committed','quoin.inspection.report.sealed')),
+  payload_version INTEGER NOT NULL CHECK (payload_version = 1),
+  committed_at    TEXT NOT NULL,
+  refs_json       TEXT NOT NULL CHECK (length(refs_json) BETWEEN 2 AND 4096)
+) STRICT;
+CREATE TRIGGER trg_plugin_events_no_update BEFORE UPDATE ON plugin_events
+BEGIN SELECT RAISE(ABORT, 'plugin_events is append-only'); END;
+
+CREATE TABLE plugin_event_deliveries (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
+  event_id        INTEGER NOT NULL REFERENCES plugin_events(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  subscriber_id   TEXT NOT NULL CHECK (length(subscriber_id) BETWEEN 1 AND 64),
+  state           TEXT NOT NULL CHECK (state IN ('pending','delivered','deadletter')),
+  attempts        INTEGER NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 64),
+  next_attempt_at TEXT,
+  last_error      TEXT CHECK (last_error IS NULL OR length(last_error) BETWEEN 1 AND 1024),
+  delivered_at    TEXT,
+  created_at      TEXT NOT NULL,
+  UNIQUE (event_id, subscriber_id),
+  -- delivered 恰好携带完成时间；pending/deadletter 没有。
+  CHECK ((state = 'delivered') = (delivered_at IS NOT NULL)),
+  -- deadletter 只能来自有界重试耗尽或订阅者缺席，必须携带终局原因。
+  CHECK (state != 'deadletter' OR (attempts >= 1 AND last_error IS NOT NULL))
+) STRICT;
+CREATE INDEX idx_plugin_event_deliveries_due ON plugin_event_deliveries (state, next_attempt_at, id);
+
+-- 投递账本不变量：delivered 是订阅者的终态（重放只对 deadletter 开放）。
+CREATE TRIGGER trg_plugin_event_deliveries_delivered_terminal BEFORE UPDATE ON plugin_event_deliveries
+WHEN OLD.state = 'delivered' AND NEW.state <> 'delivered'
+BEGIN SELECT RAISE(ABORT, 'plugin_event_deliveries delivered is terminal; only deadletter replay requeues'); END;
+
+-- ============================================================================
 -- 12. 触发器（机器可表达的不变量）
 -- ============================================================================
 

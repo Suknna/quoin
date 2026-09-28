@@ -12,6 +12,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/execution"
+	"github.com/Suknna/quoin/internal/quoin/pluginevents"
 )
 
 // Service is the alert-domain facade over the frozen SQLite authority.
@@ -44,6 +45,10 @@ type Service struct {
 	// The deployment allowlist is installed before serving. nil means this
 	// service has not received deployment configuration (isolated tests).
 	enabledPlugins map[string]bool
+	// publisher persists the bounded post-commit fact (ADR-0014) inside each
+	// authority transaction that commits an alert observation. nil (isolated
+	// tests, pre-wiring) makes emission a no-op.
+	publisher *pluginevents.Publisher
 }
 
 // NewService is the pre-composition constructor: the service owns a private
@@ -112,6 +117,13 @@ func (service *Service) UseEnabledPlugins(ids []string) {
 	for _, id := range ids {
 		service.enabledPlugins[id] = true
 	}
+}
+
+// SetPostCommitPublisher installs the post-commit fact publisher (ADR-0014).
+// Emission is inside the runner transaction; the publisher's subscriber index
+// is the same frozen assembly + deployment enablement the dispatcher uses.
+func (service *Service) SetPostCommitPublisher(publisher *pluginevents.Publisher) {
+	service.publisher = publisher
 }
 
 func (service *Service) SourceEnabled(kind string) bool {

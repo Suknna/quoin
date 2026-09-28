@@ -24,6 +24,7 @@ import (
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/execution"
+	"github.com/Suknna/quoin/internal/quoin/pluginevents"
 )
 
 var (
@@ -117,6 +118,9 @@ type Service struct {
 	// 日报 Agent 分析（ADR-0014）：创建重试与结果裁决都是系统后台工作。
 	ensureDailyAnalysis *execution.Operation
 	dailyAnalysisResult *execution.Operation
+	// publisher 在每个提交领域事实的权威事务内持久化有界后提交事实
+	// （ADR-0014）；nil（未装配/隔离测试）时为无行 no-op。
+	publisher *pluginevents.Publisher
 }
 
 // NewService assembles the module over db: the pool backs the runner's owned
