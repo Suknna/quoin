@@ -833,6 +833,12 @@ func (s *Service) dailySourceReportOn(ctx context.Context, tx execution.Executor
 	if len(runs) == 0 {
 		addReason(dailyGapNoCollection)
 	}
+	// A terminal run with no check result is still a missing collection. A
+	// SkippedOverlap run may be excluded entirely (it has no evidence_at), but
+	// an inconsistent Completed run must never turn an empty source green.
+	if len(source.Checks) == 0 && len(source.GapReasons) == 0 {
+		addReason(dailyGapNoCollection)
+	}
 	for _, check := range source.Checks {
 		if check.Status != "ok" {
 			source.Status = "gap"
