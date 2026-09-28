@@ -11,7 +11,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/connections"
@@ -48,6 +51,14 @@ func syntheticHTTPPlugin(authModes ...string) plugins.Plugin {
 		ID: "synthmetrics", Version: "1", DefaultEnabled: true, ConnectionKind: "synth-http",
 		ConnectionTransport: plugins.ConnectionTransportHTTP, ConnectionAuthModes: authModes,
 	}
+}
+
+// probingSyntheticPlugin declares the same synthetic kind with a bounded
+// read-only probe contract: one GET /health expected to answer 200.
+func probingSyntheticPlugin() plugins.Plugin {
+	plugin := syntheticHTTPPlugin()
+	plugin.ConnectionProbePath = "/health"
+	return plugin
 }
 
 // createSynthetic creates one connection of the given kind with a bearer
@@ -176,5 +187,220 @@ func TestModelProviderStaysOffGatewayKindRegistry(t *testing.T) {
 	if err := registry.Register(plugins.Plugin{ID: "impostor", Version: "1", ConnectionKind: "model_provider",
 		ConnectionTransport: plugins.ConnectionTransportHTTP, ConnectionAuthModes: []string{plugins.AuthModeBearer}}); err == nil {
 		t.Fatal("a plugin must not declare the reserved model_provider kind")
+	}
+}
+
+// TestSyntheticHTTPKindProbeLifecycleEnablesConnection walks the full probe
+// closure for a plugin-declared HTTP kind: create → StartProbe (freezing the
+// current revision+generation pair under the <kind>_probe purpose) → bind →
+// accept → CommitProbeResult over the shared HTTP typed child → Enable with
+// the immutable qualification. The bearer secret must appear nowhere in the
+// non-secret projections, the probe record or the attempt tables.
+func TestSyntheticHTTPKindProbeLifecycleEnablesConnection(t *testing.T) {
+	service, database, _ := newService(t)
+	ctx := adminContext(t, nextCorrelation())
+	service.SetConnectionKinds(fixtureConnectionKinds(t, probingSyntheticPlugin()))
+	created := createSynthetic(t, service, ctx, "synth-probe", "synth-http", "bearer")
+
+	attemptID, err := service.StartProbe(ctx, created.Name)
+	if err != nil {
+		t.Fatalf("synthetic kind probe start: %v", err)
+	}
+	var purpose string
+	if err := database.QueryRow(`SELECT purpose FROM attempt_connection_grants WHERE attempt_id=?`, attemptID).Scan(&purpose); err != nil {
+		t.Fatal(err)
+	}
+	if purpose != "synth-http_probe" {
+		t.Fatalf("probe grant purpose %q, want synth-http_probe", purpose)
+	}
+	var actionSet string
+	if err := database.QueryRow(`SELECT action_set_id FROM connection_probe_results WHERE 1=0`).Scan(&actionSet); err == nil {
+		t.Fatal("no probe result may exist before the commit")
+	}
+
+	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-synth", 7, 5*time.Minute); err != nil || !ok {
+		t.Fatalf("bind: %v ok=%v", err, ok)
+	}
+	if err := service.AcceptProbe(context.Background(), attemptID, "boot-synth", 7); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	child := &connections.TypedChild{HTTP: &connections.HTTPProbeChild{
+		RequestMethod: "GET", RequestPath: "/health", ExpectedStatus: 200, ObservedStatus: 200,
+		DetailJSON: `{"method":"GET","path":"/health","expectedStatus":200,"observedStatus":200}`,
+	}}
+	result := connections.TypedProbeResult{Outcome: "passed", ResultDigest: fmt.Sprintf("%064x", attemptID), StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z"}
+	if err := service.CommitProbeResult(context.Background(), attemptID, "boot-synth", 7, result, child); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	var storedActionSet string
+	var observedStatus int
+	if err := database.QueryRow(`SELECT r.action_set_id, h.observed_status FROM connection_probe_results r JOIN http_connection_probe_results h ON h.probe_result_id=r.id WHERE r.attempt_id=?`, attemptID).Scan(&storedActionSet, &observedStatus); err != nil {
+		t.Fatalf("typed child closure: %v", err)
+	}
+	if storedActionSet != connections.HTTPProbeActionSetID || observedStatus != 200 {
+		t.Fatalf("probe result actionSet=%s observed=%d, want %s/200", storedActionSet, observedStatus, connections.HTTPProbeActionSetID)
+	}
+
+	enabled, err := service.Enable(ctx, created.Name, created.RowVersion, 0, 1)
+	if !errors.Is(err, connections.ErrValidation) {
+		t.Fatalf("enable without an explicit passed probe must be rejected, got %v", err)
+	}
+	var probeResultID int64
+	if err := database.QueryRow(`SELECT id FROM connection_probe_results WHERE attempt_id=?`, attemptID).Scan(&probeResultID); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err = service.Enable(ctx, created.Name, created.RowVersion, probeResultID, 1)
+	if err != nil {
+		t.Fatalf("enable with the passed probe: %v", err)
+	}
+	if !enabled.Enabled {
+		t.Fatal("connection must be enabled after the passed probe")
+	}
+
+	// Credential material never leaks into the non-secret surfaces: the
+	// bearer token exists only inside the encrypted generation envelope.
+	var configJSON, detailJSON string
+	if err := database.QueryRow(`SELECT config_json FROM connection_revisions WHERE id=?`, created.CurrentRevisionID).Scan(&configJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT detail_json FROM http_connection_probe_results WHERE probe_result_id=?`, probeResultID).Scan(&detailJSON); err != nil {
+		t.Fatal(err)
+	}
+	for _, surface := range map[string]string{"revision config": configJSON, "probe detail": detailJSON} {
+		if strings.Contains(surface, "synth-token") {
+			t.Fatalf("bearer token leaked into %s: %s", surface, "<redacted>")
+		}
+	}
+}
+
+// TestSyntheticHTTPKindChildDivergenceFailsClosed proves the commit-side
+// registry re-check: a result whose request shape diverges from the frozen
+// plugin declaration is rejected, never sealed.
+func TestSyntheticHTTPKindChildDivergenceFailsClosed(t *testing.T) {
+	service, _, _ := newService(t)
+	ctx := adminContext(t, nextCorrelation())
+	service.SetConnectionKinds(fixtureConnectionKinds(t, probingSyntheticPlugin()))
+	created := createSynthetic(t, service, ctx, "synth-diverge", "synth-http", "none")
+	attemptID, err := service.StartProbe(ctx, created.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-diverge", 3, 5*time.Minute); err != nil || !ok {
+		t.Fatalf("bind: %v ok=%v", err, ok)
+	}
+	if err := service.AcceptProbe(context.Background(), attemptID, "boot-diverge", 3); err != nil {
+		t.Fatal(err)
+	}
+	child := &connections.TypedChild{HTTP: &connections.HTTPProbeChild{
+		RequestMethod: "GET", RequestPath: "/elsewhere", ExpectedStatus: 200, ObservedStatus: 200,
+		DetailJSON: `{"method":"GET","path":"/elsewhere","expectedStatus":200,"observedStatus":200}`,
+	}}
+	result := connections.TypedProbeResult{Outcome: "passed", ResultDigest: fmt.Sprintf("%064x", attemptID), StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:00:01Z"}
+	if err := service.CommitProbeResult(context.Background(), attemptID, "boot-diverge", 3, result, child); err == nil {
+		t.Fatal("a diverging request shape must fail closed")
+	}
+}
+
+// TestSyntheticHTTPKindWithoutProbeContractFailsClosed proves the ADR-0014
+// closure rule: a kind whose plugin declares no probe contract can never
+// start a probe attempt (it would strand outside every terminal write path).
+func TestSyntheticHTTPKindWithoutProbeContractFailsClosed(t *testing.T) {
+	service, _, _ := newService(t)
+	ctx := adminContext(t, nextCorrelation())
+	service.SetConnectionKinds(fixtureConnectionKinds(t, syntheticHTTPPlugin()))
+	created := createSynthetic(t, service, ctx, "synth-noprobe", "synth-http", "none")
+	if _, err := service.StartProbe(ctx, created.Name); !errors.Is(err, connections.ErrValidation) {
+		t.Fatalf("probe start without a declared contract must be rejected, got %v", err)
+	}
+}
+
+// TestRevokedSyntheticHTTPKindProbeFailsClosed proves the revocation
+// boundary on the probe path: once the owning plugin leaves the deployment
+// enablement set, its kinds cannot start probes anymore.
+func TestRevokedSyntheticHTTPKindProbeFailsClosed(t *testing.T) {
+	service, _, _ := newService(t)
+	ctx := adminContext(t, nextCorrelation())
+	service.SetConnectionKinds(fixtureConnectionKinds(t, probingSyntheticPlugin()))
+	created := createSynthetic(t, service, ctx, "synth-revoked-probe", "synth-http", "none")
+	service.SetConnectionKinds(fixtureConnectionKinds(t))
+	if _, err := service.StartProbe(ctx, created.Name); !errors.Is(err, connections.ErrValidation) {
+		t.Fatalf("revoked kind probe start must be rejected, got %v", err)
+	}
+}
+
+// TestSyntheticHTTPKindProbeCancelAndInterruptCloseTyped proves the full
+// fence coverage for registry kinds: a user cancellation and a lease-driven
+// interruption both seal the shared HTTP typed child (frozen request shape,
+// observed 0 — no manufactured success) and converge the attempt terminal
+// state under the same closure rules as the core kinds.
+func TestSyntheticHTTPKindProbeCancelAndInterruptCloseTyped(t *testing.T) {
+	service, database, _ := newService(t)
+	ctx := adminContext(t, nextCorrelation())
+	service.SetConnectionKinds(fixtureConnectionKinds(t, probingSyntheticPlugin()))
+
+	// User cancellation: Running probe → Cancelling fence → Cancelled.
+	created := createSynthetic(t, service, ctx, "synth-cancel", "synth-http", "none")
+	attemptID, err := service.StartProbe(ctx, created.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), attemptID, "boot-cancel", 5, 5*time.Minute); err != nil || !ok {
+		t.Fatalf("bind: %v ok=%v", err, ok)
+	}
+	if err := service.AcceptProbe(context.Background(), attemptID, "boot-cancel", 5); err != nil {
+		t.Fatal(err)
+	}
+	var rowVersion int64
+	if err := database.QueryRow(`SELECT row_version FROM execution_attempts WHERE id=?`, attemptID).Scan(&rowVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CancelProbe(adminContext(t, nextCorrelation()), attemptID, rowVersion); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if err := service.RecordCancelAck(context.Background(), attemptID); err != nil {
+		t.Fatalf("cancel ack: %v", err)
+	}
+	var state string
+	var observedStatus int
+	if err := database.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, attemptID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "Cancelled" {
+		t.Fatalf("cancelled probe state %s, want Cancelled", state)
+	}
+	if err := database.QueryRow(`SELECT h.observed_status FROM connection_probe_results r JOIN http_connection_probe_results h ON h.probe_result_id=r.id WHERE r.attempt_id=?`, attemptID).Scan(&observedStatus); err != nil {
+		t.Fatalf("cancelled typed child: %v", err)
+	}
+	if observedStatus != 0 {
+		t.Fatalf("cancelled probe recorded observed status %d, want 0", observedStatus)
+	}
+
+	// Runtime-driven interruption converges the same way.
+	interruptedConn := createSynthetic(t, service, ctx, "synth-interrupt", "synth-http", "none")
+	interruptAttempt, err := service.StartProbe(ctx, interruptedConn.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok, err := service.BindQueuedToStream(context.Background(), interruptAttempt, "boot-interrupt", 6, 5*time.Minute); err != nil || !ok {
+		t.Fatalf("bind: %v ok=%v", err, ok)
+	}
+	if err := service.AcceptProbe(context.Background(), interruptAttempt, "boot-interrupt", 6); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.InterruptProbe(context.Background(), interruptAttempt, "lease_expired"); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	if err := database.QueryRow(`SELECT state FROM execution_attempts WHERE id=?`, interruptAttempt).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "Interrupted" {
+		t.Fatalf("interrupted probe state %s, want Interrupted", state)
+	}
+	var actionSet string
+	if err := database.QueryRow(`SELECT r.action_set_id FROM connection_probe_results r WHERE r.attempt_id=?`, interruptAttempt).Scan(&actionSet); err != nil {
+		t.Fatal(err)
+	}
+	if actionSet != connections.HTTPProbeActionSetID {
+		t.Fatalf("interrupted probe action set %q, want %q", actionSet, connections.HTTPProbeActionSetID)
 	}
 }

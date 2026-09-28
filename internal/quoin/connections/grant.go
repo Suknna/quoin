@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 	"github.com/Suknna/quoin/internal/quoin/tools/thanos"
 )
@@ -259,7 +260,7 @@ func (service *Service) CancelProbe(ctx context.Context, attemptID int64, expect
 		if err := tx.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
 			return 0, err
 		}
-		actionSetID, actionSetVersion, err := ActionSet(connectionType)
+		probeContract, actionSetID, actionSetVersion, err := service.terminalActionSet(connectionType)
 		if err != nil {
 			return 0, err
 		}
@@ -277,7 +278,7 @@ func (service *Service) CancelProbe(ctx context.Context, attemptID int64, expect
 		if err != nil {
 			return 0, err
 		}
-		if err := writeCancelledChild(ctx, tx, headerID, connectionType, revisionID); err != nil {
+		if err := writeCancelledChild(ctx, tx, headerID, connectionType, revisionID, probeContract); err != nil {
 			return 0, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Cancelling',row_version=row_version+1 WHERE id=? AND state='Running'`, attemptID); err != nil {
@@ -339,7 +340,7 @@ func (service *Service) InterruptProbe(ctx context.Context, attemptID int64, rea
 		if err := tx.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
 			return 0, err
 		}
-		actionSetID, actionSetVersion, err := ActionSet(connectionType)
+		probeContract, actionSetID, actionSetVersion, err := service.terminalActionSet(connectionType)
 		if err != nil {
 			return 0, err
 		}
@@ -356,7 +357,7 @@ func (service *Service) InterruptProbe(ctx context.Context, attemptID int64, rea
 		if err != nil {
 			return 0, err
 		}
-		if err := writeInterruptedChild(ctx, tx, headerID, connectionType, revisionID); err != nil {
+		if err := writeInterruptedChild(ctx, tx, headerID, connectionType, revisionID, probeContract); err != nil {
 			return 0, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE execution_attempts SET state='Interrupted',ended_at=?,termination_reason=?,row_version=row_version+1 WHERE id=? AND state=?`, now, reason, attemptID, state); err != nil {
@@ -407,12 +408,12 @@ func interruptionDigest(attemptID int64, reason string) string {
 // writeInterruptedChild persists the frozen action-set shaped child row for
 // an interrupted probe (values are the contract constants; outcome carries
 // the interruption semantics).
-func writeInterruptedChild(ctx context.Context, tx execution.Executor, headerID int64, connectionType string, connectionID int64) error {
-	return writeTerminalProbeChild(ctx, tx, headerID, connectionType, connectionID, "interrupted")
+func writeInterruptedChild(ctx context.Context, tx execution.Executor, headerID int64, connectionType string, connectionID int64, probe *plugins.HTTPProbeContract) error {
+	return writeTerminalProbeChild(ctx, tx, headerID, connectionType, connectionID, "interrupted", probe)
 }
 
-func writeCancelledChild(ctx context.Context, tx execution.Executor, headerID int64, connectionType string, connectionID int64) error {
-	return writeTerminalProbeChild(ctx, tx, headerID, connectionType, connectionID, "cancelled")
+func writeCancelledChild(ctx context.Context, tx execution.Executor, headerID int64, connectionType string, connectionID int64, probe *plugins.HTTPProbeContract) error {
+	return writeTerminalProbeChild(ctx, tx, headerID, connectionType, connectionID, "cancelled", probe)
 }
 
 // writeTerminalProbeChild preserves a closed typed child for a terminal probe
@@ -420,7 +421,7 @@ func writeCancelledChild(ctx context.Context, tx execution.Executor, headerID in
 // explicit in detail_json; no successful capability fact is manufactured.
 // revisionID is the header's frozen revision, which can differ from the
 // connection's current pointer after an in-flight rotation.
-func writeTerminalProbeChild(ctx context.Context, tx execution.Executor, headerID int64, connectionType string, revisionID int64, terminal string) error {
+func writeTerminalProbeChild(ctx context.Context, tx execution.Executor, headerID int64, connectionType string, revisionID int64, terminal string, probe *plugins.HTTPProbeContract) error {
 	switch connectionType {
 	case TypePrometheus, TypeThanos:
 		_, err := tx.ExecContext(ctx, `INSERT INTO thanos_connection_probe_results(probe_result_id,query,response_type,sample_count,sample_value,detail_json) VALUES(?,?,?,?,?,?)`,
@@ -440,7 +441,14 @@ func writeTerminalProbeChild(ctx context.Context, tx execution.Executor, headerI
 			headerID, config.ChatModelID, nil, config.ContextBudgetTokens, config.MaxOutputTokens, 0, 0, 0, 0, 0, 0, 0, nil, fmt.Sprintf(`{"kind":"model_provider",%q:true}`, terminal))
 		return err
 	default:
-		return fmt.Errorf("connection type %q has no supervisor probe child", connectionType)
+		// 注册制 HTTP 连接种类（ADR-0014）：从未产生上游观察的收口只封存冻
+		// 结的请求形状与 observed=0，不捏造任何成功事实。
+		if probe == nil {
+			return fmt.Errorf("connection type %q has no supervisor probe child", connectionType)
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO http_connection_probe_results(probe_result_id,request_method,request_path,expected_status,observed_status,detail_json) VALUES(?,?,?,?,?,?)`,
+			headerID, probe.Method, probe.Path, probe.ExpectStatus, 0, fmt.Sprintf(`{"kind":%q,%q:true}`, connectionType, terminal))
+		return err
 	}
 }
 

@@ -275,9 +275,37 @@ func parseTypedChild(schemaKind string, detail json.RawMessage) (*connections.Ty
 			EmbeddingSupported: parsed.EmbeddingSupported, EmbeddingVectorDim: parsed.EmbeddingVectorDim,
 			DetailJSON: string(detail),
 		}}, nil
+	case "connection_probe_http_v1":
+		// Registry-backed HTTP kinds share one closed child shape. The request
+		// fields here are the observational copy of the frozen declaration;
+		// CommitProbeResult re-resolves the authoritative contract from the
+		// plugin registry and rejects any divergence.
+		var parsed httpProbeDetail
+		if err := json.Unmarshal(detail, &parsed); err != nil {
+			return nil, fmt.Errorf("http probe detail unparseable: %w", err)
+		}
+		if parsed.Method == "" || parsed.Path == "" || parsed.ExpectedStatus == 0 {
+			return nil, fmt.Errorf("http probe detail carries no frozen request shape")
+		}
+		return &connections.TypedChild{HTTP: &connections.HTTPProbeChild{
+			RequestMethod: parsed.Method, RequestPath: parsed.Path,
+			ExpectedStatus: parsed.ExpectedStatus, ObservedStatus: parsed.ObservedStatus,
+			DetailJSON: string(detail),
+		}}, nil
 	default:
 		return nil, fmt.Errorf("unknown probe result schema kind %q", schemaKind)
 	}
+}
+
+// httpProbeDetail is the generic HTTP probe's canonical observation: the
+// frozen request shape (method/path/expected) plus the single observed
+// status (0 = no HTTP answer) and the transport failure reason, if any.
+type httpProbeDetail struct {
+	Method         string `json:"method"`
+	Path           string `json:"path"`
+	ExpectedStatus int    `json:"expectedStatus"`
+	ObservedStatus int    `json:"observedStatus"`
+	Error          string `json:"error,omitempty"`
 }
 
 // modelProviderDetailJSON is the supervisor's canonical qualification detail.

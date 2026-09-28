@@ -27,6 +27,7 @@ import (
 	"fmt"
 
 	"github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/execution"
 )
@@ -56,6 +57,61 @@ func ActionSet(connectionType string) (string, int, error) {
 	default:
 		return "", 0, fmt.Errorf("unknown connection type %q", connectionType)
 	}
+}
+
+// HTTPProbeActionSetID is the frozen action-set identity every registry-
+// declared read-only HTTP probe closes under (connection-probes.yaml, the
+// generic class entry). The per-kind request shape is the plugin's compiled
+// declaration — it is frozen into the probe result's typed child, not into
+// this shared id.
+const (
+	HTTPProbeActionSetID      = "http-read-only-probe-v1"
+	HTTPProbeActionSetVersion = 1
+)
+
+// actionSet resolves the frozen action set for a connection type: the
+// core-owned identities first, then the plugin registry's trusted HTTP kinds
+// with a declared probe contract. Unknown, revoked (plugin disabled) or
+// contract-less types fail closed — a kind without a frozen probe contract
+// can never close a probe attempt, so starting one would strand it outside
+// every terminal write path.
+func (service *Service) actionSet(connectionType string) (string, int, error) {
+	if id, version, err := ActionSet(connectionType); err == nil {
+		return id, version, nil
+	}
+	declaration, ok := service.httpKind(connectionType)
+	if !ok || declaration.Probe == nil {
+		return "", 0, fmt.Errorf("connection type %q has no frozen probe contract", connectionType)
+	}
+	return HTTPProbeActionSetID, HTTPProbeActionSetVersion, nil
+}
+
+// HTTPProbeContract resolves the bounded read-only probe contract of a
+// registry-backed HTTP connection kind: method, absolute path and expected
+// status the probe executor must use. Core-owned types, unknown types,
+// revoked kinds and kinds without a declared probe contract fail closed.
+// The local execution loop builds its gateway request from this frozen
+// declaration — never from instance configuration or payload contents.
+func (service *Service) HTTPProbeContract(connectionType string) (plugins.HTTPProbeContract, error) {
+	declaration, ok := service.httpKind(connectionType)
+	if !ok || declaration.Probe == nil {
+		return plugins.HTTPProbeContract{}, fmt.Errorf("connection type %q has no frozen HTTP probe contract", connectionType)
+	}
+	return *declaration.Probe, nil
+}
+
+// terminalActionSet resolves the frozen action set for a terminal probe
+// closure (cancel/interrupt) and, for registry-backed HTTP kinds, the frozen
+// request shape the typed child records. Core kinds carry no HTTP contract.
+func (service *Service) terminalActionSet(connectionType string) (*plugins.HTTPProbeContract, string, int, error) {
+	if id, version, err := ActionSet(connectionType); err == nil {
+		return nil, id, version, nil
+	}
+	declaration, ok := service.httpKind(connectionType)
+	if !ok || declaration.Probe == nil {
+		return nil, "", 0, fmt.Errorf("connection type %q has no frozen probe contract", connectionType)
+	}
+	return declaration.Probe, HTTPProbeActionSetID, HTTPProbeActionSetVersion, nil
 }
 
 // ProbeInput is the canonical connection_probe input snapshot
@@ -125,9 +181,11 @@ func (service *Service) StartProbe(ctx context.Context, name string) (int64, err
 		// The type's frozen probe action set must exist before the attempt is
 		// created (ADR-0014 fail-closed): a kind whose plugin declares no probe
 		// contract can never close a probe attempt, so starting one would strand
-		// the attempt outside every terminal write path.
-		if _, _, err := ActionSet(summary.Type); err != nil {
-			return probeStartResult{}, rejectionOf(ErrValidation, codeValidation, fmt.Sprintf("connection type %q has no frozen probe contract", summary.Type), 0)
+		// the attempt outside every terminal write path. Registry-backed HTTP
+		// kinds resolve through the frozen plugin registry; revoked or
+		// contract-less kinds are rejected here before any state is written.
+		if _, _, err := service.actionSet(summary.Type); err != nil {
+			return probeStartResult{}, rejectionOf(ErrValidation, codeValidation, err.Error(), 0)
 		}
 		for _, purpose := range purposes {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO attempt_connection_grants(attempt_id,purpose,connection_id,connection_revision_id,credential_generation_id,created_at) VALUES(?,?,?,?,?,?)`, attemptID, purpose, summary.ID, summary.CurrentRevisionID, summary.CurrentGenerationID, now); err != nil {
@@ -239,10 +297,22 @@ func FrozenModelProviderColumns(configJSON []byte) (ModelProviderProbeChild, err
 	return child, nil
 }
 
+// HTTPProbeChild carries the registry-backed HTTP typed-child columns: the
+// frozen request shape (from the kind's plugin declaration) plus the single
+// observed response status (0 = no HTTP answer, e.g. gateway unreachable).
+type HTTPProbeChild struct {
+	RequestMethod  string
+	RequestPath    string
+	ExpectedStatus int
+	ObservedStatus int
+	DetailJSON     string
+}
+
 // TypedChild selects the connection-type closed child row variant.
 type TypedChild struct {
 	Thanos        *ThanosProbeChild
 	ModelProvider *ModelProviderProbeChild
+	HTTP          *HTTPProbeChild
 }
 
 // CommitProbeResult is the single terminal closure: header +
@@ -291,7 +361,7 @@ func (service *Service) CommitProbeResult(ctx context.Context, attemptID int64, 
 		if err := tx.QueryRowContext(ctx, `SELECT binding_revision FROM root_key_state WHERE id=1`).Scan(&bindingRevision); err != nil {
 			return 0, err
 		}
-		actionSetID, actionSetVersion, err := ActionSet(connectionType)
+		actionSetID, actionSetVersion, err := service.actionSet(connectionType)
 		if err != nil {
 			return 0, err
 		}
@@ -345,7 +415,23 @@ func (service *Service) CommitProbeResult(ctx context.Context, attemptID int64, 
 				return 0, err
 			}
 		default:
-			return 0, fmt.Errorf("connection type %q has no supervisor probe child", connectionType)
+			// Registry-backed trusted HTTP kinds (ADR-0014) share one closed
+			// typed child. The frozen request shape is re-resolved here from the
+			// plugin registry: the proposer's copy is observational, and a
+			// result that diverges from the frozen declaration fails closed.
+			declaration, ok := service.httpKind(connectionType)
+			if !ok || declaration.Probe == nil || child.HTTP == nil {
+				return 0, fmt.Errorf("connection type %q has no supervisor probe child", connectionType)
+			}
+			if child.HTTP.RequestMethod != declaration.Probe.Method ||
+				child.HTTP.RequestPath != declaration.Probe.Path ||
+				child.HTTP.ExpectedStatus != declaration.Probe.ExpectStatus {
+				return 0, fmt.Errorf("http probe child diverges from the frozen plugin declaration for kind %q", connectionType)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO http_connection_probe_results(probe_result_id,request_method,request_path,expected_status,observed_status,detail_json) VALUES(?,?,?,?,?,?)`,
+				headerID, child.HTTP.RequestMethod, child.HTTP.RequestPath, child.HTTP.ExpectedStatus, child.HTTP.ObservedStatus, child.HTTP.DetailJSON); err != nil {
+				return 0, err
+			}
 		}
 		// Terminal state and termination reason commit in one versioned update.
 		terminalState := "Succeeded"

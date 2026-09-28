@@ -71,6 +71,17 @@ type Plugin struct {
 	// non-empty whenever ConnectionKind is set; credential material never
 	// appears here.
 	ConnectionAuthModes []string
+	// ConnectionProbePath, when set alongside ConnectionKind, declares the
+	// kind's bounded read-only HTTP probe contract: one GET request against
+	// this absolute path (it may carry a query string) on the connection's
+	// configured base URL, expected to answer with a 2xx status (the exact
+	// expected status is frozen with the declaration). Quoin freezes the
+	// contract with every probe attempt and executes it through the generic
+	// Stele gateway; a kind without a probe path can never start or close a
+	// probe attempt (fail closed), and one that does still enables only
+	// through a passed real probe. The path is non-secret routing metadata —
+	// credential material never appears here.
+	ConnectionProbePath string
 	// DefaultEnabled is the enablement default when deployment config is
 	// silent; plugins backing the default mainline set true.
 	DefaultEnabled bool
