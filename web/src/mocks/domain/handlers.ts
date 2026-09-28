@@ -6,6 +6,7 @@ import {
 	DEMO_CREDENTIALS,
 	getMockScenario,
 	getMockState,
+	type MockDailyReport,
 	nextId,
 } from "./store";
 import type { AdminUser } from "../../features/settings/platform/users/api";
@@ -86,6 +87,18 @@ function conflict(expected: number | undefined, actual: number) {
  * Rejected attempts are never cached, so a corrected retry reusing the ID
  * executes normally.
  */
+/** MockDailyReport → wire detail: the full read model minus mock-only contents; latest stays absent while Collecting. */
+function dailyDetailOf(report: MockDailyReport) {
+	return {
+		...dailyWireOf(report),
+		configRowVersion: report.configRowVersion,
+		cutoffAt: report.cutoffAt,
+		contributions: report.contributions,
+		versions: report.versions,
+		...(report.latest ? { latest: report.latest } : {}),
+	};
+}
+
 async function replayableCommand(
 	commandType: string,
 	request: Request,
@@ -147,6 +160,23 @@ function adminRequired({
 }
 function detailFor(name: string) {
 	return getMockState().connections.find((item) => item.name === name);
+}
+
+/** MockDailyReport → wire summary: strip mock-only version contents; keep sealedAt absent while Collecting (mirrors Go omitempty). */
+function dailyWireOf(report: MockDailyReport) {
+	return {
+		id: report.id,
+		configKey: report.configKey,
+		localDate: report.localDate,
+		timezone: report.timezone,
+		windowStartUtc: report.windowStartUtc,
+		windowEndUtc: report.windowEndUtc,
+		triggerKind: report.triggerKind,
+		state: report.state,
+		...(report.sealedAt ? { sealedAt: report.sealedAt } : {}),
+		latestVersion: report.latestVersion,
+		createdAt: report.createdAt,
+	};
 }
 function viewFor(viewKey: string) {
 	return getMockState().businessViews.find((view) => view.viewKey === viewKey);
@@ -1211,6 +1241,208 @@ export const domainHandlers = [
 		);
 		return value ? json(value) : problem(404, "未找到巡检运行。");
 	}),
+
+	// 跨来源每日报告（ADR-0014）：配置管理与冻结报告读模型；补跑/重分析
+	// 与真实后端一致地全部走管理员边界与可重放命令契约。
+	http.get("*/api/v1/inspections/daily-report-configs", () => {
+		const denied = adminRequired();
+		return denied ?? page(getMockState().dailyReportConfigs);
+	}),
+	http.get(
+		"*/api/v1/inspections/daily-report-configs/:configKey",
+		({ params }) => {
+			const denied = adminRequired();
+			if (denied) return denied;
+			const config = getMockState().dailyReportConfigs.find(
+				(item) => item.configKey === params.configKey,
+			);
+			return config ? json(config) : problem(404, "未找到每日报告配置。");
+		},
+	),
+	http.post("*/api/v1/inspections/daily-report-configs", ({ request }) =>
+		replayableCommand(
+			"create_inspection_daily_report_config",
+			request,
+			async () => {
+				const denied = adminRequired();
+				if (denied) return denied;
+				const input = await body<{
+					configKey: string;
+					displayName: string;
+					enabled: boolean;
+					timezone: string;
+					triggerTime: string;
+					planKeys: string[];
+				}>(request);
+				if (
+					getMockState().dailyReportConfigs.some(
+						(item) => item.configKey === input.configKey,
+					)
+				)
+					return problem(
+						409,
+						"每日报告配置标识已存在。",
+						"daily_config_key_exists",
+					);
+				const now = "2026-09-09T09:30:00.000Z";
+				const config = {
+					configKey: input.configKey,
+					displayName: input.displayName,
+					enabled: input.enabled,
+					timezone: input.timezone,
+					triggerTime: input.triggerTime,
+					planKeys: [...(input.planKeys ?? [])],
+					rowVersion: 1,
+					createdAt: now,
+					updatedAt: now,
+				};
+				getMockState().dailyReportConfigs.unshift(config);
+				return json(config, { status: 201 });
+			},
+		),
+	),
+	http.put(
+		"*/api/v1/inspections/daily-report-configs/:configKey",
+		({ params, request }) =>
+			replayableCommand(
+				"update_inspection_daily_report_config",
+				request,
+				async () => {
+					const denied = adminRequired();
+					if (denied) return denied;
+					const config = getMockState().dailyReportConfigs.find(
+						(item) => item.configKey === params.configKey,
+					);
+					if (!config) return problem(404, "未找到每日报告配置。");
+					const input = await body<{
+						displayName: string;
+						enabled: boolean;
+						timezone: string;
+						triggerTime: string;
+						planKeys: string[];
+						expectedRowVersion: number;
+					}>(request);
+					const stale = conflict(input.expectedRowVersion, config.rowVersion);
+					if (stale) return stale;
+					Object.assign(config, {
+						displayName: input.displayName,
+						enabled: input.enabled,
+						timezone: input.timezone,
+						triggerTime: input.triggerTime,
+						planKeys: [...(input.planKeys ?? [])],
+						updatedAt: "2026-09-09T09:30:00.000Z",
+					});
+					config.rowVersion += 1;
+					return json(config);
+				},
+			),
+	),
+	http.get("*/api/v1/inspections/daily-reports/backfill", () =>
+		problem(405, "补跑是 POST 命令。", "method_not_allowed"),
+	),
+	http.post("*/api/v1/inspections/daily-reports/backfill", ({ request }) =>
+		replayableCommand("create_inspection_daily_report", request, async () => {
+			const denied = adminRequired();
+			if (denied) return denied;
+			const input = await body<{ configKey: string; localDate: string }>(request);
+			const config = getMockState().dailyReportConfigs.find(
+				(item) => item.configKey === input.configKey,
+			);
+			if (!config) return problem(404, "未找到每日报告配置。");
+			const state = getMockState();
+			// 幂等重放：同一 (config, localDate) 已存在时返回既有报告摘要（与 Go errDailyReportExists 的观察一致）。
+			const existing = state.dailyReports.find(
+				(report) =>
+					report.configKey === input.configKey &&
+					report.localDate === input.localDate,
+			);
+			const report = existing ?? {
+				id: nextId("daily-report"),
+				configKey: config.configKey,
+				localDate: input.localDate,
+				timezone: config.timezone,
+				windowStartUtc: `${input.localDate}T00:00:00Z`,
+				windowEndUtc: `${input.localDate}T23:59:59Z`,
+				triggerKind: "manual" as const,
+				state: "Collecting" as const,
+				latestVersion: 0,
+				createdAt: "2026-09-09T09:30:00.000Z",
+				configRowVersion: config.rowVersion,
+				cutoffAt: "2026-09-09T11:30:00.000Z",
+				contributions: [],
+				versions: [],
+				contents: {},
+			};
+			if (!existing) state.dailyReports.unshift(report);
+			return json(dailyWireOf(report), { status: 202 });
+		}),
+	),
+	http.get("*/api/v1/inspections/daily-reports", ({ request }) => {
+		const denied = adminRequired();
+		if (denied) return denied;
+		const configKey = new URL(request.url).searchParams.get("configKey");
+		return page(
+			getMockState()
+				.dailyReports.filter(
+					(report) => !configKey || report.configKey === configKey,
+				)
+				.map(dailyWireOf),
+		);
+	}),
+	http.get(
+		"*/api/v1/inspections/daily-reports/:configKey/:localDate",
+		({ params }) => {
+			const denied = adminRequired();
+			if (denied) return denied;
+			const report = getMockState().dailyReports.find(
+				(item) =>
+					item.configKey === params.configKey &&
+					item.localDate === params.localDate,
+			);
+			if (!report) return problem(404, "未找到每日报告。");
+			return json(dailyDetailOf(report));
+		},
+	),
+	http.get(
+		"*/api/v1/inspections/daily-reports/:configKey/:localDate/versions/:version",
+		({ params }) => {
+			const denied = adminRequired();
+			if (denied) return denied;
+			const report = getMockState().dailyReports.find(
+				(item) =>
+					item.configKey === params.configKey &&
+					item.localDate === params.localDate,
+			);
+			const content = report?.contents[String(params.version)];
+			return content
+				? json({ content })
+				: problem(404, "未找到该版本。", "not_found");
+		},
+	),
+	http.post(
+		"*/api/v1/inspections/daily-reports/:configKey/:localDate/rerun",
+		({ params, request }) =>
+			replayableCommand("rerun_inspection_daily_report", request, async () => {
+				const denied = adminRequired();
+				if (denied) return denied;
+				const report = getMockState().dailyReports.find(
+					(item) =>
+						item.configKey === params.configKey &&
+						item.localDate === params.localDate,
+				);
+				if (!report) return problem(404, "未找到每日报告。");
+				// 重分析从同一冻结窗口追加新版本；演示复用已封存文档，旧版本保持可读。
+				const nextVersion = report.latestVersion + 1;
+				const content = report.contents[String(report.latestVersion)];
+				if (content) report.contents[String(nextVersion)] = content;
+				report.versions.unshift({
+					version: nextVersion,
+					createdAt: "2026-09-09T09:30:00.000Z",
+				});
+				report.latestVersion = nextVersion;
+				return json(dailyWireOf(report), { status: 202 });
+			}),
+	),
 
 	http.post("*/api/v1/investigation-attachments", async ({ request }) => {
 		const denied = required();

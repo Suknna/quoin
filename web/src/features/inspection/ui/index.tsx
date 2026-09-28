@@ -65,6 +65,9 @@ export { ReportBody, RunDetail } from "./RunDetail";
 
 import { PlanEditor, type PlanEditorPrefill } from "./PlanEditor";
 import { RunDetail } from "./RunDetail";
+import { DailyConfigEditor } from "./DailyConfigEditor";
+import { DailyReportDetailView } from "./DailyReportDetail";
+import { DailyReportsOverview } from "./DailyReports";
 
 /** The module owns its query state: /inspections/runs/:run and /inspections/plans/(new|:key/edit). */
 function parts(route: string) {
@@ -228,6 +231,25 @@ export function useInspectionsModule(
 	const detailPlanKey = detailMatch
 		? decodeURIComponent(detailMatch[1])
 		: undefined;
+	// 每日报告（ADR-0014）：跨来源日报面，挂在巡检模块下；/daily 分支先于
+	// 计划路由，localDate 严格 YYYY-MM-DD，不会与 /edit 混淆。
+	const dailyOverview = path === "/inspections/daily";
+	const dailyCreating = path === "/inspections/daily/new";
+	const dailyEditMatch = path.match(/^\/inspections\/daily\/([^/]+)\/edit$/);
+	const dailyEditKey = dailyEditMatch
+		? decodeURIComponent(dailyEditMatch[1])
+		: undefined;
+	const dailyReportMatch = path.match(
+		/^\/inspections\/daily\/([^/]+)\/(\d{4}-\d{2}-\d{2})$/,
+	);
+	const dailyReportKey = dailyReportMatch
+		? {
+				configKey: decodeURIComponent(dailyReportMatch[1]),
+				localDate: dailyReportMatch[2],
+			}
+		: undefined;
+	const dailySection =
+		dailyOverview || dailyCreating || Boolean(dailyEditKey) || Boolean(dailyReportKey);
 	const connectionHint = query.get("connectionName") ?? "";
 	const businessViewHint = query.get("businessViewKey") ?? "";
 	// 预填始终来自 URL 提示：概览页操作按钮与 deep-link 升级都把它带给编辑器路由。
@@ -270,9 +292,11 @@ export function useInspectionsModule(
 	}, []);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: path 是有意依赖——从编辑器或 Run 页返回时必须重新拉取计划与最近结论。
 	useEffect(() => {
+		// 每日报告路由不消费计划/Run 投影，跳过拉取以免无谓请求与无关错误。
+		if (dailySection) return;
 		const timer = window.setTimeout(() => void load(), 0);
 		return () => clearTimeout(timer);
-	}, [load, path]);
+	}, [load, path, dailySection]);
 	// 概览有执行中的 Run 时轮询最近结论；计划详情页对自己的历史归档单独轮询。
 	const hasActiveRun = Object.values(latestRuns).some((run) =>
 		inspectionActive(run.state),
@@ -409,6 +433,14 @@ export function useInspectionsModule(
 							variant="outline"
 							size="sm"
 							disabled={props.suspended}
+							onClick={() => props.navigate("/inspections/daily")}
+						>
+							每日报告
+						</Button>
+						<Button
+							variant="outline"
+							size="sm"
+							disabled={props.suspended}
 							onClick={openChooser}
 						>
 							运行巡检
@@ -516,6 +548,57 @@ export function useInspectionsModule(
 			</div>
 		</DetailSheet>
 	);
+	// 每日报告路由：独立的面板与面包屑；不渲染计划概览的 chooser/run 抽屉。
+	if (dailySection) {
+		const reportKey = dailyReportKey;
+		return {
+			title: dailyOverview
+				? "每日报告"
+				: dailyCreating
+					? "新建每日报告配置"
+					: dailyEditKey
+						? "编辑每日报告配置"
+						: reportKey
+							? `${reportKey.configKey} · ${reportKey.localDate}`
+							: "每日报告",
+			crumbs: [
+				{ label: "巡检", to: "/inspections" },
+				...(dailyOverview
+					? [{ label: "每日报告" }]
+					: [{ label: "每日报告", to: "/inspections/daily" }]),
+				...(dailyCreating
+					? [{ label: "新建配置" }]
+					: dailyEditKey
+						? [{ label: "编辑配置" }]
+						: reportKey
+							? [{ label: reportKey.localDate }]
+							: []),
+		],
+		list: null,
+		actions: undefined,
+		content: dailyOverview ? (
+			<DailyReportsOverview
+				suspended={props.suspended}
+				navigate={props.navigate}
+			/>
+		) : dailyCreating ? (
+			<DailyConfigEditor suspended={props.suspended} navigate={props.navigate} />
+		) : dailyEditKey ? (
+			<DailyConfigEditor
+				suspended={props.suspended}
+				navigate={props.navigate}
+				editKey={dailyEditKey}
+			/>
+		) : reportKey ? (
+			<DailyReportDetailView
+				suspended={props.suspended}
+				navigate={props.navigate}
+				configKey={reportKey.configKey}
+				localDate={reportKey.localDate}
+			/>
+		) : null,
+	};
+	}
 	return {
 		title: creatingPlan
 			? "新建巡检计划"

@@ -60,6 +60,8 @@ test("route matrix renders actual data without unhandled APIs or external transp
 		["/alerts/list", "当前告警", "CheckoutLatencyHigh"],
 		["/investigations", "调查", "结算延迟调查"],
 		["/inspections", "巡检", "计划绑定接入与模板"],
+		["/inspections/daily", "每日报告", "报告配置"],
+		["/inspections/daily/ops-daily/2026-09-27", "2026-09-27", "本报告存在缺口"],
 		["/knowledge", "知识库", "结算延迟排查"],
 		["/settings/platform/about", "设置", "关于平台"],
 	] as const;
