@@ -122,13 +122,14 @@ Stele 不跟随平台响应的跳转，避免携凭据越过连接边界。未�
 
 ```go
 type queryArgs struct {
-    Query string `json:"query" doc:"查询表达式"`        // 无 omitempty = 必填
-    Scope string `json:"scope,omitempty" doc:"范围限定"` // 可选
+    Query     string `json:"query" doc:"查询表达式"`            // 无 omitempty = 必填
+    SourceRef string `json:"sourceRef,omitempty" doc:"来源接入"` // 可选显式消歧
 }
 
 type queryResult struct {
-    Success bool   `json:"success"`
-    Output  string `json:"output"`
+    Success    bool   `json:"success"`
+    Output     string `json:"output"`
+    ObservedAt string `json:"observedAt"`
 }
 
 var queryTool = plugins.Tool[queryArgs, queryResult]{
@@ -138,6 +139,17 @@ var queryTool = plugins.Tool[queryArgs, queryResult]{
     Description: "对 My Platform 执行只读查询……",   // 模型可见
     ProducesEvidence:        true,
     RequiresConnectionGrant: true,               // 模型不选连接，Quoin 冻结 grant
+    Grant: &plugins.GrantPlan{
+        Purpose: "myplatform_query", SourceItemRole: "myplatform_source",
+        SourceRefArgument: "sourceRef", FreezeExecutionArguments: true,
+    },
+    EvidenceProjector: func(argumentsJSON, payloadJSON []byte, _ int64) (plugins.EvidenceProjection, error) {
+        var result queryResult
+        if err := json.Unmarshal(payloadJSON, &result); err != nil { return plugins.EvidenceProjection{}, err }
+        if !result.Success { return plugins.EvidenceProjection{}, errors.New("unsuccessful query cannot become Evidence") }
+        return plugins.EvidenceProjection{ParamsJSON: argumentsJSON, ResultJSON: payloadJSON,
+            ObservedAt: result.ObservedAt, Integrity: "complete"}, nil
+    },
     Timeout:           30 * time.Second,
     RateLimitPerMinute: 60,
     Handler: func(t *plugins.ToolContext, args queryArgs) (queryResult, error) {
@@ -147,7 +159,7 @@ var queryTool = plugins.Tool[queryArgs, queryResult]{
         })
         if err != nil { return queryResult{}, err }
         // 长正文经 t.Spill 溢出为 tool_result Artifact（可选）
-        return queryResult{Success: true, Output: string(response.Body)}, nil
+        return queryResult{Success: true, Output: string(response.Body), ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}, nil
     },
 }
 
@@ -169,6 +181,10 @@ func (myTools) Tools() []plugins.ToolEntry {
   码；结构化失败应像示例一样写进结果 payload（success=false），模型可见可重试。
 - **内部工具**：`Internal: true` 的工具不进模型目录，仅供 Quoin 调度器调用（连接探测、有界发
   现、确定性采集——见 `plugins/metrics/metrics.go` 的 `metrics_probe`/`metrics_discover`/`metrics_collect`）。
+- **授权与证据**：需要连接的工具必须在插件内声明 `GrantPlan`（Purpose、冻结输入条目角色、
+  来源消歧参数与执行参数冻结），并用纯函数 `EvidenceProjector` 声明成功结果如何封存 Evidence。
+  核心只执行声明，不为新工具名加解析/验证分支。巡检模板与发现声明也要提供 `GrantPurpose`，
+  取 `config_` 前缀；参考 `test/plugins/synthetic` 的完整新平台验收例。
 - **共享契约**：多个插件可贡献同名同 manifest 的工具（如 prometheus 与 thanos 共享
   `thanos_query`）；目录单条目，溯源列全部启用的贡献者，manifest 分歧是装配错误。
 
@@ -201,9 +217,9 @@ func init() {
 ```
 
 - severity 映射表放插件里(参考 `plugins/alertmanager/alertmanager.go`);词表外的值降级 `Info`,Quoin 侧不会丢事件。
-- Quoin 的 intake 流水线(归一化→富化→去重→关联)在首观测事务内执行你的 normalizer,语义列
-  (severity/title/annotations_canonical/resource)冻结后不可变;缺 normalizer 的来源记
-  `normalizer_missing` intake issue 并用缺省语义。
+- Quoin 的 intake 流水线(归一化→富化→去重→关联)在首观测事务内执行你的 normalizer，语义列
+  (severity/title/annotations_canonical/resource)冻结后不可变；没有 normalizer 的插件不能创建
+  新告警源，运行中的装配漂移会以 intake issue 明示而不把坏语义假装成正常结果。
 - 业务语义(occurrence 状态机、富化规则、视图关联)绝不在插件里。
 
 ### 多来源告警的现阶段接缝（ADR-0014，实施中）
@@ -214,8 +230,9 @@ func init() {
 `alerts.batch` 的载荷转换为当前的批次结构（含每条完整 labels、startsAt、status）；
 `AlertIdentityLabels` 要求 fingerprint 与 labels 一致，`AlertIdentityExternal` 要求每条携带
 非空的 `externalId`、不得同时携带 fingerprint。外部身份原文首观测冻结、SHA-256
-摘要用于来源内索引；缺失/冲突项不进入告警发生。此阶段**尚未完成**协议版本协商、
-订阅派发或跨来源日报。新平台若无法安全映射该身份模型，不应伪造标签以接入，
+摘要用于来源内索引；缺失/冲突项不进入告警发生。提交后订阅与跨来源日报现已接入；
+**逐条入站 payload 版本仍未写入 Stele 队列**，因此发布新载荷前必须排空队列并同批升级。
+新平台若无法安全映射该身份模型，不应伪造标签以接入，
 应等待统一规范载荷的下一阶段实施。
 部署启用集合与来源实例的启用状态分别受控：未启用的插件不能创建新的告警源，
 已有来源的 Stele 凭据快照标记为不可接收，Quoin Relay 也拒绝新事件；
