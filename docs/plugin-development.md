@@ -103,7 +103,9 @@ Quoin 同样在接收时复核。声明一个新类型不等于核心已有其�
 **处理器必须自己按 `(插件 ID, fact.ID)` 幂等**，因为崩溃/重试后可能再次调用。
 有界重试后进入死信；管理员可从接入管理页查看或使用
 `GET /api/v1/integrations/plugin-events/deadletters` 读取有界诊断，确认后通过
-`POST /api/v1/integrations/plugin-events/deadletters/{deliveryId}/replay` 显式重放。
+`POST /api/v1/integrations/plugin-events/deadletters/{deliveryId}/replay`
+（JSON body 含 `clientCommandId`）显式重放；超时重试必须复用同一命令 ID，
+否则重新死信的条目会被当成新操作。
 没有启用订阅者时不产生额外业务事件行。
 新增领域语义不能仅靠订阅者凭空扩展核心事实词表，仍需有版本的核心契约变更。
 
