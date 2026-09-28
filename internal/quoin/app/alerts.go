@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -262,27 +263,55 @@ func (application *apiServer) listIntakeIssues(ctx context.Context, input *struc
 	}{Items: asItems(issues)}}, nil
 }
 
-// receiverConfig returns the deployment-owned Stele endpoint used in an
-// Alertmanager receiver. It is never derived from an untrusted HTTP Host header.
-func (application *apiServer) receiverConfig(ctx context.Context, input *authInput) (*struct {
+type receiverConfigInput struct {
+	Session string `cookie:"__Host-quoin-session"`
+	Kind    string `query:"kind"`
+}
+
+// receiverConfig derives one registered event source's public endpoint only
+// from deployment configuration, never the incoming request Host.
+func (application *apiServer) receiverConfig(ctx context.Context, input *receiverConfigInput) (*struct {
 	Body struct {
 		PublicReceiverURL string `json:"publicReceiverUrl"`
 	} `json:"body"`
 }, error,
 ) {
-	if _, err := application.authenticateAdmin(ctx, input.Session, "读取 Alertmanager 接收地址"); err != nil {
+	if _, err := application.authenticateAdmin(ctx, input.Session, "读取告警源接收地址"); err != nil {
 		return nil, err
+	}
+	kind := input.Kind
+	if kind == "" {
+		kind = "alertmanager"
+	}
+	if !application.alerts.SourceEnabled(kind) {
+		return nil, huma.Error404NotFound("告警来源插件不存在或未启用")
+	}
+	if normalizer, _, ok := application.alerts.SourceRegistry().AlertNormalizer(kind); !ok || normalizer == nil {
+		return nil, huma.Error404NotFound("告警来源插件不存在或未启用")
 	}
 	if application.stelePublicURL == "" {
 		return nil, huma.Error503ServiceUnavailable("告警接收地址尚未配置", nil)
+	}
+	publicURL, err := publicReceiverURLForKind(application.stelePublicURL, kind)
+	if err != nil {
+		return nil, huma.Error503ServiceUnavailable("部署接收地址无效", err)
 	}
 	out := &struct {
 		Body struct {
 			PublicReceiverURL string `json:"publicReceiverUrl"`
 		} `json:"body"`
 	}{}
-	out.Body.PublicReceiverURL = application.stelePublicURL
+	out.Body.PublicReceiverURL = publicURL
 	return out, nil
+}
+
+func publicReceiverURLForKind(configuredURL, kind string) (string, error) {
+	configured, err := url.Parse(configuredURL)
+	if err != nil || configured.Scheme != "https" || configured.Host == "" || !strings.HasSuffix(configured.Path, "/stele/webhook/alertmanager") {
+		return "", fmt.Errorf("deployment receiver URL must be an HTTPS /stele/webhook/alertmanager endpoint")
+	}
+	configured.Path = strings.TrimSuffix(configured.Path, "/alertmanager") + "/" + kind
+	return configured.String(), nil
 }
 
 func (application *apiServer) listAlertSources(ctx context.Context, input *authInput) (*struct {

@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceModuleProps } from "@/app/module-contract";
-import { alertmanagerReceiverYaml, receiverUrlForKind } from "./api";
+import { alertmanagerReceiverYaml } from "./api";
 import { useIntegrationsModule } from "./ui";
 
 async function pickBearerAuth() {
@@ -607,7 +607,7 @@ describe("integration workbench", () => {
 			description: "用于验收的通用事件接入插件",
 			enabled: true,
 			version: "1",
-			capabilities: ["event_source"],
+			capabilities: ["event_source", "alert_normalizer"],
 		};
 
 		function mockCatalog(items: unknown[]) {
@@ -618,18 +618,6 @@ describe("integration workbench", () => {
 				return Response.json({ message: "unexpected request" }, { status: 500 });
 			});
 		}
-
-		it("derives the per-kind public receiver URL from the configured endpoint", () => {
-			expect(
-				receiverUrlForKind(
-					"https://quoin.example.test/stele/webhook/alertmanager",
-					SYNTHETIC_ID,
-				),
-			).toBe(`https://quoin.example.test/stele/webhook/${SYNTHETIC_ID}`);
-			expect(
-				receiverUrlForKind("https://quoin.example.test/stele", SYNTHETIC_ID),
-			).toBe(`https://quoin.example.test/stele/webhook/${SYNTHETIC_ID}`);
-		});
 
 		it("routes a catalog event-source plugin to the generic creation form with its display name", async () => {
 			mockCatalog([
@@ -659,10 +647,10 @@ describe("integration workbench", () => {
 					const url = String(input);
 					if (url.endsWith("/api/v1/integrations/plugins"))
 						return Response.json({ items: [syntheticPlugin] });
-					if (url.endsWith("/api/v1/alert-sources/receiver-config"))
+					if (url.endsWith(`/api/v1/alert-sources/receiver-config?kind=${SYNTHETIC_ID}`))
 						return Response.json({
 							publicReceiverUrl:
-								"https://quoin.example.test/stele/webhook/alertmanager",
+								`https://quoin.example.test/stele/webhook/${SYNTHETIC_ID}`,
 						});
 					if (
 						url === "/api/v1/alert-sources" &&
@@ -721,7 +709,7 @@ describe("integration workbench", () => {
 			fetchMock.mockRestore();
 		});
 
-		it("renders the shared not-found view for unregistered, disabled or non-event-source kinds", async () => {
+		it("renders the shared not-found view for unsupported or disabled source kinds", async () => {
 			mockCatalog([
 				syntheticPlugin,
 				{
@@ -729,6 +717,14 @@ describe("integration workbench", () => {
 					displayName: "停用事件源",
 					description: "未启用",
 					enabled: false,
+					version: "1",
+					capabilities: ["event_source", "alert_normalizer"],
+				},
+				{
+					id: "events-without-alerts",
+					displayName: "非告警事件源",
+					description: "缺少告警归一化能力",
+					enabled: true,
 					version: "1",
 					capabilities: ["event_source"],
 				},
@@ -741,7 +737,7 @@ describe("integration workbench", () => {
 					capabilities: ["tools"],
 				},
 			]);
-			for (const kind of ["no-such-kind", "disabled-hook", "tool-only"]) {
+			for (const kind of ["no-such-kind", "disabled-hook", "events-without-alerts", "tool-only"]) {
 				render(
 					<IntegrationView route={`/settings/platform/integrations/${kind}`} />,
 				);

@@ -102,7 +102,6 @@ import {
 	type MetricsInstance,
 	probeDiagnostic,
 	probeMetricsInstance,
-	receiverUrlForKind,
 	retireEventSourceCredential,
 	revealEventSourceCredential,
 	rotateEventSourceCredential,
@@ -149,6 +148,12 @@ function CatalogCard({
 	navigate: (to: string) => void;
 }) {
 	const route = `/integrations/${encodeURIComponent(item.id)}`;
+	const configurable =
+		item.id === "prometheus" ||
+		item.id === "thanos" ||
+		item.id === "alertmanager" ||
+		(item.capabilities.includes("event_source") &&
+			item.capabilities.includes("alert_normalizer"));
 	return (
 		<Card className="flex flex-col">
 			<CardHeader>
@@ -167,8 +172,8 @@ function CatalogCard({
 						<Badge variant="secondary">Agent 工具</Badge>
 					)}
 				</div>
-				<Button onClick={() => navigate(route)}>
-					配置 {item.displayName}
+				<Button disabled={!configurable} onClick={() => navigate(route)}>
+					{configurable ? `配置 ${item.displayName}` : "暂无配置入口"}
 					<ChevronRight data-icon="inline-end" />
 				</Button>
 			</CardContent>
@@ -1317,8 +1322,7 @@ function AlertmanagerForm({
 					</ol>
 					<Separator />
 					<p className="text-sm text-muted-foreground">
-						Quoin 仅在成功持久化后确认投递；认证失败或暂时错误应由 Alertmanager
-						重试。
+						Stele 本地持久入队后即确认投递；Quoin 会异步处理。认证失败或入口不可用时请由 Alertmanager 重试。
 					</p>
 				</aside>
 			</div>
@@ -1496,11 +1500,12 @@ function EventSourceDetail({
 		}
 	}, [load, suspended]);
 	async function rotate() {
+		if (!source) return;
 		const epoch = revealEpoch.current;
 		setBusy("rotate");
 		setError("");
 		try {
-			const endpoint = await fetchPublicReceiverEndpoint();
+			const endpoint = await fetchPublicReceiverEndpoint(source.platform);
 			const result = await rotateEventSourceCredential(id);
 			if (!result.revealHandle)
 				throw new Error(
@@ -1785,7 +1790,8 @@ function GenericEventSourceRoute({
 	if (
 		!item ||
 		!item.enabled ||
-		!item.capabilities.includes(EVENT_SOURCE_CAPABILITY)
+		!item.capabilities.includes(EVENT_SOURCE_CAPABILITY) ||
+		!item.capabilities.includes("alert_normalizer")
 	) {
 		return <IntegrationNotFound />;
 	}
@@ -1831,7 +1837,7 @@ function EventSourceForm({
 		setSaving(true);
 		setError("");
 		try {
-			const endpoint = await fetchPublicReceiverEndpoint();
+			const endpoint = await fetchPublicReceiverEndpoint(kind);
 			const sourceKey = key.trim();
 			const result = await createEventSourceInstance(sourceKey, kind);
 			setCreatedKey(sourceKey);
@@ -1842,7 +1848,7 @@ function EventSourceForm({
 			const token = await revealEventSourceCredential(result.revealHandle);
 			if (!suspended && epoch === revealEpoch.current) {
 				setSecret(token);
-				setReceiverUrl(receiverUrlForKind(endpoint.publicReceiverUrl, kind));
+				setReceiverUrl(endpoint.publicReceiverUrl);
 				setKey("");
 			}
 		} catch (reason) {
@@ -1927,7 +1933,7 @@ function EventSourceForm({
 					</ol>
 					<Separator />
 					<p className="text-sm text-muted-foreground">
-						Quoin 仅在成功持久化后确认投递；认证失败或暂时错误应由上游重试。
+						Stele 本地持久入队后即确认投递；Quoin 会异步处理。认证失败或入口不可用时请由上游重试。
 					</p>
 				</aside>
 			</div>

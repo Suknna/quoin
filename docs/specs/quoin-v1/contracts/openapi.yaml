@@ -2941,7 +2941,7 @@ paths:
                           uniqueItems: true
                           items:
                             type: string
-                            enum: [event_source, tools, discover, inspection_templates]
+                            enum: [event_source, alert_normalizer, tools, discover, inspection_templates]
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -3425,8 +3425,15 @@ paths:
     get:
       tags: [adminops]
       operationId: getAlertmanagerReceiverConfig
-      summary: Alertmanager 部署公开 receiver 地址
-      description: 仅返回部署配置的公开 Stele endpoint；不得从请求 Host 或转发头推导。未配置公开地址时返回 503。
+      summary: 已启用告警来源的部署公开 receiver 地址
+      description: 按已注册且已启用的来源 kind，从部署配置的公开 Stele endpoint 生成地址；不得从请求 Host 或转发头推导。未配置公开地址时返回 503。kind 缺省为 alertmanager。
+      parameters:
+        - in: query
+          name: kind
+          required: false
+          schema:
+            type: string
+            pattern: '^[a-z][a-z0-9-]*$'
       responses:
         '200':
           description: 可复制到 Alertmanager webhook_configs.url 的 HTTPS 地址。
@@ -3438,6 +3445,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
   /api/v1/alert-sources/{sourceKey}:
@@ -6828,7 +6837,7 @@ components:
         publicReceiverUrl:
           type: string
           format: uri
-          pattern: '^https://.*/stele/webhook/alertmanager$'
+          pattern: '^https://.*/stele/webhook/[a-z][a-z0-9-]*$'
           description: 由部署配置冻结的 Stele 公共 URL，不接受请求 Host 推导。
     AlertSourceDetail:
       allOf:

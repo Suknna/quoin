@@ -95,6 +95,9 @@ func (application *apiServer) integrationsPlugins(ctx context.Context, input *in
 		if plugin.EventSource != nil {
 			capabilities = append(capabilities, "event_source")
 		}
+		if plugin.AlertNormalizer != nil {
+			capabilities = append(capabilities, "alert_normalizer")
+		}
 		if plugin.Tools != nil {
 			capabilities = append(capabilities, "tools")
 		}

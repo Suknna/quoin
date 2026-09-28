@@ -404,25 +404,10 @@ export async function retireEventSourceCredential(
 		},
 	);
 }
-export function fetchPublicReceiverEndpoint(): Promise<PublicReceiverEndpoint> {
+export function fetchPublicReceiverEndpoint(kind?: string): Promise<PublicReceiverEndpoint> {
 	return request<PublicReceiverEndpoint>(
-		"/api/v1/alert-sources/receiver-config",
+		`/api/v1/alert-sources/receiver-config${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`,
 	);
-}
-/** Derives the public receiver URL of one source kind
- * (/stele/webhook/{kind}) from the deployment's configured public receiver
- * endpoint, which points at one concrete kind. The Stele gateway route itself
- * is already kind-generic (POST /webhook/{source-kind} behind /stele). */
-export function receiverUrlForKind(
-	publicReceiverUrl: string,
-	kind: string,
-): string {
-	const rekindled = publicReceiverUrl.replace(
-		/\/webhook\/[^/]+\/?$/,
-		`/webhook/${encodeURIComponent(kind)}`,
-	);
-	if (rekindled !== publicReceiverUrl) return rekindled;
-	return `${publicReceiverUrl.replace(/\/+$/, "")}/webhook/${encodeURIComponent(kind)}`;
 }
 export function alertmanagerReceiverYaml(
 	publicReceiverUrl: string,

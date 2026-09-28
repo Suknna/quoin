@@ -70,6 +70,13 @@ func TestAlertSourceManagementProjection(t *testing.T) {
 	if receiverBody.PublicReceiverURL != "https://alerts.example.com/stele/webhook/alertmanager" {
 		t.Fatalf("receiver URL=%q", receiverBody.PublicReceiverURL)
 	}
+	for _, kind := range []string{"unknown-kind", "synthetic"} {
+		response := request(stack.cookie, "/api/v1/alert-sources/receiver-config?kind="+kind)
+		response.Body.Close()
+		if response.StatusCode != http.StatusNotFound {
+			t.Fatalf("unregistered kind %q receiver status=%d", kind, response.StatusCode)
+		}
+	}
 
 	list := func() alerts.SourceSummary {
 		t.Helper()
