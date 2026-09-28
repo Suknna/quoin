@@ -552,8 +552,11 @@ func TestQuoinRoutedAlertsRecentExecutor(t *testing.T) {
 	fixture := newRoutedToolFixture(t, func(t *testing.T, db *sql.DB) {
 		t.Helper()
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		mustExec(t, db, `INSERT INTO alert_occurrences(id,source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,severity,title,annotations_canonical,resource,first_seen_at,last_state_change_at) VALUES(2,1,?,'2026-09-20T07:30:00Z','Firing','{}',?,'critical','CheckoutLatencyHigh','{"summary":"P95 over threshold"}','checkout:8080',?,?)`,
-			[]byte{0, 0, 0, 0, 0, 0, 1, 2}, strings.Repeat("c", 64), now, now)
+		// alerts_recent reads a rolling seven-day window; a fixed calendar
+		// fixture silently ages out and stops testing the intended projection.
+		startedAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+		mustExec(t, db, `INSERT INTO alert_occurrences(id,source_id,fingerprint,starts_at,state,labels_canonical,labels_digest,severity,title,annotations_canonical,resource,first_seen_at,last_state_change_at) VALUES(2,1,?,?,'Firing','{}',?,'critical','CheckoutLatencyHigh','{"summary":"P95 over threshold"}','checkout:8080',?,?)`,
+			[]byte{0, 0, 0, 0, 0, 0, 1, 2}, startedAt, strings.Repeat("c", 64), now, now)
 		mustExec(t, db, `INSERT INTO alert_enrichments(occurrence_id,enrichment_json,evaluated_at) VALUES(2,'{"fields":{"team":"payments"},"rules":[]}',?)`, now)
 		mustExec(t, db, `INSERT INTO business_views(id,view_key,display_name,description,connection_id,label_conditions_json,alert_source_keys_json,row_version,created_at,updated_at) VALUES(1,'mall','商城','',NULL,'{}','["routed-source"]',1,?,?)`, now, now)
 		mustExec(t, db, `INSERT INTO alert_occurrence_correlations(occurrence_id,view_id,view_key,display_name,matched_at) VALUES(2,1,'mall','商城',?)`, now)
