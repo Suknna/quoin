@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,9 +63,11 @@ func TestPluginEventDeadlettersAdminListAndReplay(t *testing.T) {
 	if response.StatusCode != http.StatusOK || listed.Count != 1 || len(listed.Items) != 1 || listed.Items[0].DeliveryID != deliveryID {
 		t.Fatalf("admin deadletters status=%d body=%+v", response.StatusCode, listed)
 	}
-	request, _ = http.NewRequest(http.MethodPost, server.URL+path+"/"+strconv.FormatInt(deliveryID, 10)+"/replay", nil)
+	replayURL := server.URL + path + "/" + strconv.FormatInt(deliveryID, 10) + "/replay"
+	request, _ = http.NewRequest(http.MethodPost, replayURL, strings.NewReader(`{"clientCommandId":"replay-deadletter-1"}`))
 	request.Header.Set("Cookie", "__Host-quoin-session="+bearer)
 	request.Header.Set("Origin", "https://quoin.example.com")
+	request.Header.Set("Content-Type", "application/json")
 	response, err = server.Client().Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -77,15 +80,28 @@ func TestPluginEventDeadlettersAdminListAndReplay(t *testing.T) {
 	if err := application.db.QueryRow(`SELECT state FROM plugin_event_deliveries WHERE id=?`, deliveryID).Scan(&state); err != nil || state != "pending" {
 		t.Fatalf("replayed delivery state=%q err=%v", state, err)
 	}
-	request, _ = http.NewRequest(http.MethodPost, server.URL+path+"/"+strconv.FormatInt(deliveryID, 10)+"/replay", nil)
+	request, _ = http.NewRequest(http.MethodPost, replayURL, strings.NewReader(`{"clientCommandId":"replay-deadletter-1"}`))
 	request.Header.Set("Cookie", "__Host-quoin-session="+bearer)
 	request.Header.Set("Origin", "https://quoin.example.com")
+	request.Header.Set("Content-Type", "application/json")
+	response, err = server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("idempotent command replay status=%d, want original success", response.StatusCode)
+	}
+	request, _ = http.NewRequest(http.MethodPost, replayURL, strings.NewReader(`{"clientCommandId":"replay-deadletter-2"}`))
+	request.Header.Set("Cookie", "__Host-quoin-session="+bearer)
+	request.Header.Set("Origin", "https://quoin.example.com")
+	request.Header.Set("Content-Type", "application/json")
 	response, err = server.Client().Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	response.Body.Close()
 	if response.StatusCode != http.StatusConflict {
-		t.Fatalf("duplicate replay status=%d, want conflict", response.StatusCode)
+		t.Fatalf("new command replaying a pending delivery status=%d, want conflict", response.StatusCode)
 	}
 }

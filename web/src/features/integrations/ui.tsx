@@ -33,6 +33,7 @@ import { SettingsNavigation, settingsNavGroups } from "@/features/settings/nav";
 const INTEGRATIONS_BASE = "/settings/platform/integrations";
 
 import { messageOf, notify } from "@/app/shared";
+import { newClientCommandId } from "@/api/workbench";
 import { EntityList } from "@/components/EntityList";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -191,6 +192,10 @@ function PluginEventDeadletters() {
 	const [expanded, setExpanded] = useState(false);
 	const [busy, setBusy] = useState<number>();
 	const [revision, setRevision] = useState(0);
+	// Retain the same ledger key across a failed HTTP response. If the server
+	// already committed before the response was lost, retry returns its result
+	// instead of launching another subscriber delivery.
+	const commandIDs = useRef(new Map<number, string>());
 	useEffect(() => {
 		let active = true;
 		listPluginEventDeadletters()
@@ -222,8 +227,10 @@ function PluginEventDeadletters() {
 								disabled={busy !== undefined}
 								onConfirm={() => {
 								setBusy(entry.deliveryId);
-								void replayPluginEventDeadletter(entry.deliveryId)
-									.then(() => { notify.success("死信已重新排队"); setRevision((value) => value + 1); })
+								const commandID = commandIDs.current.get(entry.deliveryId) ?? newClientCommandId();
+								commandIDs.current.set(entry.deliveryId, commandID);
+								void replayPluginEventDeadletter(entry.deliveryId, commandID)
+									.then(() => { commandIDs.current.delete(entry.deliveryId); notify.success("死信已重新排队"); setRevision((value) => value + 1); })
 									.catch((reason) => notify.error(reason, "重放失败，请重试。"))
 									.finally(() => setBusy(undefined));
 							}}

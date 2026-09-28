@@ -32,8 +32,12 @@ export async function listPluginEventDeadletters(): Promise<{ count: number; ite
 	return request<{ count: number; items: PluginEventDeadletter[] }>("/api/v1/integrations/plugin-events/deadletters");
 }
 
-export async function replayPluginEventDeadletter(deliveryId: number): Promise<void> {
-	await request<void>(`/api/v1/integrations/plugin-events/deadletters/${deliveryId}/replay`, { method: "POST" });
+export async function replayPluginEventDeadletter(deliveryId: number, clientCommandId: string): Promise<void> {
+	await request<void>(`/api/v1/integrations/plugin-events/deadletters/${deliveryId}/replay`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ clientCommandId }),
+	});
 }
 
 export type MetricsPlatform = "prometheus" | "thanos";

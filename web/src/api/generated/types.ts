@@ -1691,7 +1691,7 @@ export interface paths {
         put?: never;
         /**
          * 人工重放一条插件事件死信（Admin）
-         * @description 重放是审计的人工命令；只允许死信，已投递或待重试条目返回冲突，不改变原业务事实。
+         * @description 重放是审计的人工命令；同一管理员以同一 clientCommandId 重试返回原结果，不再二次重放。新的命令只允许死信，已投递或待重试条目返回冲突，不改变原业务事实。
          */
         post: operations["replayPluginEventDeadletter"];
         delete?: never;
@@ -7402,7 +7402,13 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    clientCommandId: string;
+                };
+            };
+        };
         responses: {
             /** @description 死信已重新排队。 */
             204: {

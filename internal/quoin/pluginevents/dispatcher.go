@@ -416,43 +416,68 @@ func (dispatcher *Dispatcher) ReplayDeadletter(ctx context.Context, deliveryID i
 	if err != nil {
 		return err
 	}
-	return dispatcher.replayDeadletterWith(workCtx, dispatcher.ops.replay, deliveryID)
+	_, err = execution.Execute(workCtx, dispatcher.runner, dispatcher.ops.replay, func(tx *execution.Tx) (int64, error) {
+		return replayDeadletterOn(workCtx, tx, deliveryID)
+	}, func(id int64) int64 { return id })
+	if err == nil {
+		dispatcher.Kick()
+	}
+	return err
 }
 
 // ReplayDeadletterAsAdmin rechecks a live administrator session in the same
 // transaction as the replay. The audit actor remains the human who chose the
-// replay; it is never silently rewritten as the system principal.
-func (dispatcher *Dispatcher) ReplayDeadletterAsAdmin(ctx context.Context, deliveryID int64) error {
-	return dispatcher.replayDeadletterWith(ctx, dispatcher.ops.replayAdmin, deliveryID)
+// replay; a repeated client command ID returns the original committed result
+// even if the subscription has since deadlettered again.
+func (dispatcher *Dispatcher) ReplayDeadletterAsAdmin(ctx context.Context, clientCommandID string, deliveryID int64) error {
+	meta, err := execution.Require(ctx)
+	if err != nil {
+		return err
+	}
+	type replayResult struct {
+		DeliveryID int64 `json:"deliveryId"`
+	}
+	_, err = execution.Run(ctx, dispatcher.runner, dispatcher.ops.replayAdmin, execution.Command{
+		PrincipalType: string(execution.PrincipalUser), PrincipalID: meta.Actor.ID,
+		ClientCommandID: clientCommandID,
+		Digest:          auth.DigestCommand("plugin.event.replay_admin", map[string]any{"deliveryId": deliveryID}),
+	}, func(tx *execution.Tx) (replayResult, execution.Change, error) {
+		id, err := replayDeadletterOn(ctx, tx, deliveryID)
+		if err != nil {
+			return replayResult{}, execution.Unchanged, err
+		}
+		return replayResult{DeliveryID: id}, execution.Changed, nil
+	}, func(result replayResult) int64 { return result.DeliveryID })
+	if err == nil {
+		dispatcher.Kick()
+	}
+	return err
 }
 
-func (dispatcher *Dispatcher) replayDeadletterWith(ctx context.Context, op *execution.Operation, deliveryID int64) error {
-	_, err := execution.Execute(ctx, dispatcher.runner, op, func(tx *execution.Tx) (bool, error) {
-		result, execErr := tx.ExecContext(ctx, `
+func replayDeadletterOn(ctx context.Context, tx *execution.Tx, deliveryID int64) (int64, error) {
+	result, execErr := tx.ExecContext(ctx, `
 			UPDATE plugin_event_deliveries
 			SET state='pending', attempts=0, next_attempt_at=NULL
 			WHERE id=? AND state='deadletter'`, deliveryID)
-		if execErr != nil {
-			return false, execErr
+	if execErr != nil {
+		return 0, execErr
+	}
+	affected, affectedErr := result.RowsAffected()
+	if affectedErr != nil {
+		return 0, affectedErr
+	}
+	if affected == 0 {
+		var state string
+		stateErr := tx.QueryRowContext(ctx, `SELECT state FROM plugin_event_deliveries WHERE id=?`, deliveryID).Scan(&state)
+		if errors.Is(stateErr, sql.ErrNoRows) {
+			return 0, &execution.Rejection{Code: "delivery_not_found", Detail: "no plugin event delivery carries this id", ObjectID: deliveryID}
 		}
-		affected, affectedErr := result.RowsAffected()
-		if affectedErr != nil {
-			return false, affectedErr
+		if stateErr != nil {
+			return 0, stateErr
 		}
-		if affected == 0 {
-			var state string
-			stateErr := tx.QueryRowContext(ctx, `SELECT state FROM plugin_event_deliveries WHERE id=?`, deliveryID).Scan(&state)
-			if errors.Is(stateErr, sql.ErrNoRows) {
-				return false, &execution.Rejection{Code: "delivery_not_found", Detail: "no plugin event delivery carries this id", ObjectID: deliveryID}
-			}
-			if stateErr != nil {
-				return false, stateErr
-			}
-			return false, &execution.Rejection{Code: "delivery_not_deadletter", Detail: "only deadlettered deliveries can be replayed, state is " + state, ObjectID: deliveryID}
-		}
-		return true, nil
-	}, func(bool) int64 { return deliveryID })
-	return err
+		return 0, &execution.Rejection{Code: "delivery_not_deadletter", Detail: "only deadlettered deliveries can be replayed, state is " + state, ObjectID: deliveryID}
+	}
+	return deliveryID, nil
 }
 
 // DeadCount reports the current deadletter backlog (diagnostic projection).

@@ -145,6 +145,8 @@ describe("integration workbench", () => {
 		await waitFor(() => expect(replayed).toBe(true));
 		await waitFor(() => expect(screen.queryByText("插件事件死信 · 1 条")).not.toBeInTheDocument());
 		expect(fetchMock).toHaveBeenCalledWith("/api/v1/integrations/plugin-events/deadletters/7/replay", expect.objectContaining({ method: "POST" }));
+		const command = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/deadletters/7/replay"))?.[1];
+		expect(JSON.parse(String(command?.body)).clientCommandId).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
 	});
 
 	it("shows denied content instead of a management view to an operator", () => {

@@ -3270,7 +3270,16 @@ paths:
       tags: [adminops]
       operationId: replayPluginEventDeadletter
       summary: 人工重放一条插件事件死信（Admin）
-      description: 重放是审计的人工命令；只允许死信，已投递或待重试条目返回冲突，不改变原业务事实。
+      description: 重放是审计的人工命令；同一管理员以同一 clientCommandId 重试返回原结果，不再二次重放。新的命令只允许死信，已投递或待重试条目返回冲突，不改变原业务事实。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clientCommandId]
+              properties:
+                clientCommandId: {type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$'}
       responses:
         '204': {description: 死信已重新排队。}
         '401': {$ref: '#/components/responses/Unauthorized'}

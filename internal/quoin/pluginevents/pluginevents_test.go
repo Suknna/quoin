@@ -386,7 +386,7 @@ func TestAdminReplayRechecksSessionAndKeepsHumanAuditActor(t *testing.T) {
 		return state == stateDeadletter
 	})
 	deliveryID := eventRowDeliveryID(t, fixture.db, eventID)
-	if err := fixture.dispatcher.ReplayDeadletterAsAdmin(context.Background(), deliveryID); err == nil {
+	if err := fixture.dispatcher.ReplayDeadletterAsAdmin(context.Background(), "admin-replay-1", deliveryID); err == nil {
 		t.Fatal("replay without an admin session unexpectedly succeeded")
 	}
 	for _, statement := range []string{
@@ -405,10 +405,31 @@ func TestAdminReplayRechecksSessionAndKeepsHumanAuditActor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.dispatcher.ReplayDeadletterAsAdmin(adminCtx, deliveryID); err != nil {
+	if err := fixture.dispatcher.ReplayDeadletterAsAdmin(adminCtx, "admin-replay-1", deliveryID); err != nil {
 		t.Fatal(err)
 	}
+	if err := fixture.dispatcher.ReplayDeadletterAsAdmin(adminCtx, "admin-replay-1", deliveryID); err != nil {
+		t.Fatalf("same client command must replay original success: %v", err)
+	}
+	if err := fixture.dispatcher.ReplayDeadletterAsAdmin(adminCtx, "admin-replay-new", deliveryID); err == nil {
+		t.Fatal("new command may not requeue a pending delivery")
+	}
+	// A subscriber can fail again after the first replay. A lost response
+	// retried with the old command ID must not initiate a second replay.
+	if _, err := fixture.db.Exec(`UPDATE plugin_event_deliveries SET state='deadletter',attempts=1,last_error='handler_failed' WHERE id=?`, deliveryID); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.dispatcher.ReplayDeadletterAsAdmin(adminCtx, "admin-replay-1", deliveryID); err != nil {
+		t.Fatalf("old command should replay its original success: %v", err)
+	}
 	state, _, _ := deliveryState(t, fixture.db, eventID)
+	if state != stateDeadletter {
+		t.Fatalf("reusing a successful command replayed a newly deadlettered row: %s", state)
+	}
+	if err := fixture.dispatcher.ReplayDeadletterAsAdmin(adminCtx, "admin-replay-fresh", deliveryID); err != nil {
+		t.Fatalf("explicit fresh replay of the new deadletter failed: %v", err)
+	}
+	state, _, _ = deliveryState(t, fixture.db, eventID)
 	if state != statePending {
 		t.Fatalf("admin replay did not requeue deadletter: %s", state)
 	}

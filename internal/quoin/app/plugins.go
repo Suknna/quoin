@@ -128,6 +128,9 @@ func (application *apiServer) listPluginEventDeadletters(ctx context.Context, in
 type replayPluginEventDeadletterInput struct {
 	Session    string `cookie:"__Host-quoin-session"`
 	DeliveryID int64  `path:"deliveryId" minimum:"1"`
+	Body       struct {
+		ClientCommandID string `json:"clientCommandId" minLength:"8" maxLength:"128" pattern:"^[A-Za-z0-9_-]+$"`
+	}
 }
 
 type replayPluginEventDeadletterOutput struct {
@@ -141,9 +144,11 @@ func (application *apiServer) replayPluginEventDeadletter(ctx context.Context, i
 	if application.pluginEvents == nil {
 		return nil, huma.Error503ServiceUnavailable("插件事件派发器尚未就绪")
 	}
-	if err := application.pluginEvents.ReplayDeadletterAsAdmin(ctx, input.DeliveryID); err != nil {
+	if err := application.pluginEvents.ReplayDeadletterAsAdmin(ctx, input.Body.ClientCommandID, input.DeliveryID); err != nil {
 		var rejection *execution.Rejection
 		switch {
+		case errors.Is(err, execution.ErrCommandReused):
+			return nil, huma.Error409Conflict("命令标识已用于另一项操作", err)
 		case errors.As(err, &rejection):
 			if rejection.Code == "delivery_not_found" {
 				return nil, huma.Error404NotFound("插件事件投递不存在")
@@ -153,7 +158,6 @@ func (application *apiServer) replayPluginEventDeadletter(ctx context.Context, i
 			return nil, huma.Error503ServiceUnavailable("插件事件死信重放失败", err)
 		}
 	}
-	application.pluginEvents.Kick()
 	return &replayPluginEventDeadletterOutput{Status: http.StatusNoContent}, nil
 }
 
