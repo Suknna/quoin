@@ -25,6 +25,7 @@ type CredentialLookup interface {
 // SourceRegistry 是 webhook 依赖的插件解析面（*plugins.Registry 实现）。
 type SourceRegistry interface {
 	EventSource(kind string) (plugins.EventSource, string, bool)
+	SourceEvent(kind, eventType string) bool
 }
 
 // Webhook is the inbound HTTP surface: one handler per source kind under
@@ -105,6 +106,11 @@ func (webhook *Webhook) serveSource(writer http.ResponseWriter, request *http.Re
 	}
 	queued := make([]QueuedEvent, 0, len(events))
 	for _, event := range events {
+		if !webhook.sources.SourceEvent(source, event.Type) {
+			http.Error(writer, "source emitted an undeclared event type", http.StatusBadRequest)
+			webhook.metrics.RecordIntake("rejected")
+			return
+		}
 		eventID, err := randomEventID()
 		if err != nil {
 			http.Error(writer, "event id unavailable", http.StatusServiceUnavailable)

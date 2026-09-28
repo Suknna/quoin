@@ -48,8 +48,12 @@ func (application *apiServer) createAlertSource(ctx context.Context, input *crea
 	if session.User.Role != "admin" {
 		return nil, huma.Error403Forbidden("需要管理员权限")
 	}
-	if input.Body.Protocol != "alertmanager" {
-		return nil, huma.Error400BadRequest("不支持的协议", fmt.Errorf("protocol must be alertmanager"))
+	source, owner, ok := application.alerts.SourceRegistry().EventSource(input.Body.Protocol)
+	if !ok || source == nil {
+		return nil, huma.Error400BadRequest("不支持的协议", fmt.Errorf("protocol %q is not registered", input.Body.Protocol))
+	}
+	if normalizer, normalizerOwner, ok := application.alerts.SourceRegistry().AlertNormalizer(input.Body.Protocol); !ok || normalizer == nil || owner != normalizerOwner {
+		return nil, huma.Error400BadRequest("不支持的告警来源", fmt.Errorf("protocol %q has no alert normalizer", input.Body.Protocol))
 	}
 	key := strings.TrimSpace(input.Body.Key)
 	if key == "" {

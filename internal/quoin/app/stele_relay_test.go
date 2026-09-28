@@ -15,11 +15,13 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	gencontracts "github.com/Suknna/quoin/internal/gen/contracts"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/app"
 	"github.com/Suknna/quoin/internal/quoin/bootstrap"
 	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/execution"
+	_ "github.com/Suknna/quoin/plugins/alertmanager"
 	"github.com/Suknna/quoin/test/support"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -114,6 +116,98 @@ type relayTestHarness struct {
 	database   *bootstrap.Database
 	alerts     *alerts.Service
 	connection *connections.Service
+}
+
+// A second producer projects into the same stable alert-batch contract. Its
+// registration lives entirely in this test, not in Quoin's relay or alert
+// domain, so the test catches source-kind switches reappearing in the core.
+type syntheticAlertSource struct{}
+
+func (syntheticAlertSource) Kind() string { return "synthetic" }
+func (syntheticAlertSource) VerifyAndParse(_ context.Context, req plugins.InboundRequest) ([]plugins.Event, error) {
+	return []plugins.Event{{Type: "alerts.batch", Payload: req.Body}}, nil
+}
+
+type syntheticAlertNormalizer struct{}
+
+func (syntheticAlertNormalizer) NormalizeAlert([]byte) ([]plugins.NormalizedAlert, error) {
+	return []plugins.NormalizedAlert{{Severity: plugins.SeverityHigh, Title: "Synthetic source", Resource: "test-host"}}, nil
+}
+
+func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
+	ctx := context.Background()
+	harness := newRelayHarness(t)
+	registry := plugins.NewRegistry()
+	builtin, ok := plugins.Default().Plugin("alertmanager")
+	if !ok {
+		t.Fatal("alertmanager plugin missing from test host")
+	}
+	if err := registry.Register(builtin); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(plugins.Plugin{ID: "synthetic", Version: "1", EventSource: syntheticAlertSource{}, EventTypes: []string{"alerts.batch"}, AlertNormalizer: syntheticAlertNormalizer{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.alerts.UseSourceRegistry(registry); err != nil {
+		t.Fatal(err)
+	}
+	admin := harness.seedAdminContext(t, "registered-source")
+	digest := sha256Sum("synthetic-source-secret")
+	source, _, err := harness.alerts.CreateSource(admin, "register-second-source", "synthetic-source", "synthetic", digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientFixture := startRelayServer(t, harness.alerts, harness.connection)
+	client := relayClient(t, clientFixture, &clientFixture.steleClient)
+	labels := map[string]string{"alertname": "Synthetic", "instance": "test-host"}
+	body := []byte(`{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z","fingerprint":"` + relayFingerprintHex(labels) + `"}]}`)
+	send := func(id, kind, eventType string, payload []byte) runtimev1.EventDeliveryStatus {
+		t.Helper()
+		response, err := client.DeliverEvents(ctx, &runtimev1.DeliverEventsRequest{
+			ContractFingerprint: contract.ProtoAuthorityFingerprint,
+			Events: []*runtimev1.RelayEvent{{
+				EventId: id, SourceKind: kind, EventType: eventType, SourceId: source.SourceID,
+				CredentialId: source.CredentialID, CredentialSnapshotVersion: 1, Payload: payload,
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response.GetResults()[0]
+	}
+	accepted := runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_ACCEPTED
+	rejected := runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED
+	if got := send("synthetic-1", "synthetic", "alerts.batch", body); got != accepted {
+		t.Fatalf("synthetic batch: %s", got)
+	}
+	if got := send("synthetic-1", "synthetic", "alerts.batch", body); got != accepted {
+		t.Fatalf("replayed event: %s", got)
+	}
+	if got := send("synthetic-wrong-event", "synthetic", "unhandled.event", body); got != rejected {
+		t.Fatalf("unhandled event: %s", got)
+	}
+	if got := send("synthetic-wrong-source", "alertmanager", "alerts.batch", body); got != rejected {
+		t.Fatalf("cross-source credential: %s", got)
+	}
+	if got := send("synthetic-wrong-source-bad-body", "alertmanager", "alerts.batch", []byte("{")); got != rejected {
+		t.Fatalf("malformed cross-source delivery: %s", got)
+	}
+	var count int
+	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_deliveries WHERE protocol='synthetic'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("synthetic deliveries = %d, err=%v", count, err)
+	}
+	var title string
+	if err := harness.database.SQL.QueryRow(`SELECT title FROM alert_occurrences WHERE source_id=?`, source.SourceID).Scan(&title); err != nil || title != "Synthetic source" {
+		t.Fatalf("normalized title=%q err=%v", title, err)
+	}
+	snapshot, err := harness.alerts.AlertSnapshot(ctx, "Firing", "")
+	if err != nil || len(snapshot.Items) != 1 || snapshot.Items[0].Source != "synthetic" {
+		t.Fatalf("normalized source in alert list: %+v err=%v", snapshot.Items, err)
+	}
+	item, err := harness.alerts.GetAlert(ctx, snapshot.Items[0].ID)
+	if err != nil || item.Source != "synthetic" {
+		t.Fatalf("normalized source in alert detail: %+v err=%v", item, err)
+	}
 }
 
 func newRelayHarness(t *testing.T) *relayTestHarness {
@@ -305,7 +399,7 @@ func TestSteleRelayDeliverEventsPerEventAdjudication(t *testing.T) {
 		Events: []*runtimev1.RelayEvent{
 			{EventId: "batch-unknown-kind", SourceKind: "webhook", Payload: []byte(`{}`)},
 			{EventId: "batch-empty-id", SourceKind: "alertmanager"},
-			{EventId: "batch-good", SourceKind: "alertmanager", SourceId: result.SourceID,
+			{EventId: "batch-good", SourceKind: "alertmanager", EventType: "alerts.batch", SourceId: result.SourceID,
 				CredentialId: result.CredentialID, CredentialSnapshotVersion: 1, Payload: body},
 		},
 	})
@@ -334,7 +428,7 @@ func TestSteleRelayDeliverEventsPerEventAdjudication(t *testing.T) {
 	retry, err := steleClient.DeliverEvents(ctx, &runtimev1.DeliverEventsRequest{
 		ContractFingerprint: contract.ProtoAuthorityFingerprint,
 		Events: []*runtimev1.RelayEvent{{
-			EventId: "batch-unavailable", SourceKind: "alertmanager", SourceId: result.SourceID,
+			EventId: "batch-unavailable", SourceKind: "alertmanager", EventType: "alerts.batch", SourceId: result.SourceID,
 			CredentialId: result.CredentialID, CredentialSnapshotVersion: 1, Payload: body,
 		}},
 	})

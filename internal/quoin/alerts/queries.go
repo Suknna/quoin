@@ -34,7 +34,7 @@ type AlertEnrichment struct {
 
 type OccurrenceSummary struct {
 	// ID is an occurrence locator or platform:<fault-id>; Source is mandatory so
-	// consumers cannot mistake an internal fault for an Alertmanager occurrence.
+	// consumers cannot mistake an internal fault for a source occurrence.
 	ID              string             `json:"id"`
 	Source          string             `json:"source"`
 	State           string             `json:"state"`
@@ -62,9 +62,9 @@ type AlertSnapshot struct {
 // occurrenceSummaryRow 是 occurrence 列表/详情共享的行扫描形状：统一语义列
 // (severity/title/resource) 与 labels/annotations 快照均来自 alert_occurrences
 // 自身，不再从交付 body 现算 annotations，也不再投影任何业务系统归属。
-func occurrenceSummaryRow(id int64, state string, version int64, severity, title, resource, first, changed string, resolved sql.NullString, labelsJSON, annotationsJSON string) (OccurrenceSummary, error) {
+func occurrenceSummaryRow(id int64, sourceKind, state string, version int64, severity, title, resource, first, changed string, resolved sql.NullString, labelsJSON, annotationsJSON string) (OccurrenceSummary, error) {
 	summary := OccurrenceSummary{
-		ID: strconv.FormatInt(id, 10), Source: "alertmanager", State: state, RowVersion: version,
+		ID: strconv.FormatInt(id, 10), Source: sourceKind, State: state, RowVersion: version,
 		Severity: severity, Title: title, Resource: resource,
 		FirstSeenAt: first, LastStateChange: changed, Correlations: []AlertCorrelation{},
 	}
@@ -112,7 +112,7 @@ func platformFaultSummary(id int64, component, reason, state string, version int
 
 // occurrenceColumns 是两处 occurrence 查询共享的投影列表（不含 o.id：列表
 // 查询自行前置，详情查询以路径 locator 定位）。
-const occurrenceColumns = `o.state,o.row_version,o.severity,o.title,o.resource,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,o.annotations_canonical`
+const occurrenceColumns = `s.protocol,o.state,o.row_version,o.severity,o.title,o.resource,o.first_seen_at,o.last_state_change_at,o.resolved_at,o.labels_canonical,o.annotations_canonical`
 
 // loadCorrelations 按 matched_at 稳定序读取一批 occurrence 的关联证据；
 // occurrenceIDs 为空时直接返回空索引。
@@ -231,6 +231,7 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, viewKey
 	}
 	rows, err := snapshot.QueryContext(ctx, `SELECT o.id,`+occurrenceColumns+`
 			FROM alert_occurrences o
+			JOIN alert_sources s ON s.id=o.source_id
 			WHERE `+conditions, args...)
 	if err != nil {
 		return AlertSnapshot{}, err
@@ -239,13 +240,13 @@ func (service *Service) AlertSnapshot(ctx context.Context, state string, viewKey
 	occurrenceIDs := []int64{}
 	for rows.Next() {
 		var id, version int64
-		var summaryState, severity, title, resource, first, changed, labels, annotations string
+		var sourceKind, summaryState, severity, title, resource, first, changed, labels, annotations string
 		var resolved sql.NullString
-		if err := rows.Scan(&id, &summaryState, &version, &severity, &title, &resource, &first, &changed, &resolved, &labels, &annotations); err != nil {
+		if err := rows.Scan(&id, &sourceKind, &summaryState, &version, &severity, &title, &resource, &first, &changed, &resolved, &labels, &annotations); err != nil {
 			rows.Close()
 			return AlertSnapshot{}, err
 		}
-		summary, err := occurrenceSummaryRow(id, summaryState, version, severity, title, resource, first, changed, resolved, labels, annotations)
+		summary, err := occurrenceSummaryRow(id, sourceKind, summaryState, version, severity, title, resource, first, changed, resolved, labels, annotations)
 		if err != nil {
 			rows.Close()
 			return AlertSnapshot{}, err
@@ -334,16 +335,17 @@ func (service *Service) GetAlert(ctx context.Context, alertID string) (Occurrenc
 	if err != nil || id <= 0 {
 		return OccurrenceSummary{}, sql.ErrNoRows
 	}
-	var summaryState, severity, title, resource, first, changed, labels, annotations string
+	var sourceKind, summaryState, severity, title, resource, first, changed, labels, annotations string
 	var version int64
 	var resolved sql.NullString
 	err = service.runner.Reader().QueryRowContext(ctx, `SELECT `+occurrenceColumns+`
 		FROM alert_occurrences o
-		WHERE o.id=?`, id).Scan(&summaryState, &version, &severity, &title, &resource, &first, &changed, &resolved, &labels, &annotations)
+		JOIN alert_sources s ON s.id=o.source_id
+		WHERE o.id=?`, id).Scan(&sourceKind, &summaryState, &version, &severity, &title, &resource, &first, &changed, &resolved, &labels, &annotations)
 	if err != nil {
 		return OccurrenceSummary{}, err
 	}
-	summary, err := occurrenceSummaryRow(id, summaryState, version, severity, title, resource, first, changed, resolved, labels, annotations)
+	summary, err := occurrenceSummaryRow(id, sourceKind, summaryState, version, severity, title, resource, first, changed, resolved, labels, annotations)
 	if err != nil {
 		return OccurrenceSummary{}, err
 	}

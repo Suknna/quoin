@@ -53,7 +53,8 @@ func (lookup *stubLookup) Credential(bearer, sourceKind string) (int64, int64, u
 // stubEventSource 是最小 EventSource：成功时把请求体原样归一化为一个
 // alerts.batch 事件；fail 时模拟协议解析失败。
 type stubEventSource struct {
-	fail bool
+	fail      bool
+	eventType string
 }
 
 func (source stubEventSource) Kind() string { return "alertmanager" }
@@ -66,7 +67,11 @@ func (source stubEventSource) VerifyAndParse(_ context.Context, req plugins.Inbo
 	if err := json.Unmarshal(req.Body, &probe); err != nil {
 		return nil, err
 	}
-	return []plugins.Event{{Type: "alerts.batch", Payload: req.Body}}, nil
+	eventType := source.eventType
+	if eventType == "" {
+		eventType = "alerts.batch"
+	}
+	return []plugins.Event{{Type: eventType, Payload: req.Body}}, nil
 }
 
 // stubKindSource 是 Kind 可配置的最小 EventSource。
@@ -85,6 +90,11 @@ type stubSourceRegistry struct {
 func (registry stubSourceRegistry) EventSource(kind string) (plugins.EventSource, string, bool) {
 	source, ok := registry.sources[kind]
 	return source, "stub-plugin", ok
+}
+
+func (registry stubSourceRegistry) SourceEvent(kind, eventType string) bool {
+	_, ok := registry.sources[kind]
+	return ok && (eventType == "alerts.batch" || eventType == "generic")
 }
 
 func alertmanagerRegistry(fail bool) stubSourceRegistry {
@@ -225,6 +235,26 @@ func TestWebhookMalformedPayloadIs400BeforeEnqueue(t *testing.T) {
 	}
 	if depth, _ := queue.QueueDepth(context.Background()); depth != 0 {
 		t.Fatalf("queue depth after rejection = %d, want 0", depth)
+	}
+}
+
+func TestWebhookUndeclaredEventIsRejectedBeforeEnqueue(t *testing.T) {
+	_, digest := testBearer()
+	lookup := &stubLookup{ready: true, digest: digest}
+	registry := stubSourceRegistry{sources: map[string]plugins.EventSource{
+		"alertmanager": stubEventSource{eventType: "undeclared.event"},
+	}}
+	server, queue := newTestWebhook(t, lookup, registry)
+	response, err := http.DefaultClient.Do(bearerRequest(t, http.MethodPost, server.URL+"/webhook/alertmanager", validPayload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("undeclared event status=%d", response.StatusCode)
+	}
+	if depth, err := queue.QueueDepth(context.Background()); err != nil || depth != 0 {
+		t.Fatalf("undeclared event enqueued: depth=%d err=%v", depth, err)
 	}
 }
 

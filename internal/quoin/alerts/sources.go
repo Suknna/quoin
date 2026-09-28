@@ -179,7 +179,7 @@ func (service *Service) CreateSource(ctx context.Context, clientCommandID, sourc
 	command.Digest = auth.DigestCommand(opCreateSource, map[string]any{"key": sourceKey, "protocol": protocol})
 	outcome, err := execution.Run(ctx, service.runner, service.ops.create, command,
 		func(tx *execution.Tx) (CreateSourceResult, execution.Change, error) {
-			if err := validateSourceInput(sourceKey, protocol); err != nil {
+			if err := service.validateSourceInput(sourceKey, protocol); err != nil {
 				return CreateSourceResult{}, execution.Unchanged, err
 			}
 			now := service.clockText()
@@ -210,12 +210,16 @@ func (service *Service) CreateSource(ctx context.Context, clientCommandID, sourc
 
 // validateSourceInput rejects malformed payloads deterministically; the
 // reserved-key and trim rules stay at the HTTP entry boundary.
-func validateSourceInput(sourceKey, protocol string) error {
+func (service *Service) validateSourceInput(sourceKey, protocol string) error {
 	if sourceKey == "" || len(sourceKey) > 200 {
 		return &execution.Rejection{Code: CodeValidationFailed, Detail: "告警源 key 必须为 1 到 200 个字符"}
 	}
-	if protocol != "alertmanager" {
-		return &execution.Rejection{Code: CodeValidationFailed, Detail: "protocol 仅支持 alertmanager"}
+	pluginSource, pluginID, ok := service.sources.EventSource(protocol)
+	if !ok || pluginSource == nil {
+		return &execution.Rejection{Code: CodeValidationFailed, Detail: "protocol 未注册告警事件源"}
+	}
+	if normalizer, owner, ok := service.sources.AlertNormalizer(protocol); !ok || normalizer == nil || owner != pluginID {
+		return &execution.Rejection{Code: CodeValidationFailed, Detail: "protocol 缺少告警归一化能力"}
 	}
 	return nil
 }

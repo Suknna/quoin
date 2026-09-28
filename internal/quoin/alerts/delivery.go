@@ -92,9 +92,16 @@ type prepared struct {
 // (Q217: commit-order adjudication); an unparsable body records the rejected
 // delivery row plus the failure audit through the recorded-attempt path.
 func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) (DeliveryResult, error) {
+	return service.DeliverEvent(ctx, "alertmanager", relayID, sourceID, credentialID, snapshotVersion, body, receivedAt)
+}
+
+// DeliverEvent binds the event's registered source kind to the stored source
+// before projecting the normalized alert batch. The legacy Deliver entry is
+// retained for direct callers until the relay is the sole intake entry.
+func (service *Service) DeliverEvent(ctx context.Context, sourceKind, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) (DeliveryResult, error) {
 	webhook, parseErr := ParseWebhook(body)
 	if parseErr != nil {
-		return service.recordRejected(ctx, relayID, sourceID, credentialID, snapshotVersion, body, receivedAt)
+		return service.recordRejected(ctx, sourceKind, relayID, sourceID, credentialID, snapshotVersion, body, receivedAt)
 	}
 	ctx, err := service.machineScope(ctx)
 	if err != nil {
@@ -102,7 +109,7 @@ func (service *Service) Deliver(ctx context.Context, relayID string, sourceID, c
 	}
 	result, err := execution.Execute(ctx, service.runner, service.ops.delivery,
 		func(tx *execution.Tx) (DeliveryResult, error) {
-			return service.deliverOn(ctx, tx, webhook, relayID, sourceID, credentialID, snapshotVersion, body, receivedAt)
+			return service.deliverOn(ctx, tx, webhook, sourceKind, relayID, sourceID, credentialID, snapshotVersion, body, receivedAt)
 		},
 		func(result DeliveryResult) int64 { return result.DeliveryID })
 	if err != nil {
@@ -192,7 +199,7 @@ func (service *Service) recordCredentialDeniedIssue(ctx context.Context, relayID
 // transaction. All rejection paths return *execution.Rejection or
 // *execution.RecordedFailure so the runner owns the classification and the
 // audit rows.
-func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook *AlertmanagerWebhook, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) (DeliveryResult, error) {
+func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook *AlertmanagerWebhook, sourceKind, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) (DeliveryResult, error) {
 	var enabled int
 	var protocol, credentialState string
 	err := tx.QueryRowContext(ctx, `SELECT s.enabled, s.protocol, c.state FROM alert_sources s JOIN alert_source_credentials c ON c.source_id = s.id AND c.id = ? WHERE s.id = ?`, credentialID, sourceID).Scan(&enabled, &protocol, &credentialState)
@@ -204,6 +211,9 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 	}
 	if err != nil {
 		return DeliveryResult{}, err
+	}
+	if protocol != sourceKind {
+		return DeliveryResult{}, &execution.Rejection{Code: codeCredentialDenied, Detail: reasonCredentialDenied}
 	}
 	var sourceKey string
 	if err := tx.QueryRowContext(ctx, `SELECT source_key FROM alert_sources WHERE id=?`, sourceID).Scan(&sourceKey); err != nil {
@@ -217,7 +227,7 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 		integrity = "truncated"
 	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO alert_deliveries(event_id, source_id, credential_id, credential_snapshot_version, protocol, body, body_size_bytes, integrity, status, group_key, received_at, committed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		relayID, sourceID, credentialID, snapshotVersion, "alertmanager", body, len(body), integrity, "processed", webhook.GroupKey, receivedAt.UTC().Format(time.RFC3339Nano), committedAt)
+		relayID, sourceID, credentialID, snapshotVersion, protocol, body, len(body), integrity, "processed", webhook.GroupKey, receivedAt.UTC().Format(time.RFC3339Nano), committedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			var existingID int64
@@ -245,7 +255,7 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 	// Normalize（ADR-0012 intake 流水线第一段）：整个交付解析一次归一化器，
 	// 归一化结果按 alerts[i] 与 preparedItems[i] 的 index 一一对应；缺失或失败
 	// 时全部条目使用缺省语义并在首观测发生时记 normalizer_missing 接入问题。
-	normalization := normalizeDelivery(protocol, body)
+	normalization := normalizeDelivery(service.sources, protocol, body)
 
 	processed := 0
 	occurrences := []OccurrenceRef{}
@@ -323,15 +333,22 @@ func (service *Service) deliverOn(ctx context.Context, tx *execution.Tx, webhook
 // path: the intended state change (the rejected delivery row) commits and the
 // automatic audit records the failure. A redelivered rejected relay id is a
 // deterministic duplicate rejection — nothing new is persisted.
-func (service *Service) recordRejected(ctx context.Context, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) (DeliveryResult, error) {
+func (service *Service) recordRejected(ctx context.Context, sourceKind, relayID string, sourceID, credentialID int64, snapshotVersion uint64, body []byte, receivedAt time.Time) (DeliveryResult, error) {
 	ctx, err := service.machineScope(ctx)
 	if err != nil {
 		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
 	}
 	_, err = execution.Execute(ctx, service.runner, service.ops.delivery,
 		func(tx *execution.Tx) (bool, error) {
+			var storedKind string
+			if err := tx.QueryRowContext(ctx, `SELECT protocol FROM alert_sources WHERE id=?`, sourceID).Scan(&storedKind); err != nil {
+				return false, err
+			}
+			if storedKind != sourceKind {
+				return false, &execution.Rejection{Code: codeCredentialDenied, Detail: reasonCredentialDenied}
+			}
 			result, insertErr := tx.ExecContext(ctx, `INSERT INTO alert_deliveries(event_id, source_id, credential_id, credential_snapshot_version, protocol, body, body_size_bytes, integrity, status, received_at, committed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-				relayID, sourceID, credentialID, snapshotVersion, "alertmanager", body, len(body), "rejected", "rejected", receivedAt.UTC().Format(time.RFC3339Nano), service.clockText())
+				relayID, sourceID, credentialID, snapshotVersion, sourceKind, body, len(body), "rejected", "rejected", receivedAt.UTC().Format(time.RFC3339Nano), service.clockText())
 			if insertErr != nil {
 				if isUniqueViolation(insertErr) {
 					return false, &execution.Rejection{Code: codeDuplicateRelay, Detail: "duplicate relay; rejected delivery already recorded"}
@@ -341,7 +358,7 @@ func (service *Service) recordRejected(ctx context.Context, relayID string, sour
 			deliveryID, _ := result.LastInsertId()
 			return false, &execution.RecordedFailure{
 				Code:     codeWebhookInvalid,
-				Detail:   "webhook body is not valid Alertmanager JSON",
+				Detail:   "alert batch payload is not valid JSON",
 				ObjectID: deliveryID,
 			}
 		},
@@ -358,7 +375,7 @@ func (service *Service) recordRejected(ctx context.Context, relayID string, sour
 		}
 		return DeliveryResult{Unavailable: true, Status: "unavailable"}, err
 	}
-	return DeliveryResult{Rejected: true, Status: "rejected", Detail: "webhook body is not valid Alertmanager JSON"}, nil
+	return DeliveryResult{Rejected: true, Status: "rejected", Detail: "alert batch payload is not valid JSON"}, nil
 }
 
 func prepareItem(index int, rawItem struct {

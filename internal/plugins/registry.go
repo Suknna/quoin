@@ -205,6 +205,25 @@ func (r *Registry) EventSource(kind string) (EventSource, string, bool) {
 	return source, pluginID, ok
 }
 
+// SourceEvent reports whether the named source declares the normalized event
+// type. Source-kind ownership is checked at the same frozen assembly as
+// EventSource so gateway admission and Quoin dispatch use one authority.
+func (r *Registry) SourceEvent(kind, eventType string) bool {
+	r.mu.Lock()
+	r.ensureFrozen()
+	pluginID, ok := r.sources[kind]
+	if ok {
+		for _, declared := range r.plugins[pluginID].EventTypes {
+			if declared == eventType {
+				r.mu.Unlock()
+				return true
+			}
+		}
+	}
+	r.mu.Unlock()
+	return false
+}
+
 // EventSourceKinds returns the registered inbound source kinds, sorted.
 func (r *Registry) EventSourceKinds() []string {
 	r.mu.Lock()
@@ -247,6 +266,16 @@ func validatePlugin(plugin Plugin) error {
 	}
 	if plugin.EventSource != nil && !sourceKindPattern.MatchString(plugin.EventSource.Kind()) {
 		return fmt.Errorf("%w: %s event source kind %q is not [a-z][a-z0-9-]*", ErrInvalidPlugin, plugin.ID, plugin.EventSource.Kind())
+	}
+	if plugin.EventSource != nil && len(plugin.EventTypes) == 0 || plugin.EventSource == nil && len(plugin.EventTypes) > 0 {
+		return fmt.Errorf("%w: %s event source and non-empty event types must be declared together", ErrInvalidPlugin, plugin.ID)
+	}
+	seenEvents := map[string]bool{}
+	for _, eventType := range plugin.EventTypes {
+		if eventType == "" || seenEvents[eventType] {
+			return fmt.Errorf("%w: %s has empty or duplicate event type %q", ErrInvalidPlugin, plugin.ID, eventType)
+		}
+		seenEvents[eventType] = true
 	}
 	if plugin.AlertNormalizer != nil && plugin.EventSource == nil {
 		return fmt.Errorf("%w: %s provides an alert normalizer without its event source", ErrInvalidPlugin, plugin.ID)

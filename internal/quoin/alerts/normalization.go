@@ -21,8 +21,7 @@ type deliveryNormalization struct {
 
 // normalizeDelivery 按来源协议解析一次归一化器并投影整个 payload。body 是
 // Stele 已验证并解析过的 webhook 原始字节，无需重新 marshal。
-func normalizeDelivery(protocol string, body []byte) deliveryNormalization {
-	registry := plugins.Default()
+func normalizeDelivery(registry *plugins.Registry, protocol string, body []byte) deliveryNormalization {
 	normalizer, _, ok := registry.AlertNormalizer(protocol)
 	if !ok || normalizer == nil {
 		return deliveryNormalization{ok: false}

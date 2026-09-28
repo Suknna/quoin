@@ -96,9 +96,9 @@ func (server *steleRelayServer) GetCredentialSnapshot(ctx context.Context, reque
 }
 
 // DeliverEvents 逐事件独立裁决（ADR-0011：Stele 本地队列的批量转发）。
-// source_kind 路由：alertmanager -> alerts.Deliver（event_id 透传、
-// body=归一化 payload JSON，语义与旧 Deliver 完全一致）；未知 source_kind
-// 确定性 REJECTED。alerts 服务自身错误 -> UNAVAILABLE（Stele 稍后重试）。
+// source_kind 路由：已注册告警来源 + alerts.batch -> alerts.DeliverEvent
+// （event_id 透传）；未知来源/事件类型确定性 REJECTED。alerts 服务自身错误
+// -> UNAVAILABLE（Stele 稍后重试）。
 // 返回与请求等长的 results，顺序一一对应。
 func (server *steleRelayServer) DeliverEvents(ctx context.Context, request *runtimev1.DeliverEventsRequest) (*runtimev1.DeliverEventsResponse, error) {
 	if err := server.authorize(ctx); err != nil {
@@ -122,15 +122,20 @@ func (server *steleRelayServer) deliverOneEvent(ctx context.Context, event *runt
 		// 幂等键缺失是确定性畸形：重试也不会变好，直接 REJECTED。
 		return runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED
 	}
-	if event.GetSourceKind() != "alertmanager" {
-		// v1 的唯一入向 source_kind；未知来源没有消费方，确定性拒绝。
+	// Only the canonical alert batch is currently a Quoin projection. Both
+	// the event type and its source must be registered; an unknown or disabled
+	// future projection cannot be acknowledged as processed.
+	if event.GetEventType() != "alerts.batch" {
+		return runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED
+	}
+	if !server.alerts.SourceRegistry().SourceEvent(event.GetSourceKind(), event.GetEventType()) {
 		return runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED
 	}
 	receivedAt := time.Now().UTC()
 	if event.GetReceivedAt() != nil && event.GetReceivedAt().IsValid() {
 		receivedAt = event.GetReceivedAt().AsTime().UTC()
 	}
-	result, err := server.alerts.Deliver(ctx, event.GetEventId(), event.GetSourceId(), event.GetCredentialId(), event.GetCredentialSnapshotVersion(), event.GetPayload(), receivedAt)
+	result, err := server.alerts.DeliverEvent(ctx, event.GetSourceKind(), event.GetEventId(), event.GetSourceId(), event.GetCredentialId(), event.GetCredentialSnapshotVersion(), event.GetPayload(), receivedAt)
 	if err != nil {
 		// 服务错误（库不可用等）不是事件的确定性属性：UNAVAILABLE 让
 		// Stele 稍后重试，超限入死信。

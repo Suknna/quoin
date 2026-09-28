@@ -43,6 +43,7 @@ func init() {
         DefaultEnabled: false,
         ConfigSchema:   myConfigSchema, // 实例设置的封闭 JSON Schema（draft 2020-12）
         EventSource:    mySource{},     // 可选：入向能力
+        EventTypes:     []string{"alerts.batch"}, // 入向类型必须显式声明
         Tools:          myTools{},      // 可选：出向能力
         // 可选声明目录（调度器消费，执行走内部工具）：
         // DiscoverObjects / InspectionTemplates
@@ -74,6 +75,8 @@ func (mySource) VerifyAndParse(ctx context.Context, req plugins.InboundRequest) 
 Stele 网关负责 Bearer/digest 认证（"签名对不对"）与 16MiB body 上限；解析失败在**入队前**拒绝
 （HTTP 400），解析成功即本地入队并返回 202。`Event.Payload` 是你与 Quoin 消费者之间的归一化
 契约（参考 `plugins/alertmanager/alertmanager.go`：payload 保持平台 wire 投影形状）。
+插件必须声明所有可能产出的 `EventTypes`；Stele 会在入队前拒绝未声明的类型，
+Quoin 同样在接收时复核。声明一个新类型不等于核心已有其投影处理器，当前仅 `alerts.batch` 可消费。
 
 ## 出向：泛型工具
 
@@ -162,6 +165,17 @@ func init() {
   (severity/title/annotations_canonical/resource)冻结后不可变;缺 normalizer 的来源记
   `normalizer_missing` intake issue 并用缺省语义。
 - 业务语义(occurrence 状态机、富化规则、视图关联)绝不在插件里。
+
+### 多来源告警的现阶段接缝（ADR-0014，实施中）
+
+告警源创建、Quoin Relay 与告警列表/详情不再把 `alertmanager` 当作唯一来源：
+注册的 EventSource + AlertNormalizer 可以创建自己的来源；Relay 只接收其
+`alerts.batch` 事件，并在事务内核对事件来源与来源凭据的归属。接入侧需要将
+`alerts.batch` 的载荷转换为当前的 Alertmanager 兼容结构（含每条的完整 labels、
+startsAt、status，以及按 labels 计算的 fingerprint）；这只是过渡期的规范投影，
+**不代表**已完成任意外部 identity 的通用化、协议版本协商、启用集合门控、
+订阅派发或跨来源日报。新平台若无法安全映射该身份模型，不应伪造标签以接入，
+应等待统一规范载荷的下一阶段实施。
 
 ## 实例设置与校验
 

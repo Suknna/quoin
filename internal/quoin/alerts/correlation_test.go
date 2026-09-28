@@ -15,6 +15,7 @@ import (
 
 	// 与 cmd/quoin 相同的装配：blank-import 插件包，使 alertmanager
 	// 协议在进程默认注册表中携带 AlertNormalizer（ADR-0012）。
+	"github.com/Suknna/quoin/internal/plugins"
 	_ "github.com/Suknna/quoin/plugins/alertmanager"
 	_ "github.com/Suknna/quoin/plugins/metrics"
 )
@@ -209,7 +210,7 @@ func TestNormalizeDegradesUnmappedSeverityToInfo(t *testing.T) {
 // normalizeDelivery 对未知 kind 不得解析出 normalizer，semanticsFor 退化为
 // info/”/'{}'/”；越界 index 同样防御性降级。
 func TestNormalizeMissingProtocolDegradesToDefaults(t *testing.T) {
-	normalization := normalizeDelivery("unknown-protocol", mustBody(t, map[string]string{"alertname": "CPU"}, "2026-09-01T10:00:00Z"))
+	normalization := normalizeDelivery(plugins.Default(), "unknown-protocol", mustBody(t, map[string]string{"alertname": "CPU"}, "2026-09-01T10:00:00Z"))
 	if normalization.ok {
 		t.Fatal("unknown protocol must not resolve a normalizer")
 	}
@@ -227,8 +228,7 @@ func TestNormalizeMissingProtocolDegradesToDefaults(t *testing.T) {
 
 // normalizer_missing 接入问题聚合：来源级问题闭合到已处理 Delivery，重复
 // 记录按既有聚合计数推进（trg_alert_intake_issues_repeat_update 冻结校验）。
-// v1 schema 的 protocol CHECK 只允许 alertmanager（注册表已装配 normalizer），
-// 端到端缺失路径在未来协议放开后自然覆盖；这里直接驱动写入器验证新 kind 的
+// 来源创建现在按注册表验证 normalizer；这里直接驱动写入器验证
 // schema 闭合约束与聚合推进（每 Delivery 至多一条无条目事件，跨 Delivery 聚合）。
 func TestRecordNormalizerMissingIssueAggregates(t *testing.T) {
 	service, database, done := newTestService(t)

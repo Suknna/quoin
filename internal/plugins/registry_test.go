@@ -29,6 +29,7 @@ func newTestRegistry(t *testing.T) *plugins.Registry {
 	if err := registry.Register(plugins.Plugin{
 		ID: "alpha", Version: "1", DefaultEnabled: true,
 		EventSource: stubSource{kind: "alphaevents"},
+		EventTypes:  []string{"alerts.batch"},
 		Tools: stubProvider{entries: []plugins.ToolEntry{
 			plugins.Tool[echoArgs, echoResult]{
 				Name: "alpha_query", Version: "3", FailureMode: plugins.FailureReturnToModel,
@@ -70,6 +71,16 @@ func TestRegistryEventSourceLookup(t *testing.T) {
 	}
 	if _, _, ok := registry.EventSource("missing"); ok {
 		t.Fatal("unknown event source kind resolved")
+	}
+	if !registry.SourceEvent("alphaevents", "alerts.batch") || registry.SourceEvent("alphaevents", "undeclared") {
+		t.Fatal("event contract lookup failed")
+	}
+}
+
+func TestRegistryRequiresSourceEventDeclarations(t *testing.T) {
+	registry := plugins.NewRegistry()
+	if err := registry.Register(plugins.Plugin{ID: "broken", Version: "1", EventSource: stubSource{kind: "broken"}}); err == nil {
+		t.Fatal("source without declared event types accepted")
 	}
 }
 

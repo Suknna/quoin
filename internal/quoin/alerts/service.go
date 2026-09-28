@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/execution"
@@ -36,9 +37,10 @@ type Service struct {
 	db *sql.DB
 	// runner executes this package's commands and projections with
 	// automatic audit; its Reader() factory is the only read surface.
-	runner *execution.Runner
-	ops    alertOperations
-	now    func() time.Time
+	runner  *execution.Runner
+	ops     alertOperations
+	now     func() time.Time
+	sources *plugins.Registry
 }
 
 // NewService is the pre-composition constructor: the service owns a private
@@ -53,7 +55,7 @@ func NewService(db *sql.DB) *Service {
 	if err != nil {
 		panic("alerts: compose default service: " + err.Error())
 	}
-	return &Service{db: db, runner: runner, ops: ops, now: time.Now}
+	return &Service{db: db, runner: runner, ops: ops, now: time.Now, sources: plugins.Default()}
 }
 
 // NewServiceWithReader assembles the service: db is the runner-owned write
@@ -82,8 +84,22 @@ func NewServiceWithReader(db *sql.DB, reader audit.Reader, runner *execution.Run
 	if err != nil {
 		return nil, err
 	}
-	return &Service{db: db, runner: runner, ops: ops, now: time.Now}, nil
+	return &Service{db: db, runner: runner, ops: ops, now: time.Now, sources: plugins.Default()}, nil
 }
+
+// UseSourceRegistry replaces the process assembly before serving. It is used
+// by isolated host assemblies and must not race with source management/relay.
+func (service *Service) UseSourceRegistry(registry *plugins.Registry) error {
+	if registry == nil {
+		return errors.New("alerts: source registry is required")
+	}
+	service.sources = registry
+	return nil
+}
+
+// SourceRegistry is the frozen plugin assembly used by both source management
+// and relay admission; these two entry points must never disagree on a kind.
+func (service *Service) SourceRegistry() *plugins.Registry { return service.sources }
 
 // authorizeSourceAdmin re-verifies inside the runner transaction that the
 // context carries a live administrator session proof (auth.

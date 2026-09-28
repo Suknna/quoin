@@ -276,7 +276,7 @@ CREATE INDEX idx_audit_event_targets_target ON audit_event_targets (target_type,
 CREATE TABLE alert_sources (
   id          INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
   source_key  TEXT NOT NULL UNIQUE,                 -- 稳定用户 key，退役不复用
-  protocol    TEXT NOT NULL CHECK (protocol IN ('alertmanager')), -- v1 仅 alertmanager
+  protocol    TEXT NOT NULL,
   enabled     INTEGER NOT NULL CHECK (enabled IN (0,1)),
   row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1), -- enable/disable 命令并发前提（DATA-ALERT-010）
   created_at  TEXT NOT NULL,
@@ -308,7 +308,7 @@ CREATE TABLE alert_deliveries (
   source_id                  INTEGER NOT NULL REFERENCES alert_sources(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   credential_id              INTEGER NOT NULL REFERENCES alert_source_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 每次 Delivery 必带认证元数据（DATA-ALERT-008）
   credential_snapshot_version INTEGER NOT NULL CHECK (credential_snapshot_version >= 1), -- Stele 提交的只读快照版本
-  protocol                   TEXT NOT NULL CHECK (protocol IN ('alertmanager')),
+  protocol                   TEXT NOT NULL,
   body                       BLOB NOT NULL,          -- 精确原始 body 字节（可能非 UTF-8），直接存 SQLite（非 Artifact）
   body_size_bytes            INTEGER NOT NULL CHECK (body_size_bytes >= 0),
   integrity                  TEXT NOT NULL CHECK (integrity IN ('complete','truncated','rejected')),
