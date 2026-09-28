@@ -293,6 +293,21 @@ func TestSetSourceSettingsFencesAndAdvancesSnapshot(t *testing.T) {
 	if err := database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_source_settings_history WHERE source_id=?`, created.SourceID).Scan(&historyRows); err != nil || historyRows != 2 {
 		t.Fatalf("semantic no-op appended a new settings revision: rows=%d err=%v", historyRows, err)
 	}
+	disabled, _, err := service.SetSourceEnabled(ctx, "settings-disable-source", "settings-src", false, updated.RowVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabledEpoch, disabledSources, err := service.CredentialSnapshot(ctx)
+	if err != nil || disabledEpoch <= snapshotVersion || len(disabledSources) != 1 || disabledSources[0].Enabled {
+		t.Fatalf("disabling a source must advance the snapshot and revoke acceptance: before=%d after=%d sources=%+v err=%v", snapshotVersion, disabledEpoch, disabledSources, err)
+	}
+	if _, _, err := service.SetSourceEnabled(ctx, "settings-enable-source", "settings-src", true, disabled.RowVersion); err != nil {
+		t.Fatal(err)
+	}
+	reenabledEpoch, reenabledSources, err := service.CredentialSnapshot(ctx)
+	if err != nil || reenabledEpoch <= disabledEpoch || len(reenabledSources) != 1 || !reenabledSources[0].Enabled {
+		t.Fatalf("re-enabling a source must advance the snapshot: %d -> %d sources=%+v err=%v", disabledEpoch, reenabledEpoch, reenabledSources, err)
+	}
 }
 
 func TestTwoInstancesSameKindKeepIndependentSettings(t *testing.T) {
