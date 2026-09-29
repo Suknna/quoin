@@ -108,7 +108,6 @@ import {
 	listHttpConnectionInstances,
 	listIntegrationPlugins,
 	listPluginEventDeadletters,
-	listMetricsInstances,
 	type MetricsConnectionInput,
 	type MetricsInstance,
 	probeDiagnostic,
@@ -373,28 +372,28 @@ function Instances({
 	suspended,
 }: Pick<WorkspaceModuleProps, "navigate" | "suspended">) {
 	const [query, setQuery] = useState("");
-	// 指标连接不分页、告警事件源分页：第一页 = 全部指标连接 + 通用 HTTP 连接 +
-	// 事件源第一页，后续页只有事件源（已完整展示的连接不在后续页重复）。
-	// 通用 HTTP 连接的 kind 来自已启用插件目录；目录读取失败不拖垮列表，
-	// 只是这一页暂不包含通用连接。
+	// 两套权威游标按阶段遍历：先走完全部连接页，再接续事件源页。
+	// 连接接口跨平台分页，单页即便全是模型连接也不能假装没有实例；
+	// 插件目录读取失败则显式失败，不得静默隐藏通用 HTTP 连接。
 	const list = useCursorPages<
 		EventSourceInstance | MetricsInstance | HttpConnectionInstance
 	>(
 		async (cursor) => {
-			if (cursor) return listEventSourceInstances(cursor);
-			const [events, metrics, catalog] = await Promise.all([
-				listEventSourceInstances(),
-				listMetricsInstances(),
-				listIntegrationPlugins().catch(() => []),
-			]);
-			const generic = (
-				await listHttpConnectionInstances(
-					genericHttpConnectionKinds(catalog),
-				)
-			).items;
+			if (cursor?.startsWith("events:")) {
+				const events = await listEventSourceInstances(cursor.slice("events:".length));
+				return { items: events.items, nextCursor: events.nextCursor ? `events:${events.nextCursor}` : undefined };
+			}
+			const catalog = await listIntegrationPlugins();
+			const connections = cursor?.startsWith("connections:") ? cursor.slice("connections:".length) : undefined;
+			const page = await listHttpConnectionInstances(
+				["prometheus", "thanos", ...genericHttpConnectionKinds(catalog)],
+				connections,
+			);
+			if (page.nextCursor) return { items: page.items, nextCursor: `connections:${page.nextCursor}` };
+			const events = await listEventSourceInstances();
 			return {
-				items: [...(events.items ?? []), ...metrics, ...generic],
-				nextCursor: events.nextCursor,
+				items: [...page.items, ...events.items],
+				nextCursor: events.nextCursor ? `events:${events.nextCursor}` : undefined,
 			};
 		},
 		{ suspended, fallbackError: "暂时无法完成操作，请重试。" },
@@ -489,10 +488,12 @@ function Instances({
 				loadingLabel="正在加载实例"
 				error={list.error}
 				onRetry={list.retry}
-				emptyTitle={query ? "没有匹配的已加载实例" : "尚未接入实例"}
+				emptyTitle={query ? "没有匹配的已加载实例" : list.hasNext ? "本页没有匹配的实例，请继续翻页" : "尚未接入实例"}
 				emptyDescription={
 					query
-						? "请使用其他名称搜索。"
+						? "请使用其他名称搜索，或继续翻页。"
+						: list.hasNext
+							? "连接可能位于下一页；本页只展示当前游标范围内可管理的来源。"
 						: "创建接入后，在此管理探测、启用、停用与轮换。"
 				}
 			/>

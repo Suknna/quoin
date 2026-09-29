@@ -782,6 +782,8 @@ describe("integration workbench", () => {
 		it("lists generic source instances by kind and opens the shared drawer", async () => {
 			vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
 				const url = String(input);
+				if (url === "/api/v1/integrations/plugins") return Response.json({ items: [] });
+				if (url === "/api/v1/integrations/plugin-events/deadletters") return Response.json({ count: 0, items: [] });
 				if (url.startsWith("/api/v1/alert-sources"))
 					return Response.json({
 						items: [
@@ -857,6 +859,8 @@ describe("integration workbench", () => {
 			.spyOn(globalThis, "fetch")
 			.mockImplementation(async (input) => {
 				const url = String(input);
+				if (url === "/api/v1/integrations/plugins") return Response.json({ items: [] });
+				if (url === "/api/v1/integrations/plugin-events/deadletters") return Response.json({ count: 0, items: [] });
 				if (url.startsWith("/api/v1/alert-sources"))
 					return Response.json({ items: [] });
 				if (url.startsWith("/api/v1/connections"))
@@ -898,6 +902,36 @@ describe("integration workbench", () => {
 			"/settings/platform/integrations/prometheus/1",
 		);
 		fetchMock.mockRestore();
+	});
+
+	it("continues across connection pages before event-source pages without hiding late metrics", async () => {
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url === "/api/v1/integrations/plugin-events/deadletters") return Response.json({ count: 0, items: [] });
+			if (url === "/api/v1/integrations/plugins") return Response.json({ items: [] });
+			if (url === "/api/v1/connections?limit=100") return Response.json({
+				items: Array.from({ length: 100 }, (_, index) => ({ id: String(index + 1), name: `model-${index}`, type: "model_provider", config: {} })),
+				nextCursor: "connections-second-page",
+			});
+			if (url === "/api/v1/connections?limit=100&cursor=connections-second-page") return Response.json({
+				items: [{ id: "101", name: "late-prometheus", type: "prometheus", enabled: true, config: { baseUrl: "https://metrics.example.test", authType: "none" } }],
+			});
+			if (url === "/api/v1/alert-sources?limit=50") return Response.json({ items: [{ id: "7", key: "edge-alerts", protocol: "alertmanager", enabled: true, rowVersion: 1 }], nextCursor: "alerts-second-page" });
+			if (url === "/api/v1/alert-sources?limit=50&cursor=alerts-second-page") return Response.json({ items: [{ id: "8", key: "late-alerts", protocol: "alertmanager", enabled: true, rowVersion: 1 }] });
+		return Response.json({ message: `unexpected ${url}` }, { status: 500 });
+		});
+		render(<IntegrationView route="/settings/platform/integrations/instances" />);
+		expect(await screen.findByText("本页没有匹配的实例，请继续翻页")).toBeInTheDocument();
+		expect(screen.queryByText("尚未接入实例")).not.toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+		await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/v1/connections?limit=100&cursor=connections-second-page", expect.anything()));
+		expect(await screen.findByText("late-prometheus")).toBeInTheDocument();
+		expect(screen.getByText("edge-alerts")).toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+		expect(await screen.findByText("late-alerts")).toBeInTheDocument();
+		expect(screen.queryByText("late-prometheus")).not.toBeInTheDocument();
+		fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+		expect(await screen.findByText("late-prometheus")).toBeInTheDocument();
 	});
 
 	it("creates an Alertmanager source and opens its in-memory reveal dialog", async () => {
