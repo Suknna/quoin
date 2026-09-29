@@ -467,13 +467,12 @@ func validatePlugin(plugin Plugin) error {
 	if plugin.EventSource != nil && len(plugin.EventContracts) == 0 || plugin.EventSource == nil && len(plugin.EventContracts) > 0 {
 		return fmt.Errorf("%w: %s event source and non-empty event contracts must be declared together", ErrInvalidPlugin, plugin.ID)
 	}
-	seenEvents := map[string]bool{}
+	seenEvents := map[EventContract]bool{}
 	for _, event := range plugin.EventContracts {
-		key := fmt.Sprintf("%s\x00%d", event.Type, event.Version)
-		if event.Type == "" || event.Version == 0 || seenEvents[key] {
+		if event.Type == "" || event.Version == 0 || seenEvents[event] {
 			return fmt.Errorf("%w: %s has empty or duplicate event contract %q version %d", ErrInvalidPlugin, plugin.ID, event.Type, event.Version)
 		}
-		seenEvents[key] = true
+		seenEvents[event] = true
 	}
 	seenTemplates := map[string]bool{}
 	for _, template := range plugin.InspectionTemplates {

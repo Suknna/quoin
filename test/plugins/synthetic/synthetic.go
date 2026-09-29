@@ -71,7 +71,7 @@ type sourceSettings struct {
 
 func Plugin() plugins.Plugin {
 	return plugins.Plugin{
-		ID: "synthetic-plugin", Version: "2", DisplayName: "Synthetic webhook",
+		ID: "synthetic-plugin", Version: "3", DisplayName: "Synthetic webhook",
 		EventSource: source{}, EventContracts: []plugins.EventContract{{Type: "alerts.batch", Version: 1}},
 		EventSourceConfigSchema: SourceSettingsSchema,
 		AlertNormalizer:         normalizer{}, AlertIdentity: plugins.AlertIdentityExternal,

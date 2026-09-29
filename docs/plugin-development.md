@@ -78,7 +78,7 @@ func (mySource) VerifyAndParse(ctx context.Context, req plugins.InboundRequest) 
     // EventSourceConfigSchema 校验；绝不携带凭据，也绝不会是别的实例的设置。
     // 职责：协议级校验（载荷形状、来源特有签名）+ 归一化。业务语义（occurrence
     // 状态机、去重策略、归因）绝不在此——那是 Quoin 消费者的事。
-    return []plugins.Event{{Type: "alerts.batch", Payload: normalized}}, nil
+    return []plugins.Event{{Type: "alerts.batch", PayloadVersion: 1, Payload: normalized}}, nil
 }
 ```
 

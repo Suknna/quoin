@@ -101,7 +101,7 @@ func (alertmanagerNormalizer) NormalizeAlert(payload []byte) ([]plugins.Normaliz
 func init() {
 	plugins.Register(plugins.Plugin{
 		ID:              plugins.AlertmanagerID,
-		Version:         "1",
+		Version:         "2",
 		DisplayName:     "Alertmanager",
 		Description:     "接收上游 Alertmanager 告警来源：Stele 网关按来源认证并归一化入队，Quoin 事务性消费并归一化告警语义。",
 		DefaultEnabled:  true,
