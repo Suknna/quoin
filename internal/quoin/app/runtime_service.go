@@ -13,6 +13,7 @@ import (
 	"github.com/Suknna/quoin/internal/contract"
 	runtimev1 "github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 	sharedops "github.com/Suknna/quoin/internal/ops"
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/alerts"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
 	appinvestigation "github.com/Suknna/quoin/internal/quoin/app/investigation"
@@ -73,6 +74,10 @@ type RuntimeService struct {
 	// inspection_analysis report attempts (T24); nil keeps the handshake-only
 	// behaviour for tests that do not exercise it.
 	Inspections *inspection.Service
+	// LocalToolEntries is the deployment-enabled frozen implementation table.
+	// Nil only in isolated legacy fixtures; a non-nil empty table denies every
+	// internal tool rather than falling back to disabled process plugins.
+	LocalToolEntries map[string]plugins.ToolEntry
 	// Observations owns source observation children (ADR-0004); nil keeps the
 	// handshake-only behaviour for tests that do not exercise it.
 	Observations *observation.Service

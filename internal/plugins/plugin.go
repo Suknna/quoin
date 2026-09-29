@@ -137,6 +137,10 @@ type Plugin struct {
 	// catalog (consumed by inspection planning; execution happens through the
 	// plugin's internal tools).
 	InspectionTemplates []InspectionTemplate
+	// DefaultInspectionPlan, if declared, creates one manual-only starter
+	// inspection plan when this plugin's connection is enabled. The plugin
+	// owns both the template identity and its valid initial params.
+	DefaultInspectionPlan *DefaultInspectionPlan
 	// PostCommitSubscriptions declares the finite committed-fact vocabulary
 	// entries this plugin consumes (ADR-0014). Valid only together with a
 	// non-nil PostCommitHandler; registration rejects unknown fact types and

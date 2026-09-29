@@ -49,6 +49,9 @@ func (application *apiServer) configurePlugins(configured []string) ([]string, e
 	application.analyses.Attempts().Catalogs = catalogs
 	application.investigations.Attempts().Catalogs = catalogs
 	application.inspections.Attempts().Catalogs = catalogs
+	if err := application.inspections.UsePluginRegistry(application.pluginRegistry, enabled); err != nil {
+		return nil, err
+	}
 	application.knowledgeService.Attempts().Catalogs = catalogs
 	// The deployment-resolved source scope plan (ADR-0014): registry-declared
 	// roles × connection kinds of enabled plugins drive the frozen agent
@@ -64,17 +67,27 @@ func (application *apiServer) configurePlugins(configured []string) ([]string, e
 }
 
 type pluginCatalogItem struct {
-	ID                      string         `json:"id"`
-	SourceKind              string         `json:"sourceKind,omitempty"`
-	ConnectionKind          string         `json:"connectionKind,omitempty"`
-	ConnectionAuthModes     []string       `json:"connectionAuthModes,omitempty"`
-	ConnectionProbePath     string         `json:"connectionProbePath,omitempty"`
-	EventSourceConfigSchema map[string]any `json:"eventSourceConfigSchema,omitempty"`
-	DisplayName             string         `json:"displayName"`
-	Description             string         `json:"description"`
-	Enabled                 bool           `json:"enabled"`
-	Version                 string         `json:"version"`
-	Capabilities            []string       `json:"capabilities"`
+	ID                      string                         `json:"id"`
+	SourceKind              string                         `json:"sourceKind,omitempty"`
+	ConnectionKind          string                         `json:"connectionKind,omitempty"`
+	ConnectionAuthModes     []string                       `json:"connectionAuthModes,omitempty"`
+	ConnectionProbePath     string                         `json:"connectionProbePath,omitempty"`
+	EventSourceConfigSchema map[string]any                 `json:"eventSourceConfigSchema,omitempty"`
+	InspectionTemplates     []pluginInspectionTemplateItem `json:"inspectionTemplates,omitempty"`
+	DisplayName             string                         `json:"displayName"`
+	Description             string                         `json:"description"`
+	Enabled                 bool                           `json:"enabled"`
+	Version                 string                         `json:"version"`
+	Capabilities            []string                       `json:"capabilities"`
+}
+
+type pluginInspectionTemplateItem struct {
+	ID           string         `json:"id"`
+	Version      string         `json:"version"`
+	Title        string         `json:"title"`
+	Description  string         `json:"description"`
+	ParamsSchema map[string]any `json:"paramsSchema,omitempty"`
+	ResultKind   string         `json:"resultKind"`
 }
 
 type integrationsPluginsInput struct {
@@ -213,6 +226,13 @@ func pluginCatalogEntry(plugin plugins.Plugin, enabled bool) pluginCatalogItem {
 	}
 	if len(plugin.InspectionTemplates) > 0 {
 		item.Capabilities = append(item.Capabilities, "inspection_templates")
+		for _, template := range plugin.InspectionTemplates {
+			item.InspectionTemplates = append(item.InspectionTemplates, pluginInspectionTemplateItem{
+				ID: template.ID, Version: template.Version, Title: template.Title,
+				Description: template.Description, ParamsSchema: template.ParamsSchema,
+				ResultKind: template.ResultKind,
+			})
+		}
 	}
 	sort.Strings(item.Capabilities)
 	return item

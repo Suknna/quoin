@@ -162,6 +162,21 @@ describe("DailyReportsOverview", () => {
 });
 
 describe("DailyReportDetailView", () => {
+	it("keeps plugin-owned JSON check facts readable without treating them as PromQL", async () => {
+		const generic = {
+			...sealedDetail,
+			latest: {
+				...sealedDetail.latest,
+				sources: [{ planKey: "synthetic-plan", connectionName: "synthetic-local", enabled: true, sourceEnabled: true, status: "ok" as const, checks: [{ runId: 9, evidenceId: 34, checkKey: "synthetic_check", status: "ok", result: { expression: "echo", value: "ok" } }] }],
+			},
+		};
+		dailyApi.getDailyReport.mockResolvedValue(generic);
+		render(<DailyReportDetailView configKey="ops-daily" localDate="2026-09-27" suspended={false} navigate={vi.fn()} />);
+		expect(await screen.findByText("synthetic_check")).toBeInTheDocument();
+		fireEvent.click(screen.getByText("结构化检查结果"));
+		expect(screen.getByText(/"value": "ok"/)).toBeInTheDocument();
+		expect(screen.queryByText(/组序列/)).not.toBeInTheDocument();
+	});
 	it("presents gaps as gaps and marks the absent AI summary explicitly", async () => {
 		const openEvidence = vi.fn();
 		render(

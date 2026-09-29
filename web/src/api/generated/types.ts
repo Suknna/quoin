@@ -2434,6 +2434,10 @@ export interface components {
                         maxAt?: components["schemas"]["Timestamp"];
                     }[];
                 };
+                /** @description 非指标插件提交的有界结构化 JSON 检查事实（至多 64 KiB），与 measurement 二选一；在封存文档中可由日报只读工具分页读取。 */
+                result?: {
+                    [key: string]: unknown;
+                };
             }[];
         };
         DailyReportContribution: {
@@ -7536,6 +7540,17 @@ export interface operations {
                             connectionAuthModes?: ("none" | "basic" | "bearer")[];
                             /** @description 插件声明的只读 GET/200 探测路径；无路径的连接类型不得启用新实例。 */
                             connectionProbePath?: string;
+                            /** @description 插件声明的巡检模板目录；每项的封闭 paramsSchema 是建计划的权威参数词表，模板 ID/版本与冻结 Run 对齐。 */
+                            inspectionTemplates?: {
+                                id: string;
+                                version: string;
+                                title: string;
+                                description: string;
+                                /** @description 关闭附加字段的非秘密 JSON Schema；缺省表示无参数。 */
+                                paramsSchema?: Record<string, never>;
+                                /** @enum {string} */
+                                resultKind: "promql" | "json";
+                            }[];
                             displayName: string;
                             description: string;
                             enabled: boolean;

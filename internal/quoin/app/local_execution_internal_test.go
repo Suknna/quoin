@@ -38,7 +38,7 @@ func stubLocalProbeTool(t *testing.T, reachable bool, detail string) {
 		if name != "metrics_probe" {
 			return plugins.ToolEntry{}, false
 		}
-		return plugins.ToolEntry{Timeout: time.Second, Invoke: func(ctx context.Context, exec plugins.ToolExecution) (json.RawMessage, error) {
+		return plugins.ToolEntry{Internal: true, Timeout: time.Second, Invoke: func(ctx context.Context, exec plugins.ToolExecution) (json.RawMessage, error) {
 			probe := struct {
 				Reachable    bool   `json:"reachable"`
 				LatencyMS    int64  `json:"latencyMs"`

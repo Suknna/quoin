@@ -4,6 +4,8 @@
 // attempt's envelope instead of being implicitly exposed to the model.
 package agentcontext
 
+import "encoding/json"
+
 type Integration struct {
 	Kind string `json:"kind"`
 	Name string `json:"name"`
@@ -105,6 +107,10 @@ type DailyCheckItem struct {
 	ObservedAt  *string           `json:"observedAt,omitempty"`
 	EvidenceID  *int64            `json:"evidenceId,omitempty"`
 	Measurement *DailyMeasurement `json:"measurement,omitempty"`
+	// Result is a bounded, plugin-normalized JSON object for non-time-series
+	// checks. It is frozen in the report and paginated by daily_report_get;
+	// unknown fields are data, never instructions or platform authority.
+	Result json.RawMessage `json:"result,omitempty"`
 }
 
 // DailyMeasurement is the bounded projection of one check's immutable

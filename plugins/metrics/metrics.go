@@ -868,41 +868,67 @@ func (p metricsToolProvider) Tools() []plugins.ToolEntry {
 // catalog; the (pluginID, templateID, version) triple is the identity the
 // inspection plans bind.
 func promQLInspectionTemplates() []plugins.InspectionTemplate {
+	instantParams := map[string]any{
+		"type": "object", "additionalProperties": false,
+		"required":   []string{"expression"},
+		"properties": map[string]any{"expression": map[string]any{"type": "string", "minLength": 1}},
+	}
+	rangeParams := map[string]any{
+		"type": "object", "additionalProperties": false,
+		"required": []string{"expression", "rangeSeconds", "stepSeconds"},
+		"properties": map[string]any{
+			"expression":   map[string]any{"type": "string", "minLength": 1},
+			"rangeSeconds": map[string]any{"type": "integer", "minimum": 1},
+			"stepSeconds":  map[string]any{"type": "integer", "minimum": 1},
+		},
+	}
+	validator := func(id string) func(map[string]any) error {
+		return func(params map[string]any) error {
+			_, expression, _, _, err := pluginTemplateQuery(id, params)
+			if err != nil {
+				return err
+			}
+			_, err = promQLScopeParse(expression)
+			return err
+		}
+	}
 	return []plugins.InspectionTemplate{
-		{ID: "promql_instant", Version: "1", Title: "PromQL 即时查询", Description: "以 evidence_at 为观测点执行一次即时向量查询", GrantPurpose: "config_thanos_query"},
-		{ID: "promql_range", Version: "1", Title: "PromQL 范围查询", Description: "以 evidence_at 为终点执行一次范围查询并保存实际窗口", GrantPurpose: "config_thanos_query"},
+		{ID: "promql_instant", Version: "1", Title: "PromQL 即时查询", Description: "以 evidence_at 为观测点执行一次即时向量查询", GrantPurpose: "config_thanos_query", CollectToolName: "metrics_collect", ResultKind: "promql", ParamsSchema: instantParams, ValidateParams: validator("promql_instant")},
+		{ID: "promql_range", Version: "1", Title: "PromQL 范围查询", Description: "以 evidence_at 为终点执行一次范围查询并保存实际窗口", GrantPurpose: "config_thanos_query", CollectToolName: "metrics_collect", ResultKind: "promql", ParamsSchema: rangeParams, ValidateParams: validator("promql_range")},
 	}
 }
 
 func init() {
 	plugins.Register(plugins.Plugin{
 		ID:          plugins.PrometheusID,
-		Version:     "1",
+		Version:     "2",
 		DisplayName: "Prometheus",
 		Description: "连接 Prometheus 实例：作为指标查询的来源接入，提供与 Thanos 同契约的只读 PromQL 模型工具；授权按实际来源连接解析。",
 		// 有界观测声明与真实注册的内部发现/采集工具同源落地；执行经
 		// Quoin 调度、Stele 网关（ADR-0011）。
-		DiscoverObjects:     metricsDiscoverObjects(),
-		InspectionTemplates: promQLInspectionTemplates(),
-		ConfigSchema:        metricsConfigSchema("prometheus"),
-		DefaultEnabled:      true,
-		ConnectionKind:      "prometheus",
-		ConnectionTransport: plugins.ConnectionTransportHTTP,
-		ConnectionAuthModes: []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
-		Tools:               metricsToolProvider{id: plugins.PrometheusID},
+		DiscoverObjects:       metricsDiscoverObjects(),
+		InspectionTemplates:   promQLInspectionTemplates(),
+		DefaultInspectionPlan: &plugins.DefaultInspectionPlan{TemplateID: "promql_instant", Params: map[string]any{"expression": "up"}},
+		ConfigSchema:          metricsConfigSchema("prometheus"),
+		DefaultEnabled:        true,
+		ConnectionKind:        "prometheus",
+		ConnectionTransport:   plugins.ConnectionTransportHTTP,
+		ConnectionAuthModes:   []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
+		Tools:                 metricsToolProvider{id: plugins.PrometheusID},
 	})
 	plugins.Register(plugins.Plugin{
-		ID:                  plugins.ThanosID,
-		Version:             "1",
-		DisplayName:         "Thanos",
-		Description:         "连接 Prometheus 兼容的全局查询层：提供资源范围内只读 PromQL 模型工具与来源接入。",
-		DiscoverObjects:     metricsDiscoverObjects(),
-		InspectionTemplates: promQLInspectionTemplates(),
-		ConfigSchema:        metricsConfigSchema("thanos"),
-		DefaultEnabled:      true,
-		ConnectionKind:      "thanos",
-		ConnectionTransport: plugins.ConnectionTransportHTTP,
-		ConnectionAuthModes: []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
-		Tools:               metricsToolProvider{id: plugins.ThanosID},
+		ID:                    plugins.ThanosID,
+		Version:               "2",
+		DisplayName:           "Thanos",
+		Description:           "连接 Prometheus 兼容的全局查询层：提供资源范围内只读 PromQL 模型工具与来源接入。",
+		DiscoverObjects:       metricsDiscoverObjects(),
+		InspectionTemplates:   promQLInspectionTemplates(),
+		DefaultInspectionPlan: &plugins.DefaultInspectionPlan{TemplateID: "promql_instant", Params: map[string]any{"expression": "up"}},
+		ConfigSchema:          metricsConfigSchema("thanos"),
+		DefaultEnabled:        true,
+		ConnectionKind:        "thanos",
+		ConnectionTransport:   plugins.ConnectionTransportHTTP,
+		ConnectionAuthModes:   []string{plugins.AuthModeNone, plugins.AuthModeBasic, plugins.AuthModeBearer},
+		Tools:                 metricsToolProvider{id: plugins.ThanosID},
 	})
 }

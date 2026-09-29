@@ -526,7 +526,7 @@ export function PlanEditor({
 			(item) => item.name === connectionName,
 		);
 		const matchedPlugin = connection
-			? plugins.items?.find((plugin) => plugin.id === connection.type)
+			? plugins.items?.find((plugin) => (plugin.connectionKind ?? plugin.id) === connection.type)
 			: undefined;
 		update({
 			connectionName,
@@ -608,7 +608,7 @@ export function PlanEditor({
 	const connectionOptions: CardOption[] =
 		connections.items
 			?.filter((connection) =>
-				inspectionPlugins.some((plugin) => plugin.id === connection.type),
+				inspectionPlugins.some((plugin) => (plugin.connectionKind ?? plugin.id) === connection.type),
 			)
 			.map((connection) => ({
 				value: connection.name,
@@ -624,6 +624,7 @@ export function PlanEditor({
 	const selectedPlugin = inspectionPlugins.find(
 		(plugin) => plugin.id === form.pluginId,
 	);
+	const selectedTemplate = selectedPlugin?.inspectionTemplates?.find((template) => template.id === form.templateId && (!form.templateVersion || template.version === form.templateVersion));
 	const viewOptions: ResourceOption[] =
 		views.items?.map((view) => ({
 			value: view.viewKey,
@@ -731,17 +732,22 @@ export function PlanEditor({
 						<div className="grid gap-4 md:grid-cols-2">
 								<Field>
 									<FieldLabel htmlFor="plan-template">模板 ID</FieldLabel>
-									<Input
-										id="plan-template"
-										value={form.templateId}
-										disabled={busy || suspended}
-										onChange={(event) =>
-											update({ templateId: event.target.value })
-										}
-										placeholder="如 promql_instant"
-									/>
+									{selectedPlugin?.inspectionTemplates?.length ? (
+										<Select value={selectedTemplate ? `${selectedTemplate.id}@${selectedTemplate.version}` : ""} onValueChange={(value) => {
+											const selected = selectedPlugin.inspectionTemplates?.find((entry) => `${entry.id}@${entry.version}` === value);
+											if (selected) update({ templateId: selected.id, templateVersion: selected.version });
+										}} disabled={busy || suspended}>
+											<SelectTrigger id="plan-template" aria-label="模板 ID"><SelectValue placeholder="选择插件声明的模板" /></SelectTrigger>
+											<SelectContent><SelectGroup>{selectedPlugin.inspectionTemplates.map((entry) => (
+												<SelectItem key={`${entry.id}/${entry.version}`} value={`${entry.id}@${entry.version}`}>{entry.title}（{entry.id} / {entry.version}）</SelectItem>
+											))}</SelectGroup></SelectContent>
+										</Select>
+									) : (
+										<Input id="plan-template" value={form.templateId} disabled={busy || suspended}
+											onChange={(event) => update({ templateId: event.target.value })} placeholder="如 promql_instant" />
+									)}
 									<FieldDescription>
-										所选插件提供的巡检模板标识，随插件文档给出。
+										{selectedTemplate?.description ?? "所选插件提供的巡检模板标识，随插件文档给出。"}
 									</FieldDescription>
 								</Field>
 							<Field>
@@ -771,8 +777,8 @@ export function PlanEditor({
 								placeholder={"expression: up"}
 							/>
 							<FieldDescription>
-								按模板要求的键值对填写，一行一个；服务端会按模板 schema
-								复核，填错会在保存时提示。
+								按模板要求的键值对填写，一行一个；服务端会按模板 schema 复核，填错会在保存时提示。
+								{selectedTemplate?.paramsSchema && <span className="block mt-1">声明字段：{Object.keys((selectedTemplate.paramsSchema.properties as Record<string, unknown> | undefined) ?? {}).join("、") || "无参数"}；结果类型 {selectedTemplate.resultKind === "promql" ? "时间序列" : "结构化 JSON"}。</span>}
 							</FieldDescription>
 						</Field>
 					</CardContent>

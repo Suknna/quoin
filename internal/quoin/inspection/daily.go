@@ -658,7 +658,7 @@ func (s *Service) dailyContributionsOn(ctx context.Context, tx execution.Executo
 		frozenVersion := ""
 		if templateVersion.Valid {
 			frozenVersion = templateVersion.String
-		} else if template, ok := TemplateFor(pluginID, templateID); ok {
+		} else if template, ok := s.templateFor(pluginID, templateID); ok {
 			frozenVersion = template.Version
 		}
 		contributions = append(contributions, dailyContribution{
@@ -1036,11 +1036,21 @@ func (s *Service) dailyCheckItemsOn(ctx context.Context, tx execution.Executor, 
 		// evidenceId 定位。已提交成功 Evidence 的畸形结果形状是数据完整性
 		// 故障，带身份显式报错，绝不静默吞掉或编造数值。
 		if evidenceID.Valid && resultJSON.Valid {
-			measurement, err := dailyMeasurementFromEvidence(evidenceID.Int64, item.CheckKey, resultJSON.String)
-			if err != nil {
-				return nil, false, err
+			var shape struct {
+				ResultType string `json:"resultType"`
 			}
-			item.Measurement = measurement
+			if err := json.Unmarshal([]byte(resultJSON.String), &shape); err != nil {
+				return nil, false, fmt.Errorf("evidence %d check %s result is malformed: %w", evidenceID.Int64, item.CheckKey, err)
+			}
+			if shape.ResultType == "" {
+				item.Result = json.RawMessage(resultJSON.String)
+			} else {
+				measurement, err := dailyMeasurementFromEvidence(evidenceID.Int64, item.CheckKey, resultJSON.String)
+				if err != nil {
+					return nil, false, err
+				}
+				item.Measurement = measurement
+			}
 		}
 		items = append(items, item)
 	}

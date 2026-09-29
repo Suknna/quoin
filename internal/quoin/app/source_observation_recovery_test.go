@@ -54,7 +54,7 @@ func stubLocalDiscoverTool(t *testing.T) {
 		if name != "metrics_discover" {
 			return plugins.ToolEntry{}, false
 		}
-		return plugins.ToolEntry{Timeout: time.Second, Invoke: func(ctx context.Context, exec plugins.ToolExecution) (json.RawMessage, error) {
+		return plugins.ToolEntry{Internal: true, Timeout: time.Second, Invoke: func(ctx context.Context, exec plugins.ToolExecution) (json.RawMessage, error) {
 			if exec.Conn.Type != "prometheus" || exec.Conn.ID != 1 {
 				return nil, fmt.Errorf("discover stub got connection %d/%s", exec.Conn.ID, exec.Conn.Type)
 			}

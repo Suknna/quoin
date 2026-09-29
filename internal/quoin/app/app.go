@@ -506,6 +506,7 @@ func Run(ctx context.Context, config contract.QuoinConfig) error {
 	// of creating dispatchable work (OPS-UPGRADE-003).
 	controlService.MaintenanceBlocking = maintenanceAdmissionChecker(ctx, database.SQL)
 	controlService.Inspections = application.inspections
+	controlService.LocalToolEntries = application.inspections.Attempts().Catalogs.Handlers
 	controlService.Analyses = application.analyses
 	controlService.Investigations = application.investigations
 	controlService.Knowledge = application.knowledgeService

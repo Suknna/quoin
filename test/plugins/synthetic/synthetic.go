@@ -71,7 +71,7 @@ type sourceSettings struct {
 
 func Plugin() plugins.Plugin {
 	return plugins.Plugin{
-		ID: "synthetic-plugin", Version: "1", DisplayName: "Synthetic webhook",
+		ID: "synthetic-plugin", Version: "2", DisplayName: "Synthetic webhook",
 		EventSource: source{}, EventTypes: []string{"alerts.batch"},
 		EventSourceConfigSchema: SourceSettingsSchema,
 		AlertNormalizer:         normalizer{}, AlertIdentity: plugins.AlertIdentityExternal,
@@ -91,7 +91,14 @@ func Plugin() plugins.Plugin {
 				// inspection plan-run freezes grants under it and the
 				// credential fulfiller re-validates exactly the declared
 				// purposes (ADR-0014).
-				GrantPurpose: CollectionGrantPurpose,
+				GrantPurpose:    CollectionGrantPurpose,
+				CollectToolName: CollectToolName,
+				ResultKind:      "json",
+				ParamsSchema: map[string]any{
+					"type": "object", "additionalProperties": false,
+					"required":   []string{"expression"},
+					"properties": map[string]any{"expression": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}},
+				},
 			},
 		},
 	}
@@ -362,7 +369,7 @@ var collectTool = plugins.Tool[collectArgs, plugins.CollectResult]{
 		return plugins.CollectResult{
 			Checks: []plugins.CheckObservation{{
 				CheckID: TemplateID, Succeeded: true,
-				EvidenceJSON: []byte(fmt.Sprintf(`{"expression":%q,"value":%q,"evidenceAt":%q}`, params.Expression, payload.Value, args.EvidenceAt)),
+				EvidenceJSON: []byte(fmt.Sprintf(`{"result":{"expression":%q,"value":%q,"evidenceAt":%q}}`, params.Expression, payload.Value, args.EvidenceAt)),
 			}},
 			Incomplete: false,
 		}, nil

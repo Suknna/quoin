@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
@@ -93,6 +94,11 @@ type Service struct {
 	// audit 是 runner 的审计写入器（时钟与本族一致）；模块自身不再直接写审计。
 	audit          *audit.Writer
 	artifactWriter func(context.Context, execution.Executor, int64, []byte) (int64, error)
+	// Source/template lookup uses the same frozen registry as the host catalog.
+	// Tests may inject an explicitly assembled registry instead of mutating the
+	// process default just to exercise a new plugin end to end.
+	pluginRegistry *plugins.Registry
+	pluginKinds    *plugins.ConnectionKindView
 
 	createPlan    *execution.Operation
 	updatePlan    *execution.Operation
@@ -128,11 +134,41 @@ type Service struct {
 // layer must inject the real read-only reader via SetReader before any read
 // path runs; unset reads fail closed.
 func NewService(db *sql.DB) *Service {
-	service := &Service{db: db, now: time.Now}
+	return NewServiceWithClock(db, time.Now)
+}
+
+// NewServiceWithClock keeps the same guarded writer and reader seams while
+// allowing deterministic integration tests to advance a report across a
+// local-day boundary without sleeping or backdating committed SQL facts.
+func NewServiceWithClock(db *sql.DB, now func() time.Time) *Service {
+	if now == nil {
+		panic("inspection clock is required")
+	}
+	registry := plugins.Default()
+	service := &Service{db: db, now: now, pluginRegistry: registry, pluginKinds: registry.ConnectionKindView()}
 	service.audit = audit.NewWriterWithClock(service.clock)
 	service.runner = execution.NewRunnerWithClock(db, execution.NewRegistry(), service.audit, service.clock)
 	service.registerOperations()
 	return service
+}
+
+// UsePluginRegistry binds the source/template authority and the exact
+// deployment enablement set at composition time.
+func (s *Service) UsePluginRegistry(registry *plugins.Registry, enabled []string) error {
+	if registry == nil {
+		return errors.New("inspection plugin registry is required")
+	}
+	s.pluginRegistry = registry
+	s.pluginKinds = registry.ConnectionKindView()
+	s.pluginKinds.SetEnabled(enabled)
+	return nil
+}
+
+// CollectionTemplate resolves a frozen Run's declared collection tool and
+// canonical result contract. Disabled plugins cannot create new Runs; an
+// already-frozen Run keeps its declared identity for terminal adjudication.
+func (s *Service) CollectionTemplate(pluginID, templateID, version string) (plugins.InspectionTemplate, bool) {
+	return s.pluginRegistry.InspectionTemplate(pluginID, templateID, version)
 }
 
 // readReader returns the injected read-only reader. There is deliberately no

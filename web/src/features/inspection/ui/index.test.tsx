@@ -1034,6 +1034,30 @@ describe("plan editor", () => {
 		expect(screen.queryByPlaceholderText("query: up == 0")).toBeNull();
 	});
 
+	it("creates a non-metrics plan from distinct plugin and connection kinds with a declared template", async () => {
+		resources.listConnections.mockResolvedValue([{ ...labConnection, name: "synthetic-node", type: "synthetic-hook" }]);
+		resources.listIntegrationPlugins.mockResolvedValue([{
+			id: "synthetic-plugin", connectionKind: "synthetic-hook", displayName: "合成插件",
+			description: "只读 HTTP 检查", enabled: true, version: "2", capabilities: ["inspection_templates"],
+			inspectionTemplates: [{ id: "synthetic_check", version: "1", title: "合成检查", description: "执行回显检查", resultKind: "json", paramsSchema: { properties: { expression: { type: "string" } } } }],
+		}]);
+		api.createInspectionPlan.mockResolvedValue(integrationPlan);
+		render(<InspectionView route="/inspections/plans/new" />);
+		fireEvent.change(await screen.findByLabelText("计划 Key"), { target: { value: "synthetic-plan" } });
+		fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "合成巡检" } });
+		fireEvent.click(await screen.findByRole("radio", { name: /synthetic-node/ }));
+		expect(screen.getByRole("radio", { name: /synthetic-plugin/ })).toHaveAttribute("aria-checked", "true");
+		fireEvent.keyDown(screen.getByRole("combobox", { name: "模板 ID" }), { key: "ArrowDown" });
+		fireEvent.click(await screen.findByRole("option", { name: /合成检查/ }));
+		expect(screen.getByLabelText("模板版本（可选）")).toHaveValue("1");
+		expect(screen.getByText(/结果类型 结构化 JSON/)).toBeInTheDocument();
+		fireEvent.change(screen.getByLabelText("采集参数（YAML）"), { target: { value: "expression: echo" } });
+		fireEvent.click(screen.getByRole("button", { name: "保存计划" }));
+		await waitFor(() => expect(api.createInspectionPlan).toHaveBeenCalledWith(expect.objectContaining({
+			connectionName: "synthetic-node", pluginId: "synthetic-plugin", templateId: "synthetic_check", templateVersion: "1", params: { expression: "echo" },
+		})));
+	});
+
 	it("creates a plan with YAML params, integration scope, and analysis semantics", async () => {
 		const navigate = vi.fn();
 		api.createInspectionPlan.mockResolvedValue(integrationPlan);

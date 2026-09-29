@@ -126,6 +126,12 @@ function CheckItem({ check, navigate, openEvidence }: { check: DailyCheckItem; n
 					{check.measurement.lastValue !== undefined ? ` · 末值 ${check.measurement.lastValue}` : ""}
 				</span>
 			)}
+			{check.result && (
+				<details className="w-full text-xs">
+					<summary className="cursor-pointer text-muted-foreground">结构化检查结果</summary>
+					<pre className="mt-1 max-h-64 overflow-auto rounded-md bg-muted p-2 whitespace-pre-wrap break-all">{JSON.stringify(check.result, null, 2)}</pre>
+				</details>
+			)}
 		</li>
 	);
 }

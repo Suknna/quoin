@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -89,6 +90,23 @@ func (r *Registry) Register(plugin Plugin) error {
 	if err := validateConnectionDeclaration(plugin); err != nil {
 		return err
 	}
+	for _, template := range plugin.InspectionTemplates {
+		if template.ParamsSchema != nil {
+			if _, err := r.compiledConfigSchema(plugin.ID+":inspection:"+template.ID+":"+template.Version, template.ParamsSchema); err != nil {
+				return err // An invalid declaration must fail before the host starts.
+			}
+		}
+	}
+	if plugin.DefaultInspectionPlan != nil {
+		for _, template := range plugin.InspectionTemplates {
+			if template.ID == plugin.DefaultInspectionPlan.TemplateID {
+				if err := r.validateTemplateParams(plugin.ID, template, plugin.DefaultInspectionPlan.Params); err != nil {
+					return fmt.Errorf("%w: %s starter plan params: %v", ErrInvalidPlugin, plugin.ID, err)
+				}
+				break // first declared version is the current starter version
+			}
+		}
+	}
 	if _, exists := r.plugins[plugin.ID]; exists {
 		return fmt.Errorf("%w: %s", ErrDuplicatePlugin, plugin.ID)
 	}
@@ -142,6 +160,14 @@ func (r *Registry) freeze() error {
 					ErrDuplicateToolName, entry.Definition.Name, strings.Join(r.owners[entry.Definition.Name], ", "), id)
 			}
 			r.owners[entry.Definition.Name] = append(r.owners[entry.Definition.Name], id)
+		}
+	}
+	for _, id := range ids {
+		for _, template := range r.plugins[id].InspectionTemplates {
+			entry, exists := r.entries[template.CollectToolName]
+			if !exists || !entry.Internal || !slices.Contains(r.owners[template.CollectToolName], id) {
+				return fmt.Errorf("%w: %s inspection template %s/%s must own internal tool %q", ErrInvalidPlugin, id, template.ID, template.Version, template.CollectToolName)
+			}
 		}
 	}
 	r.frozen = true
@@ -299,9 +325,9 @@ func (r *Registry) AlertNormalizer(kind string) (AlertNormalizer, string, bool) 
 	return normalizer, pluginID, ok
 }
 
-	// AlertIdentity resolves a source's frozen alert identity contract. The
-	// caller never chooses identity semantics from untrusted event contents.
-	func (r *Registry) AlertIdentity(kind string) (string, bool) {
+// AlertIdentity resolves a source's frozen alert identity contract. The
+// caller never chooses identity semantics from untrusted event contents.
+func (r *Registry) AlertIdentity(kind string) (string, bool) {
 	r.mu.Lock()
 	r.ensureFrozen()
 	pluginID, ok := r.sources[kind]
@@ -445,12 +471,38 @@ func validatePlugin(plugin Plugin) error {
 	}
 	seenTemplates := map[string]bool{}
 	for _, template := range plugin.InspectionTemplates {
-		if template.ID == "" || seenTemplates[template.ID+"\x00"+template.Version] {
+		if !pluginIDPattern.MatchString(template.ID) || template.Version == "" || seenTemplates[template.ID+"\x00"+template.Version] {
 			return fmt.Errorf("%w: %s has an empty or duplicate inspection template identity %q/%q", ErrInvalidPlugin, plugin.ID, template.ID, template.Version)
 		}
 		seenTemplates[template.ID+"\x00"+template.Version] = true
 		if !collectionGrantPurposePattern.MatchString(template.GrantPurpose) {
 			return fmt.Errorf("%w: %s inspection template %s/%s grant purpose %q must be config_[a-z0-9_-]* (the schema closure trigger's declared vocabulary)", ErrInvalidPlugin, plugin.ID, template.ID, template.Version, template.GrantPurpose)
+		}
+		if !toolNamePattern.MatchString(template.CollectToolName) {
+			return fmt.Errorf("%w: %s inspection template %s/%s needs a declared internal collection tool", ErrInvalidPlugin, plugin.ID, template.ID, template.Version)
+		}
+		if template.ResultKind != "promql" && template.ResultKind != "json" {
+			return fmt.Errorf("%w: %s inspection template %s/%s must declare promql or json result kind", ErrInvalidPlugin, plugin.ID, template.ID, template.Version)
+		}
+		if template.ParamsSchema != nil {
+			if err := validateClosedSettingsSchema(plugin.ID, "inspection template "+template.ID, template.ParamsSchema); err != nil {
+				return err
+			}
+		}
+	}
+	if plugin.DefaultInspectionPlan != nil {
+		if plugin.ConnectionKind == "" || plugin.DefaultInspectionPlan.TemplateID == "" {
+			return fmt.Errorf("%w: %s starter inspection plan requires a connection kind and template", ErrInvalidPlugin, plugin.ID)
+		}
+		found := false
+		for _, template := range plugin.InspectionTemplates {
+			if template.ID == plugin.DefaultInspectionPlan.TemplateID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("%w: %s starter inspection plan references unknown template %q", ErrInvalidPlugin, plugin.ID, plugin.DefaultInspectionPlan.TemplateID)
 		}
 	}
 	seenObjects := map[string]bool{}

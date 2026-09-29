@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/execution"
@@ -215,7 +214,7 @@ func (s *Service) createPlanRunOn(ctx context.Context, tx execution.Executor, re
 	if planEnabled == 0 || connectionEnabled == 0 {
 		return RunDetail{}, &execution.Rejection{Code: "plan_disabled", Detail: "计划或其来源接入未启用，不能运行巡检"}, nil
 	}
-	template, ok := TemplateFor(pluginID, templateID)
+	template, ok := s.templateFor(pluginID, templateID)
 	if !ok {
 		return RunDetail{}, &execution.Rejection{Code: "unknown_template", Detail: "计划引用的模板不再可用"}, nil
 	}
@@ -473,7 +472,7 @@ func (s *Service) pluginChild(ctx context.Context, tx execution.Executor, runID,
 	if err != nil {
 		return err
 	}
-	template, declared := plugins.Default().InspectionTemplate(check.pluginID, check.templateID, check.templateVersion)
+	template, declared := s.pluginRegistry.InspectionTemplate(check.pluginID, check.templateID, check.templateVersion)
 	if !declared {
 		return fmt.Errorf("inspection: check %s binds undeclared template %s/%s of plugin %s", check.checkKey, check.templateID, check.templateVersion, check.pluginID)
 	}

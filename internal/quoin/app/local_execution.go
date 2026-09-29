@@ -58,7 +58,9 @@ const (
 	localExecutionDefaultTimeout = 60 * time.Second
 )
 
-// localMetricsToolEntry 解析一个内部工具的执行入口。变量形态仅为测试可注入。
+// localMetricsToolEntry remains only as a fallback for isolated legacy test
+// fixtures. Production installs LocalToolEntries from the enabled registry;
+// a disabled plugin can never be reached through the process default.
 var localMetricsToolEntry = func(name string) (plugins.ToolEntry, bool) {
 	entry, _, ok := plugins.Default().ToolEntryByName(name)
 	return entry, ok
@@ -71,6 +73,13 @@ const httpProbeTimeout = 15 * time.Second
 // newLocalProbeCaller 构造一次本地只读探测的网关调用方。变量形态仅为测试可
 // 注入（集成测试以假平台调用方替代真实 Stele 网关流）。
 var newLocalProbeCaller = func(service *RuntimeService, conn localConnection) plugins.PlatformCaller {
+	return &gatewayPlatformCaller{gateway: service.SteleGateway, conn: conn.Connection}
+}
+
+// newLocalToolCaller isolates the controlled gateway I/O in local
+// execution tests. Production always uses the Stele gateway; plugin code
+// receives only the bounded PlatformCaller and never platform credentials.
+var newLocalToolCaller = func(service *RuntimeService, conn localConnection) plugins.PlatformCaller {
 	return &gatewayPlatformCaller{gateway: service.SteleGateway, conn: conn.Connection}
 }
 
@@ -256,8 +265,13 @@ func (service *RuntimeService) loadLocalConnection(ctx context.Context, reader a
 // invokeLocalTool 执行一个内部工具：参数解码、平台调用与超时都由 ToolEntry
 // 与网关 caller 承担；返回的字节即该工具的 canonical 结果载荷。
 func (service *RuntimeService) invokeLocalTool(ctx context.Context, name string, arguments any, conn localConnection) (json.RawMessage, error) {
-	entry, known := localMetricsToolEntry(name)
-	if !known {
+	entry, known := plugins.ToolEntry{}, false
+	if service.LocalToolEntries != nil {
+		entry, known = service.LocalToolEntries[name]
+	} else {
+		entry, known = localMetricsToolEntry(name)
+	}
+	if !known || !entry.Internal {
 		return nil, fmt.Errorf("internal tool %q is not registered in this process", name)
 	}
 	encoded, err := json.Marshal(arguments)
@@ -273,7 +287,7 @@ func (service *RuntimeService) invokeLocalTool(ctx context.Context, name string,
 	return entry.Invoke(execCtx, plugins.ToolExecution{
 		Arguments: encoded,
 		Conn:      conn.Connection,
-		Platform:  &gatewayPlatformCaller{gateway: service.SteleGateway, conn: conn.Connection},
+		Platform:  newLocalToolCaller(service, conn),
 	})
 }
 
@@ -692,7 +706,7 @@ type localCollectionRef struct {
 }
 
 // executeLocalInspectionCollection 本地执行一次 run_check 采集：重建冻结输入
-// → 绑定 → metrics_collect → inspection_promql_result_v1 /
+// → 绑定 → 声明的内部采集工具 → inspection_promql_result_v1 /
 // inspection_plugin_result_v1 载荷 → 对应 Commit*Proposal 收口。
 func (service *RuntimeService) executeLocalInspectionCollection(ctx context.Context, attemptID int64) error {
 	if service.Inspections == nil {
@@ -743,7 +757,7 @@ func (service *RuntimeService) executeLocalPromQLCollection(ctx context.Context,
 		templateID = "promql_range"
 		params = map[string]any{"expression": frozen.Query.Expression, "rangeSeconds": *frozen.Query.RangeSeconds, "stepSeconds": *frozen.Query.StepSeconds}
 	}
-	outcome := service.runLocalCollection(ctx, attemptID, collectRequestJSON{
+	outcome := service.runLocalCollection(ctx, attemptID, "metrics_collect", collectRequestJSON{
 		TemplateID: templateID, TemplateVersion: "1", Params: params,
 		EvidenceAt: frozen.EvidenceAt, ScopeKind: string(plugins.ScopeIntegration),
 	})
@@ -799,13 +813,20 @@ func (service *RuntimeService) executeLocalPluginCollection(ctx context.Context,
 		Params: json.RawMessage(frozen.Params), EvidenceAt: frozen.EvidenceAt,
 		ScopeKind: frozen.ScopeKind, Targets: targets,
 	}
-	outcome := service.runLocalCollection(ctx, attemptID, request)
+	declared, known := service.Inspections.CollectionTemplate(frozen.PluginID, frozen.TemplateID, frozen.TemplateVersion)
+	if !known {
+		return service.commitInspectionResult(ctx, attemptID, inspectionCollectionOutcome{
+			schemaKind: "inspection_plugin_result_v1", runID: frozen.InspectionRunID, checkKey: frozen.CheckKey,
+			outcome: "error", messages: []string{"frozen inspection template is unavailable"}, gapReason: "query_failed",
+		})
+	}
+	outcome := service.runLocalCollection(ctx, attemptID, declared.CollectToolName, request)
 	outcome.schemaKind = "inspection_plugin_result_v1"
 	outcome.runID = frozen.InspectionRunID
 	outcome.checkKey = frozen.CheckKey
 	// promql_range 的窗口是冻结输入的派生事实（evidence_at + range/step），与
 	// 执行结果无关；失败/gap 同样携带。
-	if frozen.TemplateID == "promql_range" && frozen.EvidenceAt != "" {
+	if declared.ResultKind == "promql" && frozen.EvidenceAt != "" {
 		var params struct {
 			RangeSeconds float64 `json:"rangeSeconds"`
 			StepSeconds  float64 `json:"stepSeconds"`
@@ -823,7 +844,8 @@ func (service *RuntimeService) executeLocalPluginCollection(ctx context.Context,
 	return service.commitInspectionResult(ctx, attemptID, outcome)
 }
 
-// collectRequestJSON 是 metrics_collect 的参数形状。
+// collectRequestJSON is the shared frozen argument envelope of every
+// template-declared internal collection tool.
 type collectRequestJSON struct {
 	TemplateID      string                  `json:"templateId"`
 	TemplateVersion string                  `json:"templateVersion"`
@@ -846,10 +868,10 @@ type inspectionCollectionOutcome struct {
 	executionWindow any
 }
 
-// runLocalCollection 解析连接并执行 metrics_collect，把工具结果映射为与原
+// runLocalCollection 解析连接并执行模板声明的内部工具，把工具结果映射为与原
 // supervisor 相同的 outcome 分流。执行级失败的诊断进入结果的 errors 字段；
 // 这里同步落一条事件日志，便于排障（载荷本身不落 errors 列）。
-func (service *RuntimeService) runLocalCollection(ctx context.Context, attemptID int64, request collectRequestJSON) inspectionCollectionOutcome {
+func (service *RuntimeService) runLocalCollection(ctx context.Context, attemptID int64, toolName string, request collectRequestJSON) inspectionCollectionOutcome {
 	fail := func(err error) inspectionCollectionOutcome {
 		sharedops.LogEvent("quoin", "error", "local_execution.collect_failed",
 			fmt.Sprintf("attempt=%d template=%s: %v", attemptID, request.TemplateID, err))
@@ -859,7 +881,7 @@ func (service *RuntimeService) runLocalCollection(ctx context.Context, attemptID
 	if connErr != nil {
 		return fail(connErr)
 	}
-	raw, invokeErr := service.invokeLocalTool(ctx, "metrics_collect", request, conn)
+	raw, invokeErr := service.invokeLocalTool(ctx, toolName, request, conn)
 	if invokeErr != nil {
 		return fail(invokeErr)
 	}
@@ -870,6 +892,16 @@ func (service *RuntimeService) runLocalCollection(ctx context.Context, attemptID
 	if collected.Incomplete || len(collected.Checks) == 0 {
 		// 截断/局部响应不得伪装完整结果。
 		return inspectionCollectionOutcome{outcome: "gap", messages: []string{"collection pass incomplete"}, gapReason: "partial_response"}
+	}
+	if len(collected.Checks) != 1 || !collected.Checks[0].Succeeded {
+		return fail(errors.New("collection did not produce exactly one successful frozen check"))
+	}
+	expectedID := request.TemplateID
+	if len(request.Targets) > 0 && request.Targets[0].CanonicalIdentity != "" {
+		expectedID = request.Targets[0].CanonicalIdentity
+	}
+	if collected.Checks[0].CheckID != expectedID {
+		return fail(fmt.Errorf("collection check identity %q differs from frozen target %q", collected.Checks[0].CheckID, expectedID))
 	}
 	var evidence struct {
 		Result json.RawMessage `json:"result"`

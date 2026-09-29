@@ -54,9 +54,6 @@ func (s *Service) CommitPluginProposal(ctx context.Context, attemptID int64, boo
 		if proposal.GapReason != nil || len(proposal.Errors) != 0 || string(proposal.Result) == "null" {
 			return fmt.Errorf("successful inspection plugin result has invalid shape")
 		}
-		if err := validatePrometheusResult(proposal.Result); err != nil {
-			return err
-		}
 	case "error", "gap":
 		if proposal.GapReason == nil || !validGap[*proposal.GapReason] || string(proposal.Result) != "null" {
 			return fmt.Errorf("non-success inspection plugin result has invalid gap shape")
@@ -73,27 +70,52 @@ func (s *Service) CommitPluginProposal(ctx context.Context, attemptID int64, boo
 		// 身份复核以 Run 冻结的检查目录为权威：模板的查询形状决定 executionWindow
 		// 的合法形状，历史声明 Run 永远不会进入该路径。
 		var runID int64
-		var checkKey, templateID string
+		var checkKey, pluginID, templateID, templateVersion string
 		var paramsJSON string
 		err := tx.QueryRowContext(commandCtx, `
-			SELECT a.scope_id, a.check_key, c.template_id, c.params_json
+			SELECT a.scope_id, a.check_key, c.plugin_id, c.template_id, c.template_version, c.params_json
 			FROM execution_attempts a
 			JOIN inspection_runs r ON r.id=a.scope_id AND r.plan_id IS NOT NULL
 			JOIN inspection_run_checks c ON c.run_id=r.id AND c.check_key=a.check_key
 			WHERE a.id=? AND a.attempt_type='inspection_collection' AND a.scope_type='run_check'`, attemptID).
-			Scan(&runID, &checkKey, &templateID, &paramsJSON)
+			Scan(&runID, &checkKey, &pluginID, &templateID, &templateVersion, &paramsJSON)
 		if err != nil {
 			return struct{}{}, fmt.Errorf("inspection plugin result does not match a frozen plan check: %w", err)
 		}
 		if proposal.InspectionRunID != runID || proposal.CheckKey != checkKey {
 			return struct{}{}, fmt.Errorf("inspection plugin result identity does not match frozen attempt")
 		}
+		declared, ok := s.pluginRegistry.InspectionTemplate(pluginID, templateID, templateVersion)
+		if !ok {
+			return struct{}{}, fmt.Errorf("inspection plugin result references an unavailable frozen template %s/%s/%s", pluginID, templateID, templateVersion)
+		}
+		if proposal.Outcome == "success" {
+			switch declared.ResultKind {
+			case "promql":
+				if err := validatePrometheusResult(proposal.Result); err != nil {
+					return struct{}{}, err
+				}
+			case "json":
+				if len(proposal.Result) > 64<<10 {
+					return struct{}{}, fmt.Errorf("inspection JSON result exceeds the 64 KiB sealed fact bound")
+				}
+				var document map[string]any
+				if err := json.Unmarshal(proposal.Result, &document); err != nil || document == nil {
+					return struct{}{}, fmt.Errorf("inspection JSON result must be a structured object")
+				}
+				if _, reserved := document["resultType"]; reserved {
+					return struct{}{}, fmt.Errorf("inspection JSON result must not impersonate the canonical time-series vocabulary")
+				}
+			default:
+				return struct{}{}, fmt.Errorf("inspection template has unknown result kind %q", declared.ResultKind)
+			}
+		}
 		var params struct {
 			RangeSeconds *int64 `json:"rangeSeconds"`
 			StepSeconds  *int64 `json:"stepSeconds"`
 		}
 		_ = json.Unmarshal([]byte(paramsJSON), &params)
-		if params.RangeSeconds != nil {
+		if declared.ResultKind == "promql" && params.RangeSeconds != nil {
 			// 成功的范围结果必须携带实际执行窗口；失败/gap 的窗口是冻结输入元数据，
 			// 可缺省（没有执行就没有实际窗口），携带时仍校验形状，不伪造执行事实。
 			if proposal.Outcome == "success" || (len(proposal.ExecutionWindow) != 0 && string(proposal.ExecutionWindow) != "null") {
@@ -112,8 +134,8 @@ func (s *Service) CommitPluginProposal(ctx context.Context, attemptID int64, boo
 					return struct{}{}, fmt.Errorf("range inspection plugin executionWindow endAt is not RFC3339")
 				}
 			}
-		} else if templateID != "" && string(proposal.ExecutionWindow) != "null" && len(proposal.ExecutionWindow) != 0 {
-			return struct{}{}, fmt.Errorf("instant inspection plugin result must have a null executionWindow")
+		} else if string(proposal.ExecutionWindow) != "null" && len(proposal.ExecutionWindow) != 0 {
+			return struct{}{}, fmt.Errorf("non-range inspection plugin result must have a null executionWindow")
 		}
 		digest := sha256.Sum256(raw)
 		var existing []byte

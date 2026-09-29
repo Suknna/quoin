@@ -221,7 +221,7 @@ func stubLocalCollectTool(t *testing.T) *[]collectRequestJSON {
 		if name != "metrics_collect" && name != "metrics_probe" {
 			return plugins.ToolEntry{}, false
 		}
-		return plugins.ToolEntry{Timeout: time.Second, Invoke: func(ctx context.Context, exec plugins.ToolExecution) (json.RawMessage, error) {
+		return plugins.ToolEntry{Internal: true, Timeout: time.Second, Invoke: func(ctx context.Context, exec plugins.ToolExecution) (json.RawMessage, error) {
 			if name == "metrics_probe" {
 				return json.Marshal(map[string]any{
 					"reachable": true, "latencyMs": 3, "kind": exec.Conn.Type, "query": "vector(1)",
@@ -306,6 +306,38 @@ func TestLocalInspectionCollectionExecutesPlanCheckAndClosesRun(t *testing.T) {
 	mustQuery(t, db, `SELECT state FROM execution_attempts WHERE attempt_type='inspection_analysis' AND scope_id=?`, &analysisState, detail.RunID)
 	if analysisState != "Queued" {
 		t.Fatalf("report analysis is %s, want Queued for the Plinth dispatch path", analysisState)
+	}
+}
+
+func TestLocalCollectionRefusesResultForAnotherFrozenCheck(t *testing.T) {
+	stubLocalCollectTool(t)
+	db, service := newLocalInspectionFixture(t)
+	previous := localMetricsToolEntry
+	localMetricsToolEntry = func(name string) (plugins.ToolEntry, bool) {
+		if name != "metrics_collect" {
+			return previous(name)
+		}
+		return plugins.ToolEntry{Internal: true, Invoke: func(context.Context, plugins.ToolExecution) (json.RawMessage, error) {
+			return json.Marshal(plugins.CollectResult{Checks: []plugins.CheckObservation{{CheckID: "other-check", Succeeded: true,
+				EvidenceJSON: json.RawMessage(`{"result":{"resultType":"vector","result":[]}}`),
+			}}})
+		}}, true
+	}
+	t.Cleanup(func() { localMetricsToolEntry = previous })
+	run, err := service.Inspections.CreatePlanRun(localInspectionAdminContext(t), 1, "local-mismatched-check", "local-collection-plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.runLocalExecutionPass(context.Background())
+	var evidenceRows int
+	mustQuery(t, db, `SELECT COUNT(*) FROM evidence e JOIN inspection_check_results x ON x.evidence_id=e.id WHERE x.run_id=?`, &evidenceRows, run.RunID)
+	if evidenceRows != 0 {
+		t.Fatal("collection for another check was committed as this Run's Evidence")
+	}
+	var status string
+	mustQuery(t, db, `SELECT status FROM inspection_check_results WHERE run_id=?`, &status, run.RunID)
+	if status != "gap" {
+		t.Fatalf("mismatched collector identity status=%q, want explicit gap", status)
 	}
 }
 

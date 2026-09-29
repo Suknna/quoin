@@ -193,6 +193,26 @@ func (myTools) Tools() []plugins.ToolEntry {
 - **共享契约**：多个插件可贡献同名同 manifest 的工具（如 prometheus 与 thanos 共享
   `thanos_query`）；目录单条目，溯源列全部启用的贡献者，manifest 分歧是装配错误。
 
+## 巡检模板与结果契约（ADR-0014）
+
+一个可采证插件同时声明 `ConnectionKind`、`Tools` 中的 **internal** 采集工具，以及
+`InspectionTemplates`。每个模板声明稳定 `ID`/`Version`、`GrantPurpose`（`config_` 前缀）、
+`CollectToolName`（必须是该插件拥有的 internal 工具）、关闭未知键且不接受秘密字段的
+`ParamsSchema`，以及 `ResultKind`：`promql` 为规范时间序列事实，`json` 为至多 64 KiB
+的结构化对象。可选 `ValidateParams` 只做无 I/O 静态校验；PromQL AST 校验留在
+`plugins/metrics`，Quoin 不认识模板 ID、表达式或平台名称。没有 schema 的模板仅接受
+空参数。插件要在连接启用时自动生成手工基础计划，可显式声明
+`DefaultInspectionPlan{TemplateID, Params}`；不声明就不生成，宿主不会塞一个
+`promql_instant` 模板给它。
+
+采集工具按通用冻结参数被调用，并返回 `CollectResult`，其中一条成功检查的
+`EvidenceJSON` 为 `{"result":<规范结果对象>}`；插件负责把平台响应清洗成自己的
+结果对象（`json` 顶层不能冒充时间序列的 `resultType`）。Quoin 在 Attempt/授权围栏下
+校验该模板声明的结果种类、提交 Evidence 与检查状态，再将非指标 JSON 原文冻结进
+日报供 `daily_report_get` 分页读取。不要把平台密钥、无限正文或提示词混入结果。
+目录 `/api/v1/integrations/plugins` 会给出模板 ID/版本/参数 schema 和结果种类，
+通用巡检表单据此选择模板，服务端仍是最终校验者。
+
 ## 告警归一化(ADR-0012,入向插件的第三能力)
 
 提供告警入向的插件 SHOULD 同时实现 `AlertNormalizer`——把本来源的 EventSource payload 映射到

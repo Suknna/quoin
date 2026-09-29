@@ -17,10 +17,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/robfig/cron/v3"
 
-	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/audit"
 	"github.com/Suknna/quoin/internal/quoin/auth"
 	"github.com/Suknna/quoin/internal/quoin/execution"
@@ -45,102 +43,37 @@ type Template struct {
 	Validate func(params map[string]any) error
 }
 
-// paramValidators 是模板参数形状的静态校验表；模板身份与版本的存在性权威
-// 是共享插件注册目录（plugins.Default，ADR-0011 空白导入装配），执行
-// 绑定在 Quoin 本地调度、Stele 网关。二者以 (pluginID, templateID, version) 对齐。
-var paramValidators = map[string]func(map[string]any) error{
-	"promql_instant": validateInstantParams,
-	"promql_range":   validateRangeParams,
-}
-
-// TemplateFor 返回 (pluginID, templateID) 的已注册模板；目录来自构建期
-// 注册表（plugins.Default），绝不声明不存在的模板。
-func TemplateFor(pluginID, templateID string) (Template, bool) {
-	for _, plugin := range plugins.Default().Plugins() {
-		if plugin.ID != pluginID {
-			continue
-		}
-		for _, template := range plugin.InspectionTemplates {
-			if template.ID == templateID {
-				validate, known := paramValidators[template.ID]
-				if !known {
-					validate = func(map[string]any) error { return nil }
-				}
-				return Template{
-					ID: template.ID, PluginID: pluginID, Version: template.Version,
-					DisplayName: template.Title, Description: template.Description,
-					Validate: validate,
-				}, true
-			}
+// templateFor resolves the frozen plugin declaration; schema and static
+// validation are owned by the plugin registry, never by a host template-ID
+// switch. The first matching version is the plugin's current default.
+func (s *Service) templateFor(pluginID, templateID string) (Template, bool) {
+	plugin, ok := s.pluginRegistry.Plugin(pluginID)
+	if !ok {
+		return Template{}, false
+	}
+	for _, template := range plugin.InspectionTemplates {
+		if template.ID == templateID {
+			return Template{
+				ID: template.ID, PluginID: pluginID, Version: template.Version,
+				DisplayName: template.Title, Description: template.Description,
+				Validate: func(params map[string]any) error {
+					return s.pluginRegistry.ValidateInspectionParams(pluginID, template.ID, template.Version, params)
+				},
+			}, true
 		}
 	}
 	return Template{}, false
 }
 
-// pluginForConnectionKind 把来源接入平台类型映射到执行插件。浏览器与模型
-// 接入不参与巡检采证。
-func pluginForConnectionKind(kind string) (string, bool) {
-	switch kind {
-	case "prometheus":
-		return "prometheus", true
-	case "thanos":
-		return "thanos", true
+// pluginForConnectionKind asks the enabled deployment registry whether this
+// connection kind has a declared inspection-capable owner. Model providers
+// and disabled plugins have no such mapping.
+func (s *Service) pluginForConnectionKind(kind string) (string, bool) {
+	if _, ok := s.pluginKinds.LookupHTTPConnectionKind(kind); !ok {
+		return "", false
 	}
-	return "", false
-}
-
-// validateExpression 用锁定的上游 AST 解析表达式；不使用正则或字符串改写。
-// 巡检表达式允许 offset/子查询（与声明检查一致）。
-func validateExpression(expression string) error {
-	if expression == "" {
-		return fmt.Errorf("表达式不能为空")
-	}
-	if _, err := promQLParser.ParseExpr(expression); err != nil {
-		return fmt.Errorf("PromQL 解析失败: %s", firstLine(err.Error()))
-	}
-	return nil
-}
-
-// promQLParser 与声明配置共用同一冻结的上游解析器选项。
-var promQLParser = parser.NewParser(parser.Options{})
-
-func firstLine(message string) string {
-	for i, r := range message {
-		if r == '\n' {
-			return message[:i]
-		}
-	}
-	return message
-}
-
-func validateInstantParams(params map[string]any) error {
-	expression, _ := params["expression"].(string)
-	if err := validateExpression(expression); err != nil {
-		return err
-	}
-	if len(params) != 1 {
-		return fmt.Errorf("即时查询只接受 expression 参数")
-	}
-	return nil
-}
-
-func validateRangeParams(params map[string]any) error {
-	expression, _ := params["expression"].(string)
-	if err := validateExpression(expression); err != nil {
-		return err
-	}
-	rangeSeconds, ok := params["rangeSeconds"].(float64)
-	if !ok || rangeSeconds < 1 || rangeSeconds != float64(int64(rangeSeconds)) {
-		return fmt.Errorf("rangeSeconds 必须是正整数秒")
-	}
-	stepSeconds, ok := params["stepSeconds"].(float64)
-	if !ok || stepSeconds < 1 || stepSeconds != float64(int64(stepSeconds)) {
-		return fmt.Errorf("stepSeconds 必须是正整数秒")
-	}
-	if len(params) != 3 {
-		return fmt.Errorf("范围查询只接受 expression/rangeSeconds/stepSeconds 参数")
-	}
-	return nil
+	_, owner, ok := s.pluginRegistry.HTTPConnectionKind(kind)
+	return owner, ok
 }
 
 // Plan 是计划的可读投影；params/scope 保持创建时的类型化结构。
@@ -539,7 +472,7 @@ func (s *Service) validatePlanInput(ctx context.Context, q execution.Executor, i
 			return frozen, &PlanConflictError{Code: "malformed_cron", Detail: "cron 必须是标准五字段表达式"}
 		}
 	}
-	template, ok := TemplateFor(input.PluginID, input.TemplateID)
+	template, ok := s.templateFor(input.PluginID, input.TemplateID)
 	if !ok {
 		return frozen, &PlanConflictError{Code: "unknown_template", Detail: "插件未提供该巡检模板"}
 	}
@@ -580,7 +513,7 @@ func (s *Service) resolvePlanReferences(ctx context.Context, q execution.Executo
 	if err != nil {
 		return err
 	}
-	pluginID, ok := pluginForConnectionKind(kind)
+	pluginID, ok := s.pluginForConnectionKind(kind)
 	if !ok {
 		return &PlanConflictError{Code: "unsupported_connection", Detail: "该接入类型不支持巡检采证"}
 	}
@@ -670,9 +603,20 @@ func (s *Service) EnsureDefaultPlanOn(ctx context.Context, conn execution.Execut
 		}
 		return err
 	}
-	pluginID, ok := pluginForConnectionKind(kind)
+	pluginID, ok := s.pluginForConnectionKind(kind)
 	if !ok {
 		return nil
+	}
+	owner, registered := s.pluginRegistry.Plugin(pluginID)
+	if !registered || owner.DefaultInspectionPlan == nil {
+		return nil // An optional starter plan is plugin-owned, never PromQL by default.
+	}
+	template, ok := s.templateFor(pluginID, owner.DefaultInspectionPlan.TemplateID)
+	if !ok {
+		return fmt.Errorf("plugin %s starter inspection template %q is unavailable", pluginID, owner.DefaultInspectionPlan.TemplateID)
+	}
+	if err := template.Validate(owner.DefaultInspectionPlan.Params); err != nil {
+		return fmt.Errorf("plugin %s starter inspection params: %w", pluginID, err)
 	}
 	key := DefaultPlanKey(connectionName)
 	var exists int
@@ -683,12 +627,12 @@ func (s *Service) EnsureDefaultPlanOn(ctx context.Context, conn execution.Execut
 		return nil
 	}
 	now := s.nowText()
-	params, _ := json.Marshal(map[string]any{"expression": "up"})
+	params, _ := json.Marshal(owner.DefaultInspectionPlan.Params)
 	scope, _ := json.Marshal(map[string]any{"kind": "integration"})
 	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO inspection_plans(plan_key,display_name,enabled,connection_id,plugin_id,template_id,template_version,params_json,scope_json,scope_kind,cron,timezone,row_version,created_by,created_at,updated_at)
 		VALUES(?,?,1,?,?,?,NULL,?,?,'integration',NULL,'UTC',1,NULL,?,?)`,
-		key, connectionName+" 基础巡检", connectionID, pluginID, "promql_instant", string(params), string(scope), now, now); err != nil {
+		key, connectionName+" 基础巡检", connectionID, pluginID, template.ID, string(params), string(scope), now, now); err != nil {
 		return err
 	}
 	return nil

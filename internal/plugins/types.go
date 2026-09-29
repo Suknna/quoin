@@ -28,6 +28,29 @@ type InspectionTemplate struct {
 	// grants under the declared purpose and the credential fulfiller
 	// re-validates exactly the declared purposes.
 	GrantPurpose string
+	// CollectToolName is this template's internal read-only collection tool.
+	// The host dispatches the frozen template to this declaration, not to a
+	// hardcoded metrics_collect name; freeze verifies the plugin owns the tool.
+	CollectToolName string
+	// ResultKind selects the sealed, model-visible check result contract.
+	// promql is the bounded numeric time-series vocabulary; json accepts one
+	// bounded object supplied by other read-only HTTP plugins. The core owns
+	// only these canonical result classes, never plugin-specific fields.
+	ResultKind string
+	// ParamsSchema is the closed, non-secret JSON Schema for a plan's frozen
+	// params. Nil means the template takes no params. Unknown fields fail at
+	// plan creation, not after a scheduled run has already started.
+	ParamsSchema map[string]any
+	// ValidateParams checks plugin-specific static constraints beyond schema
+	// (e.g. parse a PromQL expression). It performs no platform I/O.
+	ValidateParams func(map[string]any) error
+}
+
+// DefaultInspectionPlan is an optional plugin-authored starter plan. A
+// connection kind without one does not receive a fabricated PromQL plan.
+type DefaultInspectionPlan struct {
+	TemplateID string
+	Params     map[string]any
 }
 
 // DiscoverObject declares one bounded object type a plugin can observe. The

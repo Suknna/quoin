@@ -183,7 +183,9 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	}
 	clientFixture := startRelayServer(t, harness.alerts, harness.connection)
 	client := relayClient(t, clientFixture, &clientFixture.steleClient)
-	body := []byte(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-1","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"},{"status":"firing","labels":{"alertname":"Invalid","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
+	observedAt := time.Now().UTC().Truncate(time.Second)
+	stamp := observedAt.Format(time.RFC3339Nano)
+	body := []byte(fmt.Sprintf(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-1","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":%q},{"status":"firing","labels":{"alertname":"Invalid","instance":"test-host"},"startsAt":%q}]}`, stamp, stamp))
 	send := func(id, kind, eventType string, payload []byte) runtimev1.EventDeliveryStatus {
 		t.Helper()
 		response, err := client.DeliverEvents(ctx, &runtimev1.DeliverEventsRequest{
@@ -227,15 +229,15 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	if got := send(queued[0].ID, synthetic.Kind, "alerts.batch", body); got != accepted {
 		t.Fatalf("replayed event: %s", got)
 	}
-	secondIdentity := []byte(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-2","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
+	secondIdentity := []byte(fmt.Sprintf(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-2","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":%q}]}`, stamp))
 	if got := send("synthetic-2", synthetic.Kind, "alerts.batch", secondIdentity); got != accepted {
 		t.Fatalf("same labels with different external identity: %s", got)
 	}
-	conflictingLabels := []byte(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-1","labels":{"alertname":"Synthetic","instance":"other-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
+	conflictingLabels := []byte(fmt.Sprintf(`{"status":"firing","alerts":[{"status":"firing","externalId":"upstream-1","labels":{"alertname":"Synthetic","instance":"other-host"},"startsAt":%q}]}`, stamp))
 	if got := send("synthetic-conflict", synthetic.Kind, "alerts.batch", conflictingLabels); got != accepted {
 		t.Fatalf("identity conflict must isolate the item: %s", got)
 	}
-	missingIdentity := []byte(`{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":"2026-09-28T00:00:00Z"}]}`)
+	missingIdentity := []byte(fmt.Sprintf(`{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"Synthetic","instance":"test-host"},"startsAt":%q}]}`, stamp))
 	if got := send("synthetic-missing-identity", synthetic.Kind, "alerts.batch", missingIdentity); got != accepted {
 		t.Fatalf("bad item must be isolated without rejecting the delivery: %s", got)
 	}
@@ -278,6 +280,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	if err != nil || item.Source != synthetic.Kind {
 		t.Fatalf("normalized source in alert detail: %+v err=%v", item, err)
 	}
+	assertSyntheticAnalysisDailyLine(t, harness, registry, admin, source.SourceID, observedAt)
 	harness.alerts.UseEnabledPlugins([]string{"alertmanager"})
 	if got := send("synthetic-disabled", synthetic.Kind, "alerts.batch", body); got != rejected {
 		t.Fatalf("disabled source result: %s", got)

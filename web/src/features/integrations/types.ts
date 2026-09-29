@@ -57,6 +57,15 @@ export interface IntegrationCatalogItem {
 	/** 来源实例非秘密设置的封闭 JSON Schema（ADR-0014 story 2）；缺省表示
 	 * 该来源只接受空设置文档，UI 不渲染设置入口。凭据材料按构造不可出现。 */
 	eventSourceConfigSchema?: Record<string, unknown>;
+	/** Frozen inspection templates and their closed non-secret params schema. */
+	inspectionTemplates?: Array<{
+		id: string;
+		version: string;
+		title: string;
+		description: string;
+		paramsSchema?: Record<string, unknown>;
+		resultKind: "promql" | "json";
+	}>;
 	displayName: string;
 	description: string;
 	enabled: boolean;
