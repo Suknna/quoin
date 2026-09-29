@@ -14,6 +14,7 @@ import (
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/analysis"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/connections"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
 	"github.com/Suknna/quoin/internal/quoin/testfixture"
 	"github.com/Suknna/quoin/test/plugins/synthetic"
@@ -41,7 +42,7 @@ func assertSyntheticAnalysisDailyLine(t *testing.T, harness *relayTestHarness, r
 	t.Helper()
 	ctx := context.Background()
 	db := harness.database.SQL
-	enabled := []string{"alertmanager", "synthetic-plugin"}
+	enabled := []string{"alertmanager", "prometheus", "synthetic-plugin"}
 	catalogs, err := attempt.BuildCatalogs(registry, enabled)
 	if err != nil {
 		t.Fatal(err)
@@ -90,36 +91,7 @@ func assertSyntheticAnalysisDailyLine(t *testing.T, harness *relayTestHarness, r
 	// own host contract tests; this fixture focuses on the assembled analysis
 	// and inspection paths sharing the accepted source facts.
 	stamp := observedAt.Format(time.RFC3339Nano)
-	connection, err := db.Exec(`INSERT INTO connections(name,type,enabled,created_at) VALUES('synthetic-full-line',?,1,?)`, synthetic.ConnectionKindValue, stamp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	connectionID, err := connection.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	revision, err := db.Exec(`INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_at) VALUES(?,1,?,?)`,
-		connectionID, `{"type":"synthetic-hook","baseUrl":"https://synthetic.test","authType":"none"}`, stamp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	revisionID, err := revision.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	generation, err := db.Exec(`INSERT INTO credential_generations(connection_id,generation_seq,envelope_version,key_binding_revision,nonce,ciphertext,created_at) VALUES(?,1,1,1,?,?,?)`,
-		connectionID, make([]byte, 12), make([]byte, 32), stamp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	generationID, err := generation.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,row_version=row_version+1 WHERE id=?`,
-		revisionID, generationID, connectionID); err != nil {
-		t.Fatal(err)
-	}
+	_ = testfixture.SeedHTTPConnectionPair(t, db, "synthetic-full-line", synthetic.ConnectionKindValue, observedAt)
 	frozenNow := observedAt
 	inspections := inspection.NewServiceWithClock(db, func() time.Time { return frozenNow })
 	if err := inspections.SetReader(harness.database.Reader); err != nil {
@@ -186,9 +158,10 @@ func assertSyntheticAnalysisDailyLine(t *testing.T, harness *relayTestHarness, r
 	if err := inspections.CommitPluginProposal(ctx, childID, "synthetic-boot", 1, proposal); err != nil {
 		t.Fatal(err)
 	}
+	collectMetricsPlanForFullLine(t, db, harness.connection, inspections, admin, observedAt)
 	if _, err := inspections.CreateDailyReportConfig(admin, 1, "synthetic-full-line-daily", inspection.DailyReportConfigInput{
 		ConfigKey: "synthetic-daily", DisplayName: "Synthetic daily", Enabled: true,
-		Timezone: "UTC", TriggerTime: "09:00", PlanKeys: []string{"synthetic-full-line"},
+		Timezone: "UTC", TriggerTime: "09:00", PlanKeys: []string{"synthetic-full-line", "metrics-full-line"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -203,12 +176,24 @@ func assertSyntheticAnalysisDailyLine(t *testing.T, harness *relayTestHarness, r
 		t.Fatal(err)
 	}
 	sealed, err := inspections.GetDailyReport(ctx, "synthetic-daily", localDate)
-	if err != nil || sealed.Latest == nil || len(sealed.Latest.Sources) != 1 || len(sealed.Latest.Sources[0].Checks) != 1 {
+	if err != nil || sealed.Latest == nil || len(sealed.Latest.Sources) != 2 {
 		t.Fatalf("synthetic report=%+v err=%v", sealed, err)
 	}
-	check := sealed.Latest.Sources[0].Checks[0]
-	if check.EvidenceID == nil || string(check.Result) != string(evidenceEnvelope.Result) || check.Status != "ok" {
-		t.Fatalf("synthetic report lost frozen check result: %+v", check)
+	var syntheticSeen, metricsSeen bool
+	for _, source := range sealed.Latest.Sources {
+		if len(source.Checks) != 1 || source.Checks[0].EvidenceID == nil || source.Checks[0].Status != "ok" {
+			t.Fatalf("cross-source report contains incomplete source: %+v", source)
+		}
+		check := source.Checks[0]
+		switch source.PlanKey {
+		case "synthetic-full-line":
+			syntheticSeen = string(check.Result) == string(evidenceEnvelope.Result) && check.Measurement == nil
+		case "metrics-full-line":
+			metricsSeen = len(check.Result) == 0 && check.Measurement != nil && check.Measurement.ResultType == "vector"
+		}
+	}
+	if !syntheticSeen || !metricsSeen {
+		t.Fatalf("synthetic JSON and existing metrics Evidence did not coexist in one frozen report: %+v", sealed.Latest.Sources)
 	}
 	if err := inspections.EnsureDueDailyReportAnalyses(ctx); err != nil {
 		t.Fatal(err)
@@ -273,4 +258,78 @@ func seedSyntheticSucceededModelCall(t *testing.T, db *sql.DB, attemptID int64, 
 		t.Fatal(err)
 	}
 	return callID
+}
+
+// An existing metrics source contributes a real Run/Evidence into the same
+// report as the new JSON plugin. The legacy metrics executor has its own
+// dispatch test; here the authoritative proposal/closure is the boundary
+// under test, without inserting fake daily check rows directly into SQL.
+func collectMetricsPlanForFullLine(t *testing.T, db *sql.DB, conns *connections.Service, inspections *inspection.Service, admin context.Context, observedAt time.Time) {
+	t.Helper()
+	created, err := conns.Create(admin, connections.CreateInput{
+		Name: "metrics-full-line", Type: connections.TypePrometheus,
+		NonSecretJSON: []byte(`{"type":"prometheus","baseUrl":"https://metrics.test","authType":"none"}`),
+	}, 1, "metrics-full-line-create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeAttempt, err := conns.StartProbe(admin, created.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok, err := conns.BindQueuedToStream(context.Background(), probeAttempt, "synthetic-boot", 1, 5*time.Minute); err != nil || !ok {
+		t.Fatalf("metrics qualification probe bind: ok=%v err=%v", ok, err)
+	}
+	if err := conns.AcceptProbe(context.Background(), probeAttempt, "synthetic-boot", 1); err != nil {
+		t.Fatal(err)
+	}
+	probeResult := connections.TypedProbeResult{
+		Outcome: "passed", ResultDigest: strings.Repeat("2", 64),
+		StartedAt: observedAt.UTC().Format(time.RFC3339Nano), FinishedAt: observedAt.Add(time.Second).UTC().Format(time.RFC3339Nano),
+	}
+	probeChild := &connections.TypedChild{Thanos: &connections.ThanosProbeChild{
+		Query: "vector(1)", ResponseType: "vector", SampleCount: 1, SampleValue: "1", DetailJSON: `{"kind":"prometheus"}`,
+	}}
+	if err := conns.CommitProbeResult(context.Background(), probeAttempt, "synthetic-boot", 1, probeResult, probeChild); err != nil {
+		t.Fatal(err)
+	}
+	var probeID int64
+	if err := db.QueryRow(`SELECT id FROM connection_probe_results WHERE attempt_id=?`, probeAttempt).Scan(&probeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conns.Enable(admin, created.Name, created.RowVersion, probeID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspections.CreatePlan(admin, 1, "metrics-full-line-plan", inspection.PlanInput{
+		PlanKey: "metrics-full-line", DisplayName: "Existing metrics check", Enabled: true,
+		ConnectionName: "metrics-full-line", PluginID: "prometheus", TemplateID: "promql_instant",
+		Params: map[string]any{"expression": "up"}, ScopeKind: "integration", Timezone: "UTC",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := inspections.CreatePlanRun(admin, 1, "metrics-full-line-run", "metrics-full-line")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var childID int64
+	if err := db.QueryRow(`SELECT id FROM execution_attempts WHERE attempt_type='inspection_collection' AND scope_id=?`, run.RunID).Scan(&childID); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspections.Attempts().BindToSlot(context.Background(), childID, "plinth", "synthetic-boot", 1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspections.Attempts().Accept(context.Background(), childID, "synthetic-boot", 1); err != nil {
+		t.Fatal(err)
+	}
+	vector := map[string]any{"resultType": "vector", "result": []any{map[string]any{
+		"metric": map[string]string{"job": "api"}, "value": []any{observedAt.Unix(), "1"},
+	}}}
+	proposal, _ := json.Marshal(map[string]any{
+		"schemaKind": "inspection_plugin_result_v1", "attemptId": childID, "inspectionRunId": run.RunID,
+		"checkKey": "promql_instant", "outcome": "success", "observedAt": observedAt.Format(time.RFC3339Nano),
+		"executionWindow": nil, "result": vector, "warnings": []string{}, "errors": []string{}, "gapReason": nil,
+	})
+	if err := inspections.CommitPluginProposal(context.Background(), childID, "synthetic-boot", 1, proposal); err != nil {
+		t.Fatal(err)
+	}
 }

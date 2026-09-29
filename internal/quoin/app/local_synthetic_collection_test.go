@@ -9,6 +9,7 @@ import (
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
 	"github.com/Suknna/quoin/internal/quoin/inspection"
+	"github.com/Suknna/quoin/internal/quoin/testfixture"
 	"github.com/Suknna/quoin/test/plugins/synthetic"
 )
 
@@ -53,27 +54,7 @@ func TestLocalSyntheticCollectionUsesDeclaredTool(t *testing.T) {
 	previous := newLocalToolCaller
 	newLocalToolCaller = func(*RuntimeService, localConnection) plugins.PlatformCaller { return caller }
 	t.Cleanup(func() { newLocalToolCaller = previous })
-	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	connection, err := db.Exec(`INSERT INTO connections(name,type,enabled,created_at) VALUES('synthetic-local',?,1,?)`, synthetic.ConnectionKindValue, stamp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	connectionID, _ := connection.LastInsertId()
-	revision, err := db.Exec(`INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_at) VALUES(?,1,?,?)`,
-		connectionID, `{"type":"synthetic-hook","baseUrl":"https://synthetic.test","authType":"none"}`, stamp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	revisionID, _ := revision.LastInsertId()
-	generation, err := db.Exec(`INSERT INTO credential_generations(connection_id,generation_seq,envelope_version,key_binding_revision,nonce,ciphertext,created_at) VALUES(?,1,1,1,?,?,?)`,
-		connectionID, make([]byte, 12), make([]byte, 32), stamp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	generationID, _ := generation.LastInsertId()
-	if _, err := db.Exec(`UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,row_version=row_version+1 WHERE id=?`, revisionID, generationID, connectionID); err != nil {
-		t.Fatal(err)
-	}
+	_ = testfixture.SeedHTTPConnectionPair(t, db, "synthetic-local", synthetic.ConnectionKindValue, time.Now())
 	if _, err := service.Inspections.CreatePlan(localInspectionAdminContext(t), 1, "synthetic-local-plan", inspection.PlanInput{
 		PlanKey: "synthetic-local-plan", DisplayName: "Synthetic", Enabled: true,
 		ConnectionName: "synthetic-local", PluginID: "synthetic-plugin", TemplateID: synthetic.TemplateID,

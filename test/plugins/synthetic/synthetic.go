@@ -43,7 +43,7 @@ const (
 	TemplateID              = "synthetic_check"
 	TemplateVersion         = "1"
 	CollectionGrantPurpose  = "config_synthetic_check"
-	CollectResultSchemaKind = "synthetic_collect_result_v1"
+	CollectResultSchemaKind = "synthetic_collect_result_v2"
 )
 
 // SourceSettingsSchema is the closed instance-settings contract of the
@@ -324,7 +324,7 @@ type collectArgs struct {
 }
 
 var collectTool = plugins.Tool[collectArgs, plugins.CollectResult]{
-	Name: CollectToolName, Version: "1", FailureMode: plugins.FailureFailAttempt, ResultKind: CollectResultSchemaKind,
+	Name: CollectToolName, Version: "2", FailureMode: plugins.FailureFailAttempt, ResultKind: CollectResultSchemaKind,
 	Internal: true, Timeout: 15 * time.Second,
 	// 显式 Schema：targets 是冻结的 CollectTarget 结构数组（struct 切片在派生
 	// 词表之外），内部工具不进模型目录，泛型 array 语义足够。

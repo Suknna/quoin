@@ -169,6 +169,13 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 	if err := registry.Register(builtin); err != nil {
 		t.Fatal(err)
 	}
+	metricsPlugin, ok := plugins.Default().Plugin("prometheus")
+	if !ok {
+		t.Fatal("prometheus plugin missing from test host")
+	}
+	if err := registry.Register(metricsPlugin); err != nil {
+		t.Fatal(err)
+	}
 	if err := registry.Register(synthetic.Plugin()); err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Suknna/quoin/internal/plugins"
 	"github.com/Suknna/quoin/internal/quoin/attempt"
+	"github.com/Suknna/quoin/internal/quoin/testfixture"
 	"github.com/Suknna/quoin/test/plugins/synthetic"
 )
 
@@ -30,38 +31,7 @@ func setupSyntheticPlan(t *testing.T) (*testHarness, *plugins.Registry, int64) {
 		t.Fatal(err)
 	}
 	h.service.Attempts().Catalogs = catalogs
-	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	created, err := h.db.Exec(`INSERT INTO connections(name,type,enabled,created_at) VALUES(?,?,1,?)`,
-		"synthetic-platform", synthetic.ConnectionKindValue, stamp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	connectionID, err := created.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	revision, err := h.db.Exec(`INSERT INTO connection_revisions(connection_id,revision_seq,config_json,created_at) VALUES(?,1,?,?)`,
-		connectionID, `{"type":"synthetic-hook","baseUrl":"https://synthetic.test","authType":"none"}`, stamp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	revisionID, err := revision.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	generation, err := h.db.Exec(`INSERT INTO credential_generations(connection_id,generation_seq,envelope_version,key_binding_revision,nonce,ciphertext,created_at) VALUES(?,1,1,1,?,?,?)`,
-		connectionID, make([]byte, 12), make([]byte, 32), stamp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	generationID, err := generation.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.db.Exec(`UPDATE connections SET current_revision_id=?,current_credential_generation_id=?,row_version=row_version+1 WHERE id=?`,
-		revisionID, generationID, connectionID); err != nil {
-		t.Fatal(err)
-	}
+	connectionID := testfixture.SeedHTTPConnectionPair(t, h.db, "synthetic-platform", synthetic.ConnectionKindValue, time.Now())
 	plan, err := h.service.CreatePlan(commandContext(t), h.principal, "synthetic-plan-create", PlanInput{
 		PlanKey: "synthetic-plan", DisplayName: "Synthetic check", Enabled: true,
 		ConnectionName: "synthetic-platform", PluginID: "synthetic-plugin",
