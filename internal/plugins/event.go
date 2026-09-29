@@ -54,12 +54,24 @@ type Event struct {
 	// Type is the normalized event type ("alerts.batch"); it routes the
 	// event inside Quoin's consumer.
 	Type string
+	// PayloadVersion is the declared, non-zero schema version of Payload.
+	// Stele persists it before acknowledging the webhook; Quoin only projects
+	// versions it understands, never reinterpreting old queued bytes.
+	PayloadVersion uint32
 	// OccurredAt is the source-declared occurrence time (zero when the
 	// protocol carries none; the payload remains authoritative).
 	OccurredAt time.Time
 	// Payload is the normalized, source-kind-specific JSON document. It is
 	// the contract between this plugin's VerifyAndParse and Quoin's consumer.
 	Payload json.RawMessage
+}
+
+// EventContract is one producer-declared canonical event schema. A source
+// may declare more than one version during a transition, while Quoin
+// independently selects the versions its business projector understands.
+type EventContract struct {
+	Type    string
+	Version uint32
 }
 
 const (

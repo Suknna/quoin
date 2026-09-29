@@ -46,8 +46,9 @@ func (alertmanagerSource) VerifyAndParse(_ context.Context, req plugins.InboundR
 		return nil, err
 	}
 	return []plugins.Event{{
-		Type:    "alerts.batch",
-		Payload: normalized,
+		Type:           "alerts.batch",
+		PayloadVersion: 1,
+		Payload:        normalized,
 	}}, nil
 }
 
@@ -105,7 +106,7 @@ func init() {
 		Description:     "接收上游 Alertmanager 告警来源：Stele 网关按来源认证并归一化入队，Quoin 事务性消费并归一化告警语义。",
 		DefaultEnabled:  true,
 		EventSource:     alertmanagerSource{},
-		EventTypes:      []string{"alerts.batch"},
+		EventContracts:  []plugins.EventContract{{Type: "alerts.batch", Version: 1}},
 		AlertNormalizer: alertmanagerNormalizer{},
 		AlertIdentity:   plugins.AlertIdentityLabels,
 	})

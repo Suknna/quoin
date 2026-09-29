@@ -22,10 +22,10 @@ import (
 // Settings are snapshot state — never credential material — and travel to
 // the plugin's VerifyAndParse inside InboundRequest.
 type CredentialMatch struct {
-	SourceID         int64
-	CredentialID     int64
-	SnapshotVersion  uint64
-	Settings         []byte
+	SourceID        int64
+	CredentialID    int64
+	SnapshotVersion uint64
+	Settings        []byte
 }
 
 // CredentialLookup 是 webhook 依赖的快照认证面（Relay 实现；测试注入 stub）。
@@ -37,7 +37,7 @@ type CredentialLookup interface {
 // SourceRegistry 是 webhook 依赖的插件解析面（*plugins.Registry 实现）。
 type SourceRegistry interface {
 	EventSource(kind string) (plugins.EventSource, string, bool)
-	SourceEvent(kind, eventType string) bool
+	SourceEvent(kind, eventType string, payloadVersion uint32) bool
 }
 
 // Webhook is the inbound HTTP surface: one handler per source kind under
@@ -123,8 +123,8 @@ func (webhook *Webhook) serveSource(writer http.ResponseWriter, request *http.Re
 	}
 	queued := make([]QueuedEvent, 0, len(events))
 	for _, event := range events {
-		if !webhook.sources.SourceEvent(source, event.Type) {
-			http.Error(writer, "source emitted an undeclared event type", http.StatusBadRequest)
+		if !webhook.sources.SourceEvent(source, event.Type, event.PayloadVersion) {
+			http.Error(writer, "source emitted an undeclared event type or payload version", http.StatusBadRequest)
 			webhook.metrics.RecordIntake("rejected")
 			return
 		}
@@ -141,6 +141,7 @@ func (webhook *Webhook) serveSource(writer http.ResponseWriter, request *http.Re
 			CredentialID:              credentialID,
 			CredentialSnapshotVersion: snapshotVersion,
 			EventType:                 event.Type,
+			PayloadVersion:            event.PayloadVersion,
 			ReceivedAt:                receivedAt,
 			Payload:                   event.Payload,
 		})

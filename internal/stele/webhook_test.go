@@ -55,9 +55,11 @@ func (lookup *stubLookup) Credential(bearer, sourceKind string) (CredentialMatch
 // alerts.batch 事件；fail 时模拟协议解析失败。settingsSeen 记录最近一次
 // VerifyAndParse 收到的 Settings（ADR-0014 story 2 投递验证用）。
 type stubEventSource struct {
-	fail         bool
-	eventType    string
-	settingsSeen []byte
+	fail            bool
+	eventType       string
+	payloadVersion  uint32
+	emitZeroVersion bool
+	settingsSeen    []byte
 }
 
 func (source *stubEventSource) Kind() string { return "alertmanager" }
@@ -75,7 +77,11 @@ func (source *stubEventSource) VerifyAndParse(_ context.Context, req plugins.Inb
 	if eventType == "" {
 		eventType = "alerts.batch"
 	}
-	return []plugins.Event{{Type: eventType, Payload: req.Body}}, nil
+	version := source.payloadVersion
+	if version == 0 && !source.emitZeroVersion {
+		version = 1
+	}
+	return []plugins.Event{{Type: eventType, PayloadVersion: version, Payload: req.Body}}, nil
 }
 
 // stubKindSource 是 Kind 可配置的最小 EventSource。
@@ -84,7 +90,7 @@ type stubKindSource string
 func (kind stubKindSource) Kind() string { return string(kind) }
 
 func (kind stubKindSource) VerifyAndParse(_ context.Context, req plugins.InboundRequest) ([]plugins.Event, error) {
-	return []plugins.Event{{Type: "generic", Payload: req.Body}}, nil
+	return []plugins.Event{{Type: "generic", PayloadVersion: 1, Payload: req.Body}}, nil
 }
 
 type stubSourceRegistry struct {
@@ -96,9 +102,9 @@ func (registry stubSourceRegistry) EventSource(kind string) (plugins.EventSource
 	return source, "stub-plugin", ok
 }
 
-func (registry stubSourceRegistry) SourceEvent(kind, eventType string) bool {
+func (registry stubSourceRegistry) SourceEvent(kind, eventType string, payloadVersion uint32) bool {
 	_, ok := registry.sources[kind]
-	return ok && (eventType == "alerts.batch" || eventType == "generic")
+	return ok && payloadVersion == 1 && (eventType == "alerts.batch" || eventType == "generic")
 }
 
 func alertmanagerRegistry(fail bool) stubSourceRegistry {
@@ -262,6 +268,32 @@ func TestWebhookUndeclaredEventIsRejectedBeforeEnqueue(t *testing.T) {
 	}
 }
 
+func TestWebhookUndeclaredPayloadVersionNeverEnqueues(t *testing.T) {
+	for _, scenario := range []struct {
+		name   string
+		source *stubEventSource
+	}{
+		{name: "unknown-version", source: &stubEventSource{payloadVersion: 2}},
+		{name: "missing-version", source: &stubEventSource{emitZeroVersion: true}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			_, digest := testBearer()
+			server, queue := newTestWebhook(t, &stubLookup{ready: true, digest: digest}, stubSourceRegistry{sources: map[string]plugins.EventSource{"alertmanager": scenario.source}})
+			response, err := http.DefaultClient.Do(bearerRequest(t, http.MethodPost, server.URL+"/webhook/alertmanager", validPayload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("unregistered event version status=%d", response.StatusCode)
+			}
+			if depth, err := queue.QueueDepth(context.Background()); err != nil || depth != 0 {
+				t.Fatalf("event version was enqueued: depth=%d err=%v", depth, err)
+			}
+		})
+	}
+}
+
 func TestWebhookAcceptsAndEnqueues(t *testing.T) {
 	_, digest := testBearer()
 	lookup := &stubLookup{ready: true, digest: digest}
@@ -284,7 +316,7 @@ func TestWebhookAcceptsAndEnqueues(t *testing.T) {
 	}
 	event := events[0]
 	if event.SourceKind != "alertmanager" || event.SourceID != 7 || event.CredentialID != 9 ||
-		event.CredentialSnapshotVersion != 3 || event.EventType != "alerts.batch" {
+		event.CredentialSnapshotVersion != 3 || event.EventType != "alerts.batch" || event.PayloadVersion != 1 {
 		t.Fatalf("queued event lost attribution fields: %+v", event)
 	}
 	if string(event.Payload) != validPayload {

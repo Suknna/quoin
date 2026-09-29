@@ -97,7 +97,7 @@ func seedDeadLetter(t *testing.T, dataDirectory, id string, payload []byte) {
 	defer queue.Close()
 	if err := queue.EnqueueEvents(context.Background(), []stele.QueuedEvent{{
 		ID: id, SourceKind: "alertmanager", SourceID: 7, CredentialID: 9,
-		CredentialSnapshotVersion: 3, EventType: "alerts.batch",
+		CredentialSnapshotVersion: 3, EventType: "alerts.batch", PayloadVersion: 1,
 		ReceivedAt: time.Now().UTC(), Payload: payload,
 	}}); err != nil {
 		t.Fatalf("seed enqueue: %v", err)
@@ -143,6 +143,9 @@ func TestDeadLettersListSanitizesAndTruncatesPayload(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "evt-escape") || !strings.Contains(stdout, "rejected") {
 		t.Fatalf("row missing from output: %q", stdout)
+	}
+	if !strings.Contains(stdout, "PAYLOAD_VERSION") || !strings.Contains(strings.Join(strings.Fields(stdout), " "), "alerts.batch 1 rejected") {
+		t.Fatalf("operator cannot identify the quarantined payload schema: %q", stdout)
 	}
 	// 换行/ESC/DEL 都中和为空格：既防终端转义注入，也防破坏表格式。
 	if !strings.Contains(stdout, "line1 line2") {
@@ -193,8 +196,8 @@ func TestDeadLettersListFullPayloadExactWhenRedirected(t *testing.T) {
 	}
 }
 
-// v1 老库（无凭据列）可只读列出，且 user_version 保持 1：只读列表绝不迁移。
-func TestDeadLettersListV1DatabaseWithoutMigration(t *testing.T) {
+// 首次上线不迁移旧队列：只读 CLI 也必须拒绝未知布局，不猜测事件版本。
+func TestDeadLettersListRejectsOldLayoutWithoutMigration(t *testing.T) {
 	root := t.TempDir()
 	dataDirectory := filepath.Join(root, "state")
 	if err := os.MkdirAll(dataDirectory, 0o700); err != nil {
@@ -223,11 +226,8 @@ func TestDeadLettersListV1DatabaseWithoutMigration(t *testing.T) {
 	}
 	configPath := writeSteleCLIConfig(t, dataDirectory)
 	code, stdout, stderr := runSteleCLI(t, builtSteleBinary(t), "dead-letters", "list", "--config", configPath)
-	if code != 0 {
-		t.Fatalf("list on a v1 database failed: code=%d stderr=%q", code, stderr)
-	}
-	if !strings.Contains(stdout, "legacy-1") {
-		t.Fatalf("v1 row missing from output: %q", stdout)
+	if code == 0 || stdout != "" || !strings.Contains(stderr, "not supported") {
+		t.Fatalf("old queue must fail without printing or guessing payload: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	db, err = sql.Open("sqlite", databasePath)
 	if err != nil {

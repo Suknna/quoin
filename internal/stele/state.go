@@ -3,7 +3,8 @@ package stele
 // Stele 本地状态存储（ADR-0011）：SQLite 承载出站事件队列（outbox）、死信表、
 // 出向限流累计计数，以及动态凭证/拉取游标两张预留表。这里只做网关自身的
 // 可靠性簿记——入队即 ACK 之后，转发循环、指数退避与死信迁移全部以此库为
-// 唯一事实；它不是业务库，bootstrap 仅用 user_version + CREATE IF NOT EXISTS。
+// 唯一事实；它不是业务库。首次上线只建立当前版本，未知旧版本明确拒绝，
+// 不对排队中的业务事件猜测载荷版本或执行隐式迁移。
 
 import (
 	"context"
@@ -20,10 +21,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// queueSchemaVersion 是本地库结构的唯一版本号（PRAGMA user_version）。
-// v2：dead_letters 增加 credential_id/credential_snapshot_version 两列
-// （重放需要把事件按原凭据重新入队；v1 库经 ALTER TABLE 原地迁移）。
-const queueSchemaVersion = 2
+// queueSchemaVersion is the first-public-release layout (PRAGMA user_version).
+// Every queued/dead event persists its explicit canonical payload version.
+const queueSchemaVersion = 3
 
 // 固定纳秒宽度的 UTC 时间布局：等宽文本使字典序与时间序一致，next_retry_at
 // 的字符串比较才可靠。
@@ -51,6 +51,7 @@ type QueuedEvent struct {
 	CredentialID              int64
 	CredentialSnapshotVersion uint64
 	EventType                 string
+	PayloadVersion            uint32
 	ReceivedAt                time.Time
 	Payload                   []byte
 	Attempts                  int
@@ -66,6 +67,7 @@ func (event QueuedEvent) RelayEvent() *runtimev1.RelayEvent {
 		CredentialId:              event.CredentialID,
 		CredentialSnapshotVersion: event.CredentialSnapshotVersion,
 		EventType:                 event.EventType,
+		PayloadVersion:            event.PayloadVersion,
 		ReceivedAt:                timestampProto(event.ReceivedAt),
 		Payload:                   event.Payload,
 	}
@@ -119,7 +121,7 @@ func (queue *Queue) Close() error {
 // OpenQueueReadOnly 以严格只读方式打开既有 <dataDirectory>/stele.db：mode=ro
 // + query_only 让 SQLite 本身拒绝一切写入（与 Quoin 侧 execution.OpenReadOnly
 // / 离线 rebind 的只读约定一致）。死信列表这类管理面查看用它兜底：dataDirectory
-// 配错时只会得到明确报错，绝不产生创建目录、bootstrap、v1→v2 迁移或 chmod
+// 配错时只会得到明确报错，绝不产生创建目录、bootstrap、旧库迁移或 chmod
 // 等副作用；库文件不存在直接失败。WAL 库在 -shm 文件可写（如网关同用户
 // 在跑或已干净关闭）时可正常只读。
 func OpenQueueReadOnly(dataDirectory string) (*Queue, error) {
@@ -141,6 +143,15 @@ func OpenQueueReadOnly(dataDirectory string) (*Queue, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("stele: ping state database: %w", err)
 	}
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("stele: read state schema version: %w", err)
+	}
+	if version != queueSchemaVersion {
+		_ = db.Close()
+		return nil, fmt.Errorf("stele: state database schema version %d is not supported (want %d)", version, queueSchemaVersion)
+	}
 	return &Queue{db: db}, nil
 }
 
@@ -151,30 +162,6 @@ func (queue *Queue) bootstrap() error {
 		return fmt.Errorf("stele: read state schema version: %w", err)
 	}
 	if version == queueSchemaVersion {
-		return nil
-	}
-	if version == 1 {
-		// v1 → v2：dead_letters 补凭据列（重放入队需要）；既有死信行的
-		// 凭据记为 0，重放时必须显式指定有效凭据（CLI 强制校验）。
-		tx, err := queue.db.Begin()
-		if err != nil {
-			return fmt.Errorf("stele: begin v2 migration: %w", err)
-		}
-		if _, err := tx.Exec(`ALTER TABLE dead_letters ADD COLUMN credential_id INTEGER NOT NULL DEFAULT 0`); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("stele: migrate dead_letters credential_id: %w", err)
-		}
-		if _, err := tx.Exec(`ALTER TABLE dead_letters ADD COLUMN credential_snapshot_version INTEGER NOT NULL DEFAULT 0`); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("stele: migrate dead_letters credential_snapshot_version: %w", err)
-		}
-		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, queueSchemaVersion)); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("stele: stamp schema v2: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("stele: commit v2 migration: %w", err)
-		}
 		return nil
 	}
 	if version != 0 {
@@ -188,6 +175,7 @@ func (queue *Queue) bootstrap() error {
 			credential_id INTEGER NOT NULL,
 			credential_snapshot_version INTEGER NOT NULL,
 			event_type TEXT NOT NULL,
+			payload_version INTEGER NOT NULL CHECK(payload_version BETWEEN 1 AND 4294967295),
 			received_at TEXT NOT NULL,
 			payload BLOB NOT NULL,
 			state TEXT NOT NULL DEFAULT 'pending',
@@ -203,6 +191,7 @@ func (queue *Queue) bootstrap() error {
 			credential_id INTEGER NOT NULL DEFAULT 0,
 			credential_snapshot_version INTEGER NOT NULL DEFAULT 0,
 			event_type TEXT NOT NULL,
+			payload_version INTEGER NOT NULL CHECK(payload_version BETWEEN 1 AND 4294967295),
 			payload BLOB NOT NULL,
 			reason TEXT NOT NULL,
 			attempts INTEGER NOT NULL,
@@ -259,8 +248,8 @@ func (queue *Queue) EnqueueEvents(ctx context.Context, events []QueuedEvent) err
 	}
 	statement, err := tx.PrepareContext(ctx, `INSERT INTO events_outbox(
 		id, source_kind, source_id, credential_id, credential_snapshot_version,
-		event_type, received_at, payload, state, attempts, next_retry_at, created_at
-	) VALUES (?,?,?,?,?,?,?,?,'pending',0,NULL,?)`)
+		event_type, payload_version, received_at, payload, state, attempts, next_retry_at, created_at
+	) VALUES (?,?,?,?,?,?,?,?,?,'pending',0,NULL,?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("stele: prepare enqueue: %w", err)
@@ -268,6 +257,10 @@ func (queue *Queue) EnqueueEvents(ctx context.Context, events []QueuedEvent) err
 	defer statement.Close()
 	now := time.Now().UTC()
 	for index, event := range events {
+		if event.PayloadVersion == 0 {
+			_ = tx.Rollback()
+			return fmt.Errorf("stele: event %d of %d has no declared payload version", index+1, len(events))
+		}
 		receivedAt := event.ReceivedAt
 		if receivedAt.IsZero() {
 			receivedAt = now
@@ -278,7 +271,7 @@ func (queue *Queue) EnqueueEvents(ctx context.Context, events []QueuedEvent) err
 		}
 		if _, err := statement.ExecContext(ctx,
 			event.ID, event.SourceKind, event.SourceID, event.CredentialID,
-			int64(event.CredentialSnapshotVersion), event.EventType,
+			int64(event.CredentialSnapshotVersion), event.EventType, int64(event.PayloadVersion),
 			formatStateTime(receivedAt), event.Payload, formatStateTime(createdAt),
 		); err != nil {
 			_ = tx.Rollback()
@@ -295,7 +288,7 @@ func (queue *Queue) EnqueueEvents(ctx context.Context, events []QueuedEvent) err
 func (queue *Queue) FetchDueBatch(ctx context.Context, batch int, now time.Time) ([]QueuedEvent, error) {
 	rows, err := queue.db.QueryContext(ctx, `SELECT
 		id, source_kind, source_id, credential_id, credential_snapshot_version,
-		event_type, received_at, payload, attempts, created_at
+		event_type, payload_version, received_at, payload, attempts, created_at
 		FROM events_outbox
 		WHERE state='pending' AND (next_retry_at IS NULL OR next_retry_at <= ?)
 		ORDER BY created_at, id LIMIT ?`, formatStateTime(now), batch)
@@ -309,7 +302,7 @@ func (queue *Queue) FetchDueBatch(ctx context.Context, batch int, now time.Time)
 		var receivedAt, createdAt string
 		var snapshotVersion int64
 		if err := rows.Scan(&event.ID, &event.SourceKind, &event.SourceID, &event.CredentialID,
-			&snapshotVersion, &event.EventType, &receivedAt, &event.Payload, &event.Attempts, &createdAt); err != nil {
+			&snapshotVersion, &event.EventType, &event.PayloadVersion, &receivedAt, &event.Payload, &event.Attempts, &createdAt); err != nil {
 			return nil, fmt.Errorf("stele: scan due batch row: %w", err)
 		}
 		event.CredentialSnapshotVersion = uint64(snapshotVersion)
@@ -373,9 +366,9 @@ func (queue *Queue) markUnavailable(ctx context.Context, id string, now time.Tim
 		var event QueuedEvent
 		var receivedAt string
 		err := tx.QueryRowContext(ctx, `SELECT
-			id, source_kind, source_id, credential_id, credential_snapshot_version, event_type, received_at, payload
+			id, source_kind, source_id, credential_id, credential_snapshot_version, event_type, payload_version, received_at, payload
 			FROM events_outbox WHERE id=?`, id).Scan(
-			&event.ID, &event.SourceKind, &event.SourceID, &event.CredentialID, &event.CredentialSnapshotVersion, &event.EventType, &receivedAt, &event.Payload)
+			&event.ID, &event.SourceKind, &event.SourceID, &event.CredentialID, &event.CredentialSnapshotVersion, &event.EventType, &event.PayloadVersion, &receivedAt, &event.Payload)
 		if err != nil {
 			_ = tx.Rollback()
 			if err == sql.ErrNoRows {
@@ -384,9 +377,9 @@ func (queue *Queue) markUnavailable(ctx context.Context, id string, now time.Tim
 			return false, fmt.Errorf("stele: load exhausted event: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO dead_letters(
-			id, source_kind, source_id, credential_id, credential_snapshot_version, event_type, payload, reason, attempts, first_received_at, dead_at
-		) VALUES (?,?,?,?,?,?,?,'exhausted',?,?,?)`,
-			event.ID, event.SourceKind, event.SourceID, event.CredentialID, event.CredentialSnapshotVersion, event.EventType, event.Payload,
+			id, source_kind, source_id, credential_id, credential_snapshot_version, event_type, payload_version, payload, reason, attempts, first_received_at, dead_at
+		) VALUES (?,?,?,?,?,?,?,?,'exhausted',?,?,?)`,
+			event.ID, event.SourceKind, event.SourceID, event.CredentialID, event.CredentialSnapshotVersion, event.EventType, event.PayloadVersion, event.Payload,
 			attempts, receivedAt, formatStateTime(now)); err != nil {
 			_ = tx.Rollback()
 			return false, fmt.Errorf("stele: dead-letter exhausted event: %w", err)
@@ -423,9 +416,9 @@ func (queue *Queue) moveToDeadLetter(ctx context.Context, id, reason string, now
 	var event QueuedEvent
 	var receivedAt string
 	err = tx.QueryRowContext(ctx, `SELECT
-		id, source_kind, source_id, credential_id, credential_snapshot_version, event_type, received_at, payload, attempts
+		id, source_kind, source_id, credential_id, credential_snapshot_version, event_type, payload_version, received_at, payload, attempts
 		FROM events_outbox WHERE id=?`, id).Scan(
-		&event.ID, &event.SourceKind, &event.SourceID, &event.CredentialID, &event.CredentialSnapshotVersion, &event.EventType, &receivedAt, &event.Payload, &event.Attempts)
+		&event.ID, &event.SourceKind, &event.SourceID, &event.CredentialID, &event.CredentialSnapshotVersion, &event.EventType, &event.PayloadVersion, &receivedAt, &event.Payload, &event.Attempts)
 	if err != nil {
 		_ = tx.Rollback()
 		if err == sql.ErrNoRows {
@@ -434,9 +427,9 @@ func (queue *Queue) moveToDeadLetter(ctx context.Context, id, reason string, now
 		return false, fmt.Errorf("stele: load rejected event: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO dead_letters(
-		id, source_kind, source_id, credential_id, credential_snapshot_version, event_type, payload, reason, attempts, first_received_at, dead_at
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		event.ID, event.SourceKind, event.SourceID, event.CredentialID, event.CredentialSnapshotVersion, event.EventType, event.Payload,
+		id, source_kind, source_id, credential_id, credential_snapshot_version, event_type, payload_version, payload, reason, attempts, first_received_at, dead_at
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		event.ID, event.SourceKind, event.SourceID, event.CredentialID, event.CredentialSnapshotVersion, event.EventType, event.PayloadVersion, event.Payload,
 		reason, event.Attempts, receivedAt, formatStateTime(now)); err != nil {
 		_ = tx.Rollback()
 		return false, fmt.Errorf("stele: dead-letter rejected event: %w", err)
@@ -469,6 +462,7 @@ type DeadLetter struct {
 	CredentialID              int64
 	CredentialSnapshotVersion uint64
 	EventType                 string
+	PayloadVersion            uint32
 	Payload                   []byte
 	Reason                    string
 	Attempts                  int
@@ -484,9 +478,8 @@ type DeadLetterFilter struct {
 }
 
 // ListDeadLetters 按 dead_at 倒序列出死信（管理面只读；Limit<=0 时默认 50，
-// 上限 500，避免一次性捞出全部原文）。凭据列只在 v2 存在：v1 老库在只读
-// 句柄下无从迁移，凭据投影为 0（重放侧对凭据 0 仍强制显式指定）；不认识
-// 的版本直接拒绝，与可写打开的 bootstrap 语义一致。
+// 上限 500，避免一次性捞出全部原文）。未知旧结构直接拒绝；首次上线的
+// 队列/死信每行都有规范载荷版本，绝不臆测旧版本。
 func (queue *Queue) ListDeadLetters(ctx context.Context, filter DeadLetterFilter) ([]DeadLetter, error) {
 	limit := filter.Limit
 	if limit <= 0 {
@@ -495,21 +488,16 @@ func (queue *Queue) ListDeadLetters(ctx context.Context, filter DeadLetterFilter
 	if limit > 500 {
 		limit = 500
 	}
-	credentialColumns := "credential_id, credential_snapshot_version"
 	var version int
 	if err := queue.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return nil, fmt.Errorf("stele: read state schema version: %w", err)
 	}
-	switch version {
-	case queueSchemaVersion:
-	case 1:
-		credentialColumns = "0, 0"
-	default:
+	if version != queueSchemaVersion {
 		return nil, fmt.Errorf("stele: state database schema version %d is not supported (want %d)", version, queueSchemaVersion)
 	}
-	query := fmt.Sprintf(`SELECT id, source_kind, source_id, %s,
-		event_type, payload, reason, attempts, first_received_at, dead_at
-		FROM dead_letters`, credentialColumns)
+	query := `SELECT id, source_kind, source_id, credential_id, credential_snapshot_version,
+		event_type, payload_version, payload, reason, attempts, first_received_at, dead_at
+		FROM dead_letters`
 	var clauses []string
 	var args []any
 	if filter.SourceKind != "" {
@@ -535,7 +523,7 @@ func (queue *Queue) ListDeadLetters(ctx context.Context, filter DeadLetterFilter
 		var letter DeadLetter
 		var firstReceivedAt, deadAt string
 		if err := rows.Scan(&letter.ID, &letter.SourceKind, &letter.SourceID, &letter.CredentialID,
-			&letter.CredentialSnapshotVersion, &letter.EventType, &letter.Payload, &letter.Reason,
+			&letter.CredentialSnapshotVersion, &letter.EventType, &letter.PayloadVersion, &letter.Payload, &letter.Reason,
 			&letter.Attempts, &firstReceivedAt, &deadAt); err != nil {
 			return nil, fmt.Errorf("stele: scan dead letter: %w", err)
 		}
@@ -585,9 +573,9 @@ func (queue *Queue) ReplayDeadLetters(ctx context.Context, ids []string, credent
 		var letter DeadLetter
 		var receivedAt string
 		err := tx.QueryRowContext(ctx, `SELECT id, source_kind, source_id, credential_id, credential_snapshot_version,
-			event_type, payload, first_received_at FROM dead_letters WHERE id=?`, id).
+			event_type, payload_version, payload, first_received_at FROM dead_letters WHERE id=?`, id).
 			Scan(&letter.ID, &letter.SourceKind, &letter.SourceID, &letter.CredentialID, &letter.CredentialSnapshotVersion,
-				&letter.EventType, &letter.Payload, &receivedAt)
+				&letter.EventType, &letter.PayloadVersion, &letter.Payload, &receivedAt)
 		if err != nil {
 			_ = tx.Rollback()
 			if err == sql.ErrNoRows {
@@ -605,10 +593,10 @@ func (queue *Queue) ReplayDeadLetters(ctx context.Context, ids []string, credent
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO events_outbox(
 			id, source_kind, source_id, credential_id, credential_snapshot_version,
-			event_type, received_at, payload, state, attempts, next_retry_at, created_at
-		) VALUES (?,?,?,?,?,?,?,?,'pending',0,NULL,?)`,
+			event_type, payload_version, received_at, payload, state, attempts, next_retry_at, created_at
+		) VALUES (?,?,?,?,?,?,?,?,?,'pending',0,NULL,?)`,
 			letter.ID, letter.SourceKind, letter.SourceID, useCredential, useSnapshot,
-			letter.EventType, receivedAt, letter.Payload, formatStateTime(time.Now().UTC())); err != nil {
+			letter.EventType, letter.PayloadVersion, receivedAt, letter.Payload, formatStateTime(time.Now().UTC())); err != nil {
 			_ = tx.Rollback()
 			return 0, fmt.Errorf("stele: re-enqueue dead letter %q: %w", id, err)
 		}

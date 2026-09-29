@@ -46,7 +46,7 @@ func init() {
         DefaultEnabled: false,
         ConfigSchema:   myConfigSchema, // 实例设置的封闭 JSON Schema（draft 2020-12）
         EventSource:    mySource{},     // 可选：入向能力
-        EventTypes:     []string{"alerts.batch"}, // 入向类型必须显式声明
+        EventContracts: []plugins.EventContract{{Type: "alerts.batch", Version: 1}}, // 规范类型与载荷版本均须声明
         AlertIdentity:  plugins.AlertIdentityExternal, // 告警来源选一种固定身份模式
         AlertNormalizer: myAlertNormalizer{}, // 与告警身份模式一起声明
         PostCommitSubscriptions: []plugins.PostCommitSubscription{{EventType: plugins.FactAlertObservationCommitted}},
@@ -91,11 +91,13 @@ Stele 网关负责 Bearer/digest 认证（"签名对不对"）与 16MiB body 上
 `test/plugins/synthetic` 是仓库内的最小跨来源告警样例：编译期独立构造
 EventSource + Normalizer + externalId 身份模式，测试从 Stele webhook、本地队列、
 Quoin Relay 到 SQLite 及统一告警读模型，不需要在主流程为其增添品牌分支。
-插件必须声明所有可能产出的 `EventTypes`；Stele 会在入队前拒绝未声明的类型，
-Quoin 同样在接收时复核。声明一个新类型不等于核心已有其投影处理器，当前仅 `alerts.batch` 可消费。
+插件必须声明所有可能产出的 `EventContracts{Type,Version}`；每条 `Event` 必须携带
+匹配的非零 `PayloadVersion`。Stele 在入队前核对并冻结版本、死信/重放保持版本；
+Quoin 再次复核且只按它支持的规范类型/版本投影（当前仅 `alerts.batch` v1）。
+声明一种新版本不等于核心已有对应投影，不支持的版本确定性拒绝并隔离。
 编译入站清单指纹会在 Stele→Quoin 的快照/投递 RPC 上交叉校验；改动事件契约时应
-更新插件 Version，并同批替换两宿主镜像。在更换载荷版本前先排空 Stele 本地队列，
-因为旧排队事件尚无逐条 payload version 可供新消费者迁移。
+更新插件 Version，并同批替换两宿主镜像。首次上线的 Stele 库结构不迁移旧队列；
+同结构下升级插件时旧排队事件保留其原载荷版本，消费者不支持则隔离而非改写。
 
 ## 提交后事件订阅
 
@@ -256,7 +258,8 @@ func init() {
 `AlertIdentityLabels` 要求 fingerprint 与 labels 一致，`AlertIdentityExternal` 要求每条携带
 非空的 `externalId`、不得同时携带 fingerprint。外部身份原文首观测冻结、SHA-256
 摘要用于来源内索引；缺失/冲突项不进入告警发生。提交后订阅与跨来源日报现已接入；
-**逐条入站 payload 版本仍未写入 Stele 队列**，因此发布新载荷前必须排空队列并同批升级。
+`alerts.batch` 当前唯一可消费的规范载荷版本是 v1；插件可修改来源原始协议并继续
+输出规范 v1。规范载荷本身不兼容时需要明确新增投影版本，而不是按新版重新解释旧队列。
 新平台若无法安全映射该身份模型，不应伪造标签以接入，
 应等待统一规范载荷的下一阶段实施。
 部署启用集合与来源实例的启用状态分别受控：未启用的插件不能创建新的告警源，

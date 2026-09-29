@@ -72,7 +72,7 @@ type sourceSettings struct {
 func Plugin() plugins.Plugin {
 	return plugins.Plugin{
 		ID: "synthetic-plugin", Version: "2", DisplayName: "Synthetic webhook",
-		EventSource: source{}, EventTypes: []string{"alerts.batch"},
+		EventSource: source{}, EventContracts: []plugins.EventContract{{Type: "alerts.batch", Version: 1}},
 		EventSourceConfigSchema: SourceSettingsSchema,
 		AlertNormalizer:         normalizer{}, AlertIdentity: plugins.AlertIdentityExternal,
 		// Trusted HTTP connection kind (ADR-0014): bounded probe contract,
@@ -145,7 +145,7 @@ func (source) VerifyAndParse(_ context.Context, req plugins.InboundRequest) ([]p
 	if err != nil {
 		return nil, err
 	}
-	return []plugins.Event{{Type: "alerts.batch", Payload: encoded}}, nil
+	return []plugins.Event{{Type: "alerts.batch", PayloadVersion: 1, Payload: encoded}}, nil
 }
 
 type normalizer struct{}

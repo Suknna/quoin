@@ -6045,7 +6045,7 @@ type AcquireConnectionCredentialResponse struct {
 	ConnectionRevisionId   int64                   `protobuf:"varint,2,opt,name=connection_revision_id,json=connectionRevisionId,proto3" json:"connection_revision_id,omitempty"`
 	CredentialGenerationId int64                   `protobuf:"varint,3,opt,name=credential_generation_id,json=credentialGenerationId,proto3" json:"credential_generation_id,omitempty"`
 	ConnectionType         string                  `protobuf:"bytes,4,opt,name=connection_type,json=connectionType,proto3" json:"connection_type,omitempty"`               // "prometheus" | "thanos"（connections.type）
-	RevisionConfigJson     []byte                  `protobuf:"bytes,5,opt,name=revision_config_json,json=revisionConfigJson,proto3" json:"revision_config_json,omitempty"` // 非秘密类型化投影（ThanosConnectionNonSecret，DATA-CONN-005）
+	RevisionConfigJson     []byte                  `protobuf:"bytes,5,opt,name=revision_config_json,json=revisionConfigJson,proto3" json:"revision_config_json,omitempty"` // 注册表声明连接种类的非秘密类型化投影（DATA-CONN-005）
 	Thanos                 *ThanosCredentialSecret `protobuf:"bytes,6,opt,name=thanos,proto3" json:"thanos,omitempty"`                                                     // prometheus/thanos 共用；connection_type 为权威判别
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
@@ -6235,7 +6235,7 @@ type AlertSourceSnapshot struct {
 	state       protoimpl.MessageState   `protogen:"open.v1"`
 	SourceId    int64                    `protobuf:"varint,1,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"` // alert_sources.id
 	SourceKey   string                   `protobuf:"bytes,2,opt,name=source_key,json=sourceKey,proto3" json:"source_key,omitempty"`
-	Protocol    string                   `protobuf:"bytes,3,opt,name=protocol,proto3" json:"protocol,omitempty"` // v1: alertmanager（= EventSource.Kind()）
+	Protocol    string                   `protobuf:"bytes,3,opt,name=protocol,proto3" json:"protocol,omitempty"` // 注册的 EventSource.Kind()；不限定来源品牌
 	Enabled     bool                     `protobuf:"varint,4,opt,name=enabled,proto3" json:"enabled,omitempty"`
 	Credentials []*CredentialDigestEntry `protobuf:"bytes,5,rep,name=credentials,proto3" json:"credentials,omitempty"` // 仅 active 凭据（<=2）
 	// 来源实例的非秘密设置文档（alert_sources.settings_json 原文字节；ADR-0014
@@ -6437,9 +6437,10 @@ type RelayEvent struct {
 	SourceId                  int64                  `protobuf:"varint,3,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`             // 匹配的 alert_sources.id
 	CredentialId              int64                  `protobuf:"varint,4,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"` // 命中的凭据
 	CredentialSnapshotVersion uint64                 `protobuf:"varint,5,opt,name=credential_snapshot_version,json=credentialSnapshotVersion,proto3" json:"credential_snapshot_version,omitempty"`
-	EventType                 string                 `protobuf:"bytes,6,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`    // 归一化事件类型（如 "alerts.batch"）
-	ReceivedAt                *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=received_at,json=receivedAt,proto3" json:"received_at,omitempty"` // Stele 收到外部请求的时间
-	Payload                   []byte                 `protobuf:"bytes,8,opt,name=payload,proto3" json:"payload,omitempty"`                         // 归一化事件 JSON
+	EventType                 string                 `protobuf:"bytes,6,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`                 // 归一化事件类型（如 "alerts.batch"）
+	ReceivedAt                *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=received_at,json=receivedAt,proto3" json:"received_at,omitempty"`              // Stele 收到外部请求的时间
+	Payload                   []byte                 `protobuf:"bytes,8,opt,name=payload,proto3" json:"payload,omitempty"`                                      // 归一化事件 JSON；必须与 payload_version 匹配
+	PayloadVersion            uint32                 `protobuf:"varint,9,opt,name=payload_version,json=payloadVersion,proto3" json:"payload_version,omitempty"` // 插件声明的规范载荷版本；0/未知版本确定性拒绝，旧队列不能按新格式解释
 	unknownFields             protoimpl.UnknownFields
 	sizeCache                 protoimpl.SizeCache
 }
@@ -6528,6 +6529,13 @@ func (x *RelayEvent) GetPayload() []byte {
 		return x.Payload
 	}
 	return nil
+}
+
+func (x *RelayEvent) GetPayloadVersion() uint32 {
+	if x != nil {
+		return x.PayloadVersion
+	}
+	return 0
 }
 
 type DeliverEventsResponse struct {
@@ -7035,7 +7043,7 @@ const file_runtime_proto_rawDesc = "" +
 	"\x06digest\x18\x02 \x01(\fR\x06digest\"\x7f\n" +
 	"\x14DeliverEventsRequest\x121\n" +
 	"\x14contract_fingerprint\x18\x01 \x01(\tR\x13contractFingerprint\x124\n" +
-	"\x06events\x18\x02 \x03(\v2\x1c.quoin.runtime.v1.RelayEventR\x06events\"\xc0\x02\n" +
+	"\x06events\x18\x02 \x03(\v2\x1c.quoin.runtime.v1.RelayEventR\x06events\"\xe9\x02\n" +
 	"\n" +
 	"RelayEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x1f\n" +
@@ -7048,7 +7056,8 @@ const file_runtime_proto_rawDesc = "" +
 	"event_type\x18\x06 \x01(\tR\teventType\x12;\n" +
 	"\vreceived_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"receivedAt\x12\x18\n" +
-	"\apayload\x18\b \x01(\fR\apayload\"X\n" +
+	"\apayload\x18\b \x01(\fR\apayload\x12'\n" +
+	"\x0fpayload_version\x18\t \x01(\rR\x0epayloadVersion\"X\n" +
 	"\x15DeliverEventsResponse\x12?\n" +
 	"\aresults\x18\x01 \x03(\x0e2%.quoin.runtime.v1.EventDeliveryStatusR\aresults*J\n" +
 	"\vRuntimeSlot\x12\x1c\n" +

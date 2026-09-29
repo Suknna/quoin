@@ -104,10 +104,10 @@ type Plugin struct {
 	// EventSource is the optional inbound capability: Stele's webhook layer
 	// dispatches POST /webhook/{source} requests here.
 	EventSource EventSource
-	// EventTypes is the non-empty list of normalized event types this source
-	// may enqueue. The gateway rejects emitted types not declared here before
-	// ACK; the control plane independently verifies the same declaration.
-	EventTypes []string
+	// EventContracts is the non-empty list of normalized event type/version
+	// pairs this source may enqueue. The gateway rejects undeclared pairs
+	// before ACK; the control plane independently verifies the declaration.
+	EventContracts []EventContract
 	// AlertNormalizer is the optional alert-normalization capability
 	// (ADR-0012): it maps this source's EventSource payload onto the unified
 	// alert semantics (severity/title/annotations). It requires EventSource

@@ -248,15 +248,15 @@ func (r *Registry) EventSource(kind string) (EventSource, string, bool) {
 }
 
 // SourceEvent reports whether the named source declares the normalized event
-// type. Source-kind ownership is checked at the same frozen assembly as
+// type and exact payload version. Source-kind ownership is checked at the same frozen assembly as
 // EventSource so gateway admission and Quoin dispatch use one authority.
-func (r *Registry) SourceEvent(kind, eventType string) bool {
+func (r *Registry) SourceEvent(kind, eventType string, payloadVersion uint32) bool {
 	r.mu.Lock()
 	r.ensureFrozen()
 	pluginID, ok := r.sources[kind]
 	if ok {
-		for _, declared := range r.plugins[pluginID].EventTypes {
-			if declared == eventType {
+		for _, declared := range r.plugins[pluginID].EventContracts {
+			if declared.Type == eventType && declared.Version == payloadVersion {
 				r.mu.Unlock()
 				return true
 			}
@@ -276,7 +276,7 @@ func (r *Registry) InboundManifestFingerprint() string {
 	r.ensureFrozen()
 	type declaration struct {
 		ID, Version, Kind, AlertIdentity string
-		EventTypes                       []string
+		EventContracts                   []EventContract
 		// EventSourceConfigSchema joins the manifest so two hosts cannot
 		// disagree on which instance settings a source accepts (ADR-0014
 		// story 2). Canonical JSON marshal sorts map keys, so the digest is
@@ -287,9 +287,14 @@ func (r *Registry) InboundManifestFingerprint() string {
 	manifest := make([]declaration, 0, len(r.sources))
 	for kind, id := range r.sources {
 		plugin := r.plugins[id]
-		events := append([]string{}, plugin.EventTypes...)
-		sort.Strings(events)
-		manifest = append(manifest, declaration{ID: id, Version: plugin.Version, Kind: kind, AlertIdentity: plugin.AlertIdentity, EventTypes: events, EventSourceConfigSchema: plugin.EventSourceConfigSchema})
+		events := append([]EventContract{}, plugin.EventContracts...)
+		sort.Slice(events, func(i, j int) bool {
+			if events[i].Type != events[j].Type {
+				return events[i].Type < events[j].Type
+			}
+			return events[i].Version < events[j].Version
+		})
+		manifest = append(manifest, declaration{ID: id, Version: plugin.Version, Kind: kind, AlertIdentity: plugin.AlertIdentity, EventContracts: events, EventSourceConfigSchema: plugin.EventSourceConfigSchema})
 	}
 	r.mu.Unlock()
 	sort.Slice(manifest, func(i, j int) bool { return manifest[i].Kind < manifest[j].Kind })
@@ -459,15 +464,16 @@ func validatePlugin(plugin Plugin) error {
 	if plugin.EventSource != nil && !sourceKindPattern.MatchString(plugin.EventSource.Kind()) {
 		return fmt.Errorf("%w: %s event source kind %q is not [a-z][a-z0-9-]*", ErrInvalidPlugin, plugin.ID, plugin.EventSource.Kind())
 	}
-	if plugin.EventSource != nil && len(plugin.EventTypes) == 0 || plugin.EventSource == nil && len(plugin.EventTypes) > 0 {
-		return fmt.Errorf("%w: %s event source and non-empty event types must be declared together", ErrInvalidPlugin, plugin.ID)
+	if plugin.EventSource != nil && len(plugin.EventContracts) == 0 || plugin.EventSource == nil && len(plugin.EventContracts) > 0 {
+		return fmt.Errorf("%w: %s event source and non-empty event contracts must be declared together", ErrInvalidPlugin, plugin.ID)
 	}
 	seenEvents := map[string]bool{}
-	for _, eventType := range plugin.EventTypes {
-		if eventType == "" || seenEvents[eventType] {
-			return fmt.Errorf("%w: %s has empty or duplicate event type %q", ErrInvalidPlugin, plugin.ID, eventType)
+	for _, event := range plugin.EventContracts {
+		key := fmt.Sprintf("%s\x00%d", event.Type, event.Version)
+		if event.Type == "" || event.Version == 0 || seenEvents[key] {
+			return fmt.Errorf("%w: %s has empty or duplicate event contract %q version %d", ErrInvalidPlugin, plugin.ID, event.Type, event.Version)
 		}
-		seenEvents[eventType] = true
+		seenEvents[key] = true
 	}
 	seenTemplates := map[string]bool{}
 	for _, template := range plugin.InspectionTemplates {

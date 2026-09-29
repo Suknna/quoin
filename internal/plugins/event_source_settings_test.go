@@ -17,8 +17,8 @@ func sourceSettingsRegistry(t *testing.T, schema map[string]any) *plugins.Regist
 	registry := plugins.NewRegistry()
 	plugin := plugins.Plugin{
 		ID: "settings-plugin", Version: "1", DefaultEnabled: true,
-		EventSource: stubSource{kind: "settings-source"},
-		EventTypes:  []string{"alerts.batch"},
+		EventSource:    stubSource{kind: "settings-source"},
+		EventContracts: []plugins.EventContract{{Type: "alerts.batch", Version: 1}},
 	}
 	if schema != nil {
 		plugin.EventSourceConfigSchema = schema
@@ -64,7 +64,7 @@ func TestEventSourceConfigSchemaMustBeClosed(t *testing.T) {
 		err := registry.Register(plugins.Plugin{
 			ID: "broken", Version: "1",
 			EventSource:             stubSource{kind: "broken-source"},
-			EventTypes:              []string{"alerts.batch"},
+			EventContracts:          []plugins.EventContract{{Type: "alerts.batch", Version: 1}},
 			EventSourceConfigSchema: schema,
 		})
 		if err == nil {

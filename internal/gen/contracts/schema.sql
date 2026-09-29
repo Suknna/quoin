@@ -360,6 +360,8 @@ CREATE TABLE alert_deliveries (
   credential_id              INTEGER NOT NULL REFERENCES alert_source_credentials(id) ON UPDATE RESTRICT ON DELETE RESTRICT, -- 每次 Delivery 必带认证元数据（DATA-ALERT-008）
   credential_snapshot_version INTEGER NOT NULL CHECK (credential_snapshot_version >= 1), -- Stele 提交的只读快照版本
   protocol                   TEXT NOT NULL,
+  event_type                 TEXT NOT NULL DEFAULT 'alerts.batch' CHECK (event_type = 'alerts.batch'),
+  payload_version            INTEGER NOT NULL DEFAULT 1 CHECK (payload_version = 1), -- 当前唯一已接受的规范投影版本
   body                       BLOB NOT NULL,          -- 精确原始 body 字节（可能非 UTF-8），直接存 SQLite（非 Artifact）
   body_size_bytes            INTEGER NOT NULL CHECK (body_size_bytes >= 0),
   integrity                  TEXT NOT NULL CHECK (integrity IN ('complete','truncated','rejected')),

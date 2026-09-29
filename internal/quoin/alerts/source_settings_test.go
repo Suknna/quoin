@@ -22,7 +22,7 @@ func TestSourceSettingsSnapshotAdvancesBeyondAllCredentialGenerations(t *testing
 	registry := settingsRegistry(t)
 	if err := registry.Register(plugins.Plugin{
 		ID: "plain-plugin", Version: "1", DefaultEnabled: true,
-		EventSource: plainSettingsSource{}, EventTypes: []string{"alerts.batch"},
+		EventSource: plainSettingsSource{}, EventContracts: []plugins.EventContract{{Type: "alerts.batch", Version: 1}},
 		AlertNormalizer: settingsStubNormalizer{}, AlertIdentity: plugins.AlertIdentityExternal,
 	}); err != nil {
 		t.Fatal(err)
@@ -92,8 +92,8 @@ func settingsRegistry(t *testing.T) *plugins.Registry {
 	type normalizer struct{}
 	if err := registry.Register(plugins.Plugin{
 		ID: "settings-plugin", Version: "1", DefaultEnabled: true,
-		EventSource: settingsStubSource{},
-		EventTypes:  []string{"alerts.batch"},
+		EventSource:    settingsStubSource{},
+		EventContracts: []plugins.EventContract{{Type: "alerts.batch", Version: 1}},
 		EventSourceConfigSchema: map[string]any{
 			"type":                 "object",
 			"additionalProperties": false,

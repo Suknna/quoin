@@ -149,10 +149,10 @@ func (server *steleRelayServer) deliverOneEvent(ctx context.Context, event *runt
 	// Only the canonical alert batch is currently a Quoin projection. Both
 	// the event type and its source must be registered; an unknown or disabled
 	// future projection cannot be acknowledged as processed.
-	if event.GetEventType() != "alerts.batch" {
+	if event.GetEventType() != "alerts.batch" || event.GetPayloadVersion() != 1 {
 		return runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED
 	}
-	if !server.alerts.SourceRegistry().SourceEvent(event.GetSourceKind(), event.GetEventType()) {
+	if !server.alerts.SourceRegistry().SourceEvent(event.GetSourceKind(), event.GetEventType(), event.GetPayloadVersion()) {
 		return runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED
 	}
 	if !server.alerts.SourceEnabled(event.GetSourceKind()) {

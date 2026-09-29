@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Suknna/quoin/internal/gen/proto/runtime/v1"
 )
 
 func openTestQueue(t *testing.T) *Queue {
@@ -25,7 +27,7 @@ func openTestQueue(t *testing.T) *Queue {
 func sampleEvent(id string) QueuedEvent {
 	return QueuedEvent{
 		ID: id, SourceKind: "alertmanager", SourceID: 7, CredentialID: 9,
-		CredentialSnapshotVersion: 3, EventType: "alerts.batch",
+		CredentialSnapshotVersion: 3, EventType: "alerts.batch", PayloadVersion: 1,
 		ReceivedAt: time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC),
 		Payload:    []byte(`{"status":"firing"}`),
 	}
@@ -359,58 +361,64 @@ func TestDeadLetterReplayValidatesInput(t *testing.T) {
 	}
 }
 
-// v1 老库原地迁移到 v2：dead_letters 补凭据列，既有行凭据记 0。
-func TestDeadLetterV1ToV2Migration(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	// 手工建一个 v1 布局的库（无凭据列）并落一条死信。
-	queue, err := OpenQueue(filepath.Join(root, "state"))
+func TestQueueRejectsUnknownPriorLayoutWithoutMutation(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	queue, err := OpenQueue(root)
 	if err != nil {
-		t.Fatalf("open: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := queue.db.Exec(`CREATE TABLE dead_letters_v1_backup AS SELECT * FROM dead_letters`); err != nil {
-		t.Fatalf("backup: %v", err)
+	if _, err := queue.db.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := queue.db.Exec(`DROP TABLE dead_letters`); err != nil {
-		t.Fatalf("drop: %v", err)
-	}
-	if _, err := queue.db.Exec(`CREATE TABLE dead_letters(
-		id TEXT PRIMARY KEY, source_kind TEXT NOT NULL, source_id INTEGER NOT NULL,
-		event_type TEXT NOT NULL, payload BLOB NOT NULL, reason TEXT NOT NULL,
-		attempts INTEGER NOT NULL, first_received_at TEXT NOT NULL, dead_at TEXT NOT NULL)`); err != nil {
-		t.Fatalf("recreate v1: %v", err)
-	}
-	if _, err := queue.db.Exec(`INSERT INTO dead_letters VALUES('legacy-1','alertmanager',7,'alerts.batch','{}','rejected',2,'2026-09-20T00:00:00.000000000Z','2026-09-20T01:00:00.000000000Z')`); err != nil {
-		t.Fatalf("seed legacy: %v", err)
-	}
-	if _, err := queue.db.Exec(`PRAGMA user_version = 1`); err != nil {
-		t.Fatalf("stamp v1: %v", err)
-	}
-	if _, err := queue.db.Exec(`DROP TABLE dead_letters_v1_backup`); err != nil {
-		t.Fatalf("drop backup: %v", err)
+	var version int
+	if err := queue.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 2 {
+		t.Fatalf("old queue version=%d err=%v", version, err)
 	}
 	if err := queue.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+		t.Fatal(err)
 	}
-	// 重新打开触发 v1 → v2 迁移：凭据列出现，既有行记 0。
-	reopened, err := OpenQueue(filepath.Join(root, "state"))
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
+	if reopened, err := OpenQueue(root); err == nil {
+		reopened.Close()
+		t.Fatal("unknown old queue must not be silently migrated or interpreted as canonical v1")
 	}
-	defer reopened.Close()
-	letters, err := reopened.ListDeadLetters(ctx, DeadLetterFilter{})
-	if err != nil {
-		t.Fatalf("list after migration: %v", err)
+	if readOnly, err := OpenQueueReadOnly(root); err == nil {
+		readOnly.Close()
+		t.Fatal("read-only queue must not guess the old layout's payload versions")
 	}
-	if len(letters) != 1 || letters[0].ID != "legacy-1" || letters[0].CredentialID != 0 {
-		t.Fatalf("migrated letters=%+v", letters)
+}
+
+func TestQueuePreservesPayloadVersionThroughRetryDeadletterAndReplay(t *testing.T) {
+	ctx := context.Background()
+	queue := openTestQueue(t)
+	bad := sampleEvent("zero-version")
+	bad.PayloadVersion = 0
+	if err := queue.EnqueueEvents(ctx, []QueuedEvent{sampleEvent("rolled-back"), bad}); err == nil {
+		t.Fatal("versionless event must not enter the accepted queue")
 	}
-	// 凭据为 0 的既有行重放必须要求显式凭据。
-	if _, err := reopened.ReplayDeadLetters(ctx, []string{"legacy-1"}, 0, 0); err == nil {
-		t.Fatal("replaying a credential-less legacy row must require an explicit credential")
+	if depth, err := queue.QueueDepth(ctx); err != nil || depth != 0 {
+		t.Fatalf("a batch with one versionless item left accepted events queued: depth=%d err=%v", depth, err)
 	}
-	replayed, err := reopened.ReplayDeadLetters(ctx, []string{"legacy-1"}, 11, 2)
-	if err != nil || replayed != 1 {
-		t.Fatalf("legacy replay=(%d,%v)", replayed, err)
+	event := sampleEvent("versioned")
+	event.PayloadVersion = 2
+	if err := queue.EnqueueEvents(ctx, []QueuedEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	fetched, err := queue.FetchDueBatch(ctx, 10, time.Now().UTC())
+	if err != nil || len(fetched) != 1 || fetched[0].PayloadVersion != 2 || fetched[0].RelayEvent().GetPayloadVersion() != 2 {
+		t.Fatalf("due versioned event=%+v err=%v", fetched, err)
+	}
+	if _, err := queue.MarkResult(ctx, event.ID, runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	letters, err := queue.ListDeadLetters(ctx, DeadLetterFilter{})
+	if err != nil || len(letters) != 1 || letters[0].PayloadVersion != 2 {
+		t.Fatalf("dead letter version=%+v err=%v", letters, err)
+	}
+	if _, err := queue.ReplayDeadLetters(ctx, []string{event.ID}, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	fetched, err = queue.FetchDueBatch(ctx, 10, time.Now().UTC())
+	if err != nil || len(fetched) != 1 || fetched[0].PayloadVersion != 2 {
+		t.Fatalf("replayed versioned event=%+v err=%v", fetched, err)
 	}
 }

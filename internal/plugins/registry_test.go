@@ -28,8 +28,8 @@ func newTestRegistry(t *testing.T) *plugins.Registry {
 	registry := plugins.NewRegistry()
 	if err := registry.Register(plugins.Plugin{
 		ID: "alpha", Version: "1", DefaultEnabled: true,
-		EventSource: stubSource{kind: "alphaevents"},
-		EventTypes:  []string{"alerts.batch"},
+		EventSource:    stubSource{kind: "alphaevents"},
+		EventContracts: []plugins.EventContract{{Type: "alerts.batch", Version: 1}},
 		Tools: stubProvider{entries: []plugins.ToolEntry{
 			plugins.Tool[echoArgs, echoResult]{
 				Name: "alpha_query", Version: "3", FailureMode: plugins.FailureReturnToModel,
@@ -72,7 +72,7 @@ func TestRegistryEventSourceLookup(t *testing.T) {
 	if _, _, ok := registry.EventSource("missing"); ok {
 		t.Fatal("unknown event source kind resolved")
 	}
-	if !registry.SourceEvent("alphaevents", "alerts.batch") || registry.SourceEvent("alphaevents", "undeclared") {
+	if !registry.SourceEvent("alphaevents", "alerts.batch", 1) || registry.SourceEvent("alphaevents", "alerts.batch", 0) || registry.SourceEvent("alphaevents", "alerts.batch", 2) || registry.SourceEvent("alphaevents", "undeclared", 1) {
 		t.Fatal("event contract lookup failed")
 	}
 }
@@ -83,11 +83,37 @@ func TestInboundManifestFingerprintTracksVersionNotRegistrationOrder(t *testing.
 		t.Fatalf("manifest fingerprint %q must be SHA-256 hex", first)
 	}
 	second := plugins.NewRegistry()
-	if err := second.Register(plugins.Plugin{ID: "alpha", Version: "2", DefaultEnabled: true, EventSource: stubSource{kind: "alphaevents"}, EventTypes: []string{"alerts.batch"}}); err != nil {
+	if err := second.Register(plugins.Plugin{ID: "alpha", Version: "2", DefaultEnabled: true, EventSource: stubSource{kind: "alphaevents"}, EventContracts: []plugins.EventContract{{Type: "alerts.batch", Version: 1}}}); err != nil {
 		t.Fatal(err)
 	}
 	if first == second.InboundManifestFingerprint() {
 		t.Fatal("source version drift did not change the manifest fingerprint")
+	}
+	third := plugins.NewRegistry()
+	if err := third.Register(plugins.Plugin{ID: "alpha", Version: "1", DefaultEnabled: true, EventSource: stubSource{kind: "alphaevents"}, EventContracts: []plugins.EventContract{{Type: "alerts.batch", Version: 2}}}); err != nil {
+		t.Fatal(err)
+	}
+	if first == third.InboundManifestFingerprint() {
+		t.Fatal("normalized event schema drift did not change the inbound manifest")
+	}
+}
+
+func TestRegistryRejectsZeroAndDuplicateInboundSchemaVersions(t *testing.T) {
+	for _, contracts := range [][]plugins.EventContract{
+		{{Type: "alerts.batch", Version: 0}},
+		{{Type: "alerts.batch", Version: 1}, {Type: "alerts.batch", Version: 1}},
+	} {
+		registry := plugins.NewRegistry()
+		if err := registry.Register(plugins.Plugin{ID: "bad", Version: "1", EventSource: stubSource{kind: "bad"}, EventContracts: contracts}); err == nil {
+			t.Fatalf("accepted invalid inbound declarations: %+v", contracts)
+		}
+	}
+	registry := plugins.NewRegistry()
+	if err := registry.Register(plugins.Plugin{ID: "multi", Version: "1", EventSource: stubSource{kind: "multi"}, EventContracts: []plugins.EventContract{{Type: "alerts.batch", Version: 1}, {Type: "alerts.batch", Version: 2}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !registry.SourceEvent("multi", "alerts.batch", 1) || !registry.SourceEvent("multi", "alerts.batch", 2) {
+		t.Fatal("declared canonical schema generations were lost")
 	}
 }
 

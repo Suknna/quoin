@@ -198,7 +198,7 @@ func TestSteleRelayRegisteredSecondAlertSource(t *testing.T) {
 		response, err := client.DeliverEvents(ctx, &runtimev1.DeliverEventsRequest{
 			ContractFingerprint: contract.ProtoAuthorityFingerprint,
 			Events: []*runtimev1.RelayEvent{{
-				EventId: id, SourceKind: kind, EventType: eventType, SourceId: source.SourceID,
+				EventId: id, SourceKind: kind, EventType: eventType, PayloadVersion: 1, SourceId: source.SourceID,
 				CredentialId: source.CredentialID, CredentialSnapshotVersion: 1, Payload: payload,
 			}},
 		})
@@ -442,7 +442,7 @@ func TestSteleRelayMTLSIdentityAndDelivery(t *testing.T) {
 			Events: []*runtimev1.RelayEvent{{
 				EventId: eventID, SourceKind: "alertmanager", SourceId: result.SourceID,
 				CredentialId: result.CredentialID, CredentialSnapshotVersion: snapshot.GetSnapshotVersion(),
-				EventType: "alerts.batch", Payload: body,
+				EventType: "alerts.batch", PayloadVersion: 1, Payload: body,
 			}},
 		})
 		if err != nil {
@@ -465,6 +465,11 @@ func TestSteleRelayMTLSIdentityAndDelivery(t *testing.T) {
 	var deliveryCount int
 	if err := harness.database.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM alert_deliveries`).Scan(&deliveryCount); err != nil || deliveryCount != 1 {
 		t.Fatalf("delivery count=%d err=%v", deliveryCount, err)
+	}
+	var storedType string
+	var storedVersion uint32
+	if err := harness.database.SQL.QueryRowContext(ctx, `SELECT event_type, payload_version FROM alert_deliveries WHERE event_id='relay-e2e-1'`).Scan(&storedType, &storedVersion); err != nil || storedType != "alerts.batch" || storedVersion != 1 {
+		t.Fatalf("accepted event contract=%q/%d err=%v", storedType, storedVersion, err)
 	}
 
 	// A missing or malformed contract fingerprint must never provide a legacy
@@ -501,7 +506,7 @@ func TestSteleRelayDeliverEventsPerEventAdjudication(t *testing.T) {
 		Events: []*runtimev1.RelayEvent{
 			{EventId: "batch-unknown-kind", SourceKind: "webhook", Payload: []byte(`{}`)},
 			{EventId: "batch-empty-id", SourceKind: "alertmanager"},
-			{EventId: "batch-good", SourceKind: "alertmanager", EventType: "alerts.batch", SourceId: result.SourceID,
+			{EventId: "batch-good", SourceKind: "alertmanager", EventType: "alerts.batch", PayloadVersion: 1, SourceId: result.SourceID,
 				CredentialId: result.CredentialID, CredentialSnapshotVersion: 1, Payload: body},
 		},
 	})
@@ -521,6 +526,26 @@ func TestSteleRelayDeliverEventsPerEventAdjudication(t *testing.T) {
 	if results[2] != runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_ACCEPTED {
 		t.Fatalf("alertmanager result=%v, want ACCEPTED", results[2])
 	}
+	// Even the same registered source and event type cannot reinterpret
+	// versionless/next-version queue bytes as the v1 alert projection.
+	unknownVersions, err := steleClient.DeliverEvents(ctx, &runtimev1.DeliverEventsRequest{
+		ContractFingerprint: contract.ProtoAuthorityFingerprint,
+		Events: []*runtimev1.RelayEvent{
+			{EventId: "batch-version-zero", SourceKind: "alertmanager", EventType: "alerts.batch", SourceId: result.SourceID,
+				CredentialId: result.CredentialID, CredentialSnapshotVersion: 1, Payload: body},
+			{EventId: "batch-version-two", SourceKind: "alertmanager", EventType: "alerts.batch", PayloadVersion: 2, SourceId: result.SourceID,
+				CredentialId: result.CredentialID, CredentialSnapshotVersion: 1, Payload: body},
+		},
+	})
+	if err != nil || len(unknownVersions.GetResults()) != 2 ||
+		unknownVersions.GetResults()[0] != runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED ||
+		unknownVersions.GetResults()[1] != runtimev1.EventDeliveryStatus_EVENT_DELIVERY_STATUS_REJECTED {
+		t.Fatalf("unknown canonical payload versions results=%v err=%v", unknownVersions.GetResults(), err)
+	}
+	var versionedDeliveries int
+	if err := harness.database.SQL.QueryRow(`SELECT COUNT(*) FROM alert_deliveries WHERE event_id IN ('batch-version-zero','batch-version-two')`).Scan(&versionedDeliveries); err != nil || versionedDeliveries != 0 {
+		t.Fatalf("unknown versions reached business projection: deliveries=%d err=%v", versionedDeliveries, err)
+	}
 
 	// 底层投递失败（关闭写库模拟库不可用）必须映射 UNAVAILABLE，供 Stele
 	// 稍后重试。sql.DB.Close 幂等，t.Cleanup 的二次关闭无害。
@@ -530,7 +555,7 @@ func TestSteleRelayDeliverEventsPerEventAdjudication(t *testing.T) {
 	retry, err := steleClient.DeliverEvents(ctx, &runtimev1.DeliverEventsRequest{
 		ContractFingerprint: contract.ProtoAuthorityFingerprint,
 		Events: []*runtimev1.RelayEvent{{
-			EventId: "batch-unavailable", SourceKind: "alertmanager", EventType: "alerts.batch", SourceId: result.SourceID,
+			EventId: "batch-unavailable", SourceKind: "alertmanager", EventType: "alerts.batch", PayloadVersion: 1, SourceId: result.SourceID,
 			CredentialId: result.CredentialID, CredentialSnapshotVersion: 1, Payload: body,
 		}},
 	})

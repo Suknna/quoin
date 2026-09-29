@@ -101,11 +101,11 @@ func deadLettersList(args []string) error {
 	}
 	toTerminal := term.IsTerminal(int(os.Stdout.Fd()))
 	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(writer, "ID\tSOURCE\tREASON\tATTEMPTS\tFIRST_RECEIVED\tDEAD_AT\tPAYLOAD")
+	fmt.Fprintln(writer, "ID\tSOURCE\tEVENT_TYPE\tPAYLOAD_VERSION\tREASON\tATTEMPTS\tFIRST_RECEIVED\tDEAD_AT\tPAYLOAD")
 	for _, letter := range letters {
 		payload := payloadForDisplay(letter.Payload, *full, toTerminal)
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
-			letter.ID, letter.SourceKind, letter.Reason, letter.Attempts,
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\n",
+			letter.ID, letter.SourceKind, letter.EventType, letter.PayloadVersion, letter.Reason, letter.Attempts,
 			letter.FirstReceivedAt.Format(time.RFC3339), letter.DeadAt.Format(time.RFC3339), payload)
 	}
 	if err := writer.Flush(); err != nil {

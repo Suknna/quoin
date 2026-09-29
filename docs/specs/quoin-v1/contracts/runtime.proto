@@ -912,7 +912,7 @@ message AcquireConnectionCredentialResponse {
   int64 connection_revision_id = 2;
   int64 credential_generation_id = 3;
   string connection_type = 4;     // "prometheus" | "thanos"（connections.type）
-  bytes revision_config_json = 5; // 非秘密类型化投影（ThanosConnectionNonSecret，DATA-CONN-005）
+  bytes revision_config_json = 5; // 注册表声明连接种类的非秘密类型化投影（DATA-CONN-005）
   ThanosCredentialSecret thanos = 6; // prometheus/thanos 共用；connection_type 为权威判别
 }
 
@@ -935,7 +935,7 @@ message GetCredentialSnapshotResponse {
 message AlertSourceSnapshot {
   int64 source_id = 1;             // alert_sources.id
   string source_key = 2;
-  string protocol = 3;             // v1: alertmanager（= EventSource.Kind()）
+  string protocol = 3;             // 注册的 EventSource.Kind()；不限定来源品牌
   bool enabled = 4;
   repeated CredentialDigestEntry credentials = 5; // 仅 active 凭据（<=2）
   // 来源实例的非秘密设置文档（alert_sources.settings_json 原文字节；ADR-0014
@@ -970,7 +970,8 @@ message RelayEvent {
   uint64 credential_snapshot_version = 5;
   string event_type = 6;        // 归一化事件类型（如 "alerts.batch"）
   google.protobuf.Timestamp received_at = 7; // Stele 收到外部请求的时间
-  bytes payload = 8;            // 归一化事件 JSON
+  bytes payload = 8;            // 归一化事件 JSON；必须与 payload_version 匹配
+  uint32 payload_version = 9;   // 插件声明的规范载荷版本；0/未知版本确定性拒绝，旧队列不能按新格式解释
 }
 
 message DeliverEventsResponse {
